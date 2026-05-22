@@ -1,0 +1,22 @@
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+plan_mode_reasoning_effort = "xhigh"
+approvals_reviewer = "user"
+[projects."/home/dongwonttuna"]
+trust_level = "trusted"
+
+[projects."/home/dongwonttuna/Documents/Programming/rs-builder-relayer-client"]
+trust_level = "trusted"
+
+[plugins."github@openai-curated"]
+enabled = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+
+[features]
+terminal_resize_reflow = true
+memories = true
+mentions_v2 = true
+goals = true
+prevent_idle_sleep = true

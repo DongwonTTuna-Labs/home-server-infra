@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly per-runner Codex ChatGPT auth refresh for GitHub Actions runner containers
+
+[Timer]
+OnCalendar=Sun 03:20
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

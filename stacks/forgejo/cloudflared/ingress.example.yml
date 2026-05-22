@@ -1,0 +1,9 @@
+tunnel: forgejo
+credentials-file: /home/dongwonttuna/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: git.dongwontuna.net
+    service: http://localhost:3000
+  - hostname: ssh.dongwontuna.net
+    service: ssh://localhost:2222
+  - service: http_status:404

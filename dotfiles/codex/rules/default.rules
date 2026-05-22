@@ -1,0 +1,6 @@
+prefix_rule(pattern=["gh", "auth", "status"], decision="allow")
+prefix_rule(pattern=["gh", "pr", "checks"], decision="allow")
+prefix_rule(pattern=["codex", "login", "status"], decision="allow")
+prefix_rule(pattern=["docker", "ps", "--format", "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"], decision="allow")
+prefix_rule(pattern=["ssh", "-T", "git@ssh.dongwontuna.net"], decision="allow")
+
