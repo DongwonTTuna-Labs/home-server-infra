@@ -6,12 +6,36 @@ services:
     privileged: true
     restart: unless-stopped
     command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "--tls=false"]
+    volumes:
+      - dind-data:/var/lib/docker
+
+  rust-node-image:
+    image: docker:cli
+    depends_on:
+      - docker-in-docker
+    environment:
+      DOCKER_HOST: tcp://docker-in-docker:2375
+    volumes:
+      - ./images:/images:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          if docker info >/dev/null 2>&1; then
+            break
+          fi
+          sleep 2
+        done
+        docker build --pull -t forgejo-rust-node:1-bookworm-node24 /images/rust-node
 
   runner:
     image: data.forgejo.org/forgejo/runner:4.0.0
     restart: unless-stopped
     depends_on:
-      - docker-in-docker
+      rust-node-image:
+        condition: service_completed_successfully
     environment:
       DOCKER_HOST: tcp://docker-in-docker:2375
     user: "1001:1001"
@@ -27,3 +51,6 @@ networks:
   forgejo:
     external: true
     name: forgejo_forgejo
+
+volumes:
+  dind-data:

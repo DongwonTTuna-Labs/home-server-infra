@@ -11,7 +11,7 @@ runner:
   report_interval: 1s
   labels:
     - ubuntu-latest:docker://node:24-bookworm
-    - rust:docker://rust:1-bookworm
+    - rust:docker://forgejo-rust-node:1-bookworm-node24
 
 cache:
   enabled: true
@@ -20,4 +20,3 @@ cache:
 container:
   docker_host: tcp://docker-in-docker:2375
   force_pull: false
-
