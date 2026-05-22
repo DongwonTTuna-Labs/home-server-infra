@@ -8,15 +8,17 @@ services:
     command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "--tls=false"]
     volumes:
       - dind-data:/var/lib/docker
+      - codex-runner-home:/codex-runner-home
+      - codex-runner-locks:/codex-runner-locks
 
-  rust-node-image:
+  dongwontuna-labs-runner-image:
     image: docker:cli
     depends_on:
       - docker-in-docker
     environment:
       DOCKER_HOST: tcp://docker-in-docker:2375
     volumes:
-      - ./images:/images:ro
+      - ../codex-github-runners:/runner-image-context:ro
     command:
       - /bin/sh
       - -c
@@ -28,20 +30,20 @@ services:
           fi
           sleep 2
         done
-        docker build --pull -t forgejo-rust-node:1-bookworm-node24 /images/rust-node
+        docker build --pull -t dongwontuna-labs-runner:latest /runner-image-context
 
   runner:
     image: data.forgejo.org/forgejo/runner:4.0.0
     restart: unless-stopped
     depends_on:
-      rust-node-image:
+      dongwontuna-labs-runner-image:
         condition: service_completed_successfully
     environment:
       DOCKER_HOST: tcp://docker-in-docker:2375
     user: "1001:1001"
     volumes:
       - ./runner/data:/data
-      - ./runner-config.yaml:/data/config.yaml:ro
+      - ./config.yaml:/data/config.yaml:ro
     command: /bin/sh -c "sleep 5; forgejo-runner daemon -c /data/config.yaml"
     networks:
       - default
@@ -53,4 +55,10 @@ networks:
     name: forgejo_forgejo
 
 volumes:
+  codex-runner-home:
+    external: true
+    name: codex-github-runners_codex_runner_01_home
+  codex-runner-locks:
+    external: true
+    name: codex-github-runners_codex_runner_locks
   dind-data:

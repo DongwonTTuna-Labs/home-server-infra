@@ -12,7 +12,7 @@ x-common-environment: &common-environment
   RUNNER_TEMP: /home/runner/_work/_temp
 
 x-runner-common: &runner-common
-  image: codex-github-runner:latest
+  image: dongwontuna-labs-runner:latest
   build:
     context: .
   secrets:

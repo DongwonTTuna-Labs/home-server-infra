@@ -10,8 +10,7 @@ runner:
   fetch_interval: 2s
   report_interval: 1s
   labels:
-    - ubuntu-latest:docker://node:24-bookworm
-    - rust:docker://forgejo-rust-node:1-bookworm-node24
+    - dongwontuna-labs-runner:docker://dongwontuna-labs-runner:latest
 
 cache:
   enabled: true
@@ -20,3 +19,6 @@ cache:
 container:
   docker_host: tcp://docker-in-docker:2375
   force_pull: false
+  options: >-
+    --volume /codex-runner-home:/home/runner/.codex
+    --volume /codex-runner-locks:/var/lib/codex-runner/locks

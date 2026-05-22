@@ -37,6 +37,13 @@ chmod 0600 state/github_pat
 The image installs `@openai/codex@latest`. Use `--pull --no-cache` when
 rebuilding so Docker does not reuse an older npm install layer.
 
+The shared image is published locally as `dongwontuna-labs-runner:latest`. It
+also includes the latest Node.js 24.x line, Bun, Rust, Cargo, Clippy, Rustfmt,
+the native C build toolchain, pkg-config, OpenSSL headers, Python, Git, SSH,
+curl, jq, and the Codex auth guard. Forgejo Actions uses the same image through
+the `dongwontuna-labs-runner` label, while these legacy GitHub runners keep
+their existing `codex` labels for archived GitHub workflows.
+
 The running containers also keep Codex CLI current. `entrypoint.sh` checks npm
 before the runner starts, and the pre-job hook checks again before each GitHub
 Actions job is released. By default `CODEX_CLI_AUTO_UPDATE=1` and
