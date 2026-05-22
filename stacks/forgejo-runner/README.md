@@ -20,6 +20,11 @@ volume into job containers at `/home/runner/.codex` and the existing
 `/var/lib/codex-runner/locks`. Workflows must not print auth files or token
 material.
 
+Forgejo runner only passes bind mounts declared in `container.valid_volumes`.
+Keep `/codex-runner-home` and `/codex-runner-locks` in that allowlist whenever
+the Codex auth mounts are used; otherwise the runner logs `is not a valid volume`
+and silently starts Codex jobs without the ChatGPT-managed auth state.
+
 Useful checks:
 
 ```bash

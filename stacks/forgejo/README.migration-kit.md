@@ -77,17 +77,22 @@ Forgejo Actions need a runner. Generate a 40-character hex secret:
 openssl rand -hex 20
 ```
 
-Put it in `.env` as `FORGEJO_RUNNER_SECRET`, then run:
+Put it in `.env` as `FORGEJO_RUNNER_SECRET`. Keep
+`FORGEJO_RUNNER_INSTANCE_URL` set to a public URL that job containers can
+resolve, such as `https://git.dongwontuna.net`; using the internal Compose DNS
+name (`http://forgejo:3000`) makes Node-based artifact actions fail with DNS
+errors inside Docker-in-Docker jobs.
+
+Then run:
 
 ```sh
 scripts/register-runner.sh
 docker compose --env-file .env -f runner.compose.yaml up -d
 ```
 
-The default labels are:
+The default label is:
 
-- `ubuntu-latest:docker://node:24-bookworm`
-- `rust:docker://rust:1-bookworm`
+- `dongwontuna-labs-runner:docker://dongwontuna-labs-runner:latest`
 
 ## 4. Freeze and Back Up
 

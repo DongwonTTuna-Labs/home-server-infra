@@ -16,6 +16,11 @@ if [[ ! "$FORGEJO_RUNNER_SECRET" =~ ^[0-9a-fA-F]{40}$ ]]; then
   exit 1
 fi
 
+if [[ "$FORGEJO_RUNNER_INSTANCE_URL" =~ ^https?://forgejo(:|/|$) ]]; then
+  echo "FORGEJO_RUNNER_INSTANCE_URL must be a URL reachable from job containers, such as https://git.dongwontuna.net" >&2
+  exit 1
+fi
+
 "$ROOT_DIR/scripts/prepare-dirs.sh"
 
 docker compose --env-file "$ROOT_DIR/.env" -f "$ROOT_DIR/compose.yaml" exec forgejo \

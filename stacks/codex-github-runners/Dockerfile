@@ -128,6 +128,8 @@ RUN chmod 0755 \
         "${RUSTUP_HOME}" \
         /var/lib/codex-runner
 
+ENV HOME=/home/runner
+
 USER runner
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/codex-runner/entrypoint.sh"]
