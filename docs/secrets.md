@@ -16,6 +16,9 @@ secret stores.
 
 ## Forgejo Secrets
 
+- Local `fj-local-cli` access token
+  - Scope: `write:issue,write:repository,read:user,read:organization`
+  - Repository access: all repositories
 - `FORGEJO_BOT_TOKEN`
 - `CLOUDFLARE_API_TOKEN` for deploy-capable repositories
 - Optional `CODEX_REVIEW_COMMAND` when Codex review automation is enabled
@@ -27,4 +30,3 @@ secret stores.
 - Codex `auth.json`, sqlite state, logs, sessions, attachments, generated images
 - SSH private keys under `~/.ssh`
 - GitHub CLI `hosts.yml`
-

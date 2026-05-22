@@ -26,7 +26,8 @@ RUN set -eux; \
     test -n "$tarball"; \
     curl -fsSL "$release_url/$tarball" -o "/tmp/$tarball"; \
     curl -fsSL "$release_url/SHASUMS256.txt" -o /tmp/SHASUMS256.txt; \
-    grep "  $tarball$" /tmp/SHASUMS256.txt | sha256sum -c -; \
+    cd /tmp; \
+    grep "  $tarball$" SHASUMS256.txt | sha256sum -c -; \
     tar -xJf "/tmp/$tarball" -C /usr/local --strip-components=1; \
     rm -f "/tmp/$tarball" /tmp/SHASUMS256.txt; \
     node --version; \
