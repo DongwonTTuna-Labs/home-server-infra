@@ -22,6 +22,3 @@ container:
   valid_volumes:
     - /codex-runner-home
     - /codex-runner-locks
-  options: >-
-    --volume /codex-runner-home:/home/runner/.codex
-    --volume /codex-runner-locks:/var/lib/codex-runner/locks

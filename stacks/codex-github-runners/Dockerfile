@@ -50,6 +50,8 @@ RUN apt-get update \
         openssh-client \
         pkg-config \
         python3 \
+        python3-pip \
+        python3-yaml \
         sudo \
         tar \
         tini \
