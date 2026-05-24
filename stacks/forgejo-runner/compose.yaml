@@ -1,5 +1,19 @@
 name: forgejo-runner
 
+x-runner-common: &runner-common
+  image: data.forgejo.org/forgejo/runner:4.0.0
+  restart: unless-stopped
+  depends_on:
+    dongwontuna-labs-runner-image:
+      condition: service_completed_successfully
+  environment:
+    DOCKER_HOST: tcp://docker-in-docker:2375
+  user: "1001:1001"
+  command: /bin/sh -c "sleep 5; forgejo-runner daemon -c /data/config.yaml"
+  networks:
+    - default
+    - forgejo
+
 services:
   docker-in-docker:
     image: docker:dind
@@ -32,22 +46,90 @@ services:
         done
         docker build --pull -t dongwontuna-labs-runner:latest /runner-image-context
 
-  runner:
-    image: data.forgejo.org/forgejo/runner:4.0.0
-    restart: unless-stopped
-    depends_on:
-      dongwontuna-labs-runner-image:
-        condition: service_completed_successfully
-    environment:
-      DOCKER_HOST: tcp://docker-in-docker:2375
+  runner-01:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-01
     user: "1001:1001"
     volumes:
-      - ./runner/data:/data
+      - ./runner/runner-01:/data
       - ./config.yaml:/data/config.yaml:ro
-    command: /bin/sh -c "sleep 5; forgejo-runner daemon -c /data/config.yaml"
-    networks:
-      - default
-      - forgejo
+
+  runner-02:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-02
+    volumes:
+      - ./runner/runner-02:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-03:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-03
+    volumes:
+      - ./runner/runner-03:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-04:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-04
+    volumes:
+      - ./runner/runner-04:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-05:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-05
+    volumes:
+      - ./runner/runner-05:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-06:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-06
+    volumes:
+      - ./runner/runner-06:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-07:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-07
+    volumes:
+      - ./runner/runner-07:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-08:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-08
+    volumes:
+      - ./runner/runner-08:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-09:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-09
+    volumes:
+      - ./runner/runner-09:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-10:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-10
+    volumes:
+      - ./runner/runner-10:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-11:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-11
+    volumes:
+      - ./runner/runner-11:/data
+      - ./config.yaml:/data/config.yaml:ro
+
+  runner-12:
+    <<: *runner-common
+    container_name: forgejo-runner-runner-12
+    volumes:
+      - ./runner/runner-12:/data
+      - ./config.yaml:/data/config.yaml:ro
 
 networks:
   forgejo:
@@ -57,8 +139,8 @@ networks:
 volumes:
   codex-runner-home:
     external: true
-    name: codex-github-runners_codex_runner_01_home
+    name: forgejo-runner_codex_home
   codex-runner-locks:
     external: true
-    name: codex-github-runners_codex_runner_locks
+    name: forgejo-runner_codex_locks
   dind-data:

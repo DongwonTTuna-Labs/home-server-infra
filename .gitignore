@@ -36,6 +36,7 @@ postgres/
 /forgejo/
 runner/data/
 **/runner/data/
+stacks/forgejo-runner/runner/
 backups/
 **/backups/
 metadata/

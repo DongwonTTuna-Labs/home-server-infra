@@ -3,7 +3,7 @@ log:
 
 runner:
   file: /data/.runner
-  capacity: 2
+  capacity: 1
   timeout: 3h
   shutdown_timeout: 3h
   fetch_timeout: 5s

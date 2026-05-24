@@ -14,11 +14,10 @@ Docker-in-Docker daemon as `dongwontuna-labs-runner:latest`. It includes Node.js
 pkg-config, OpenSSL headers, Python, Git, SSH, curl, jq, Codex CLI, and the
 Codex auth guard.
 
-The runner mounts the existing `codex-github-runners_codex_runner_01_home`
-volume into job containers at `/home/runner/.codex` and the existing
-`codex-github-runners_codex_runner_locks` volume at
-`/var/lib/codex-runner/locks`. Workflows must not print auth files or token
-material.
+The runner mounts the Forgejo-owned `forgejo-runner_codex_home` volume into job
+containers at `/home/runner/.codex` and the `forgejo-runner_codex_locks` volume
+for Codex auth locks and short-lived per-job auth copies. Workflows must not
+print auth files or token material.
 
 Forgejo runner only passes bind mounts declared in `container.valid_volumes`.
 Keep `/codex-runner-home` and `/codex-runner-locks` in that allowlist whenever
@@ -31,4 +30,5 @@ Useful checks:
 docker compose -f stacks/forgejo-runner/compose.yaml config
 docker run --rm --entrypoint sh dongwontuna-labs-runner:latest -lc \
   'node --version && npm --version && bun --version && rustc --version && cargo --version && cargo clippy --version && rustfmt --version && codex --version && python3 --version && git --version'
+stacks/forgejo-runner/scripts/refresh-codex-auth.sh
 ```
