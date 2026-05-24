@@ -29,6 +29,6 @@ Useful checks:
 ```bash
 docker compose -f stacks/forgejo-runner/compose.yaml config
 docker run --rm --entrypoint sh dongwontuna-labs-runner:latest -lc \
-  'node --version && npm --version && bun --version && rustc --version && cargo --version && cargo clippy --version && rustfmt --version && codex --version && python3 --version && git --version'
+  'zstd --version && node --version && npm --version && bun --version && rustc --version && cargo --version && cargo clippy --version && rustfmt --version && codex --version && python3 --version && git --version'
 stacks/forgejo-runner/scripts/refresh-codex-auth.sh
 ```

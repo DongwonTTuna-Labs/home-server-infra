@@ -59,6 +59,7 @@ RUN apt-get update \
         util-linux \
         xz-utils \
         zip \
+        zstd \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash --uid 1001 runner \
