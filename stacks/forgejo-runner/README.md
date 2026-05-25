@@ -13,8 +13,8 @@ Docker-in-Docker daemon as `dongwontuna-labs-runner:latest`. It includes Node.js
 24.x, Bun, Rust, Cargo, Clippy, Rustfmt, the native C build toolchain,
 pkg-config, OpenSSL headers, Python, Git, SSH, curl, jq, and Codex CLI.
 
-Codex review jobs authenticate through the `CODEX_LB_API_KEY` organization
-secret and the codex-lb proxy. The old shared ChatGPT `auth.json` runner volume
+Codex review jobs authenticate through the `AI_RELAY_API_KEY` organization
+secret and the CliRelay proxy. The old shared ChatGPT `auth.json` runner volume
 path is intentionally removed.
 
 Useful checks:
