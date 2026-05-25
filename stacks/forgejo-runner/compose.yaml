@@ -22,8 +22,6 @@ services:
     command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "--tls=false"]
     volumes:
       - dind-data:/var/lib/docker
-      - codex-runner-home:/codex-runner-home
-      - codex-runner-locks:/codex-runner-locks
 
   dongwontuna-labs-runner-image:
     image: docker:cli
@@ -137,10 +135,4 @@ networks:
     name: forgejo_forgejo
 
 volumes:
-  codex-runner-home:
-    external: true
-    name: forgejo-runner_codex_home
-  codex-runner-locks:
-    external: true
-    name: forgejo-runner_codex_locks
   dind-data:
