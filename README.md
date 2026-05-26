@@ -7,6 +7,7 @@ This repository stores reproducible configuration for:
 - Forgejo and PostgreSQL
 - Forgejo Actions runner
 - Cloudflare Tunnel entrypoint
+- codex-lb and GitHub Actions OIDC broker sidecar
 - GitHub Codex runner pool
 - Selected SSH and Codex dotfiles
 
@@ -20,6 +21,7 @@ docs/                         Operational notes and recovery docs
 dotfiles/                     Curated non-secret client config
 scripts/                      Repository verification helpers
 stacks/agent-stack/           Cloudflare tunnel container stack
+stacks/codex-lb/              codex-lb, Cloudflare route, and OIDC broker sidecar
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/forgejo/               Forgejo service stack and migration helpers
 stacks/forgejo-runner/        Forgejo Actions runner stack
@@ -50,4 +52,3 @@ forgejo admin user list
 ```
 
 It does not store a token. It uses `docker exec` against `forgejo-forgejo-1`.
-

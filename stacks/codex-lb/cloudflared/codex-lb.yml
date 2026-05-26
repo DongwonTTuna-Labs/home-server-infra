@@ -1,0 +1,10 @@
+tunnel: 5612c16a-30d0-4da7-9eac-d13e35d887b1
+credentials-file: /etc/cloudflared/codex-lb.json
+
+ingress:
+  - hostname: relay-ai.dongwontuna.net
+    path: ^/oidc/.*
+    service: http://localhost:2465
+  - hostname: relay-ai.dongwontuna.net
+    service: http://localhost:2455
+  - service: http_status:404
