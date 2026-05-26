@@ -1,0 +1,136 @@
+name: Setup Codex relay
+description: Mint a short-lived AI relay token from GitHub OIDC and prepare a Codex action home.
+
+inputs:
+  audience:
+    description: GitHub OIDC audience for the relay broker.
+    required: false
+    default: https://relay-ai.dongwontuna.net/github-actions
+  broker-url:
+    description: Relay broker token exchange endpoint.
+    required: false
+    default: https://relay-ai.dongwontuna.net/oidc/exchange
+  codex-home:
+    description: Directory to use as the isolated Codex action home.
+    required: true
+  trusted-actor:
+    description: GitHub actor allowed to mint relay tokens.
+    required: false
+    default: DongwonTTuna
+
+outputs:
+  relay_token:
+    description: Short-lived relay API token.
+    value: ${{ steps.mint.outputs.relay_token }}
+  expires_at:
+    description: Relay token expiration time.
+    value: ${{ steps.mint.outputs.expires_at }}
+  api_key_id:
+    description: Relay api_keys row id.
+    value: ${{ steps.mint.outputs.api_key_id }}
+  codex_args:
+    description: Codex CLI arguments for relay-backed read-only review runs.
+    value: ${{ steps.codex-args.outputs.codex_args }}
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Codex args
+      id: codex-args
+      shell: bash
+      run: |
+        printf '%s\n' 'codex_args=["--enable","use_legacy_landlock","--disable","shell_tool","--ignore-user-config","--ignore-rules","--color","never","-c","model_provider=\"ai-relay\"","-c","model_providers.ai-relay.name=\"AI Relay\"","-c","model_providers.ai-relay.base_url=\"https://relay-ai.dongwontuna.net/v1\"","-c","model_providers.ai-relay.wire_api=\"responses\"","-c","model_providers.ai-relay.env_key=\"AI_RELAY_API_KEY\"","-c","model_providers.ai-relay.supports_websockets=true","-c","model_providers.ai-relay.requires_openai_auth=false","-c","shell_environment_policy.exclude=[\"AI_RELAY_API_KEY\"]","-c","sandbox_workspace_write.network_access=false"]' >> "$GITHUB_OUTPUT"
+
+    - name: Mint relay token
+      id: mint
+      shell: bash
+      env:
+        BROKER_AUDIENCE: ${{ inputs.audience }}
+        BROKER_URL: ${{ inputs.broker-url }}
+        TRUSTED_ACTOR: ${{ inputs.trusted-actor }}
+      run: |
+        set -euo pipefail
+        if [ "${GITHUB_ACTOR:-}" != "$TRUSTED_ACTOR" ] || [ "${GITHUB_TRIGGERING_ACTOR:-}" != "$TRUSTED_ACTOR" ]; then
+          echo "refusing to mint relay token for actor=${GITHUB_ACTOR:-} triggering_actor=${GITHUB_TRIGGERING_ACTOR:-}" >&2
+          exit 1
+        fi
+        python3 - <<'PY'
+        import json
+        import os
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        USER_AGENT = "github-actions-codex-oidc"
+
+        def require_env(name):
+            value = os.environ.get(name)
+            if not value:
+                raise SystemExit(f"missing required environment variable: {name}")
+            return value
+
+        def request_json(request):
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", "replace")[:800]
+                raise SystemExit(f"{request.full_url} failed with HTTP {exc.code}: {body}") from exc
+
+        parts = urllib.parse.urlsplit(require_env("ACTIONS_ID_TOKEN_REQUEST_URL"))
+        query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        query.append(("audience", require_env("BROKER_AUDIENCE")))
+        request_url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
+        oidc_payload = request_json(
+            urllib.request.Request(
+                request_url,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {require_env('ACTIONS_ID_TOKEN_REQUEST_TOKEN')}",
+                    "User-Agent": USER_AGENT,
+                },
+            )
+        )
+        oidc_token = oidc_payload.get("value")
+        if not isinstance(oidc_token, str) or not oidc_token:
+            raise SystemExit("GitHub OIDC response did not include a token value")
+        print(f"::add-mask::{oidc_token}")
+
+        exchanged = request_json(
+            urllib.request.Request(
+                require_env("BROKER_URL"),
+                data=json.dumps({"token": oidc_token}).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": USER_AGENT,
+                },
+            )
+        )
+        relay_token = exchanged.get("relay_token")
+        if exchanged.get("token_type") != "Bearer" or not isinstance(relay_token, str) or not relay_token.startswith("sk-clb-"):
+            raise SystemExit("broker response did not include a valid relay token")
+        print(f"::add-mask::{relay_token}")
+
+        with open(require_env("GITHUB_OUTPUT"), "a", encoding="utf-8") as output:
+            for key in ("relay_token", "expires_at", "api_key_id"):
+                value = exchanged.get(key)
+                if not isinstance(value, str) or not value:
+                    raise SystemExit(f"broker response did not include {key}")
+                output.write(f"{key}={value}\n")
+        PY
+
+    - name: Check relay token
+      shell: bash
+      env:
+        AI_RELAY_API_KEY: ${{ steps.mint.outputs.relay_token }}
+      run: test -n "$AI_RELAY_API_KEY"
+
+    - name: Prepare Codex action home
+      shell: bash
+      env:
+        CODEX_ACTION_HOME: ${{ inputs.codex-home }}
+      run: |
+        mkdir -p "$CODEX_ACTION_HOME"
+        printf '{"port":0}\n' > "$CODEX_ACTION_HOME/${GITHUB_RUN_ID}.json"
