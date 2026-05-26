@@ -155,14 +155,38 @@ def _extract_workflow_file(repository: str, workflow_ref: object) -> str:
     return workflow_path
 
 
-def _assert_trusted_ref(claims: dict[str, object], workflow_ref: object, repository: str, config: BrokerConfig) -> None:
-    ref = _require_claim(claims, "ref")
-    if ref not in config.allowed_refs:
-        raise OidcValidationError("ref is not allowed")
+def _extract_workflow_ref_ref(repository: str, workflow_ref: object) -> str:
     if not isinstance(workflow_ref, str):
         raise OidcValidationError("workflow_ref claim is required")
     prefix = f"{repository}/"
-    workflow_ref_ref = workflow_ref[len(prefix) :].rsplit("@", 1)[1]
+    if not workflow_ref.startswith(prefix):
+        raise OidcValidationError("workflow_ref repository mismatch")
+    workflow_spec = workflow_ref[len(prefix) :]
+    if "@" not in workflow_spec:
+        raise OidcValidationError("workflow_ref ref is required")
+    workflow_ref_ref = workflow_spec.rsplit("@", 1)[1]
+    if not workflow_ref_ref:
+        raise OidcValidationError("workflow_ref ref is required")
+    return workflow_ref_ref
+
+
+def _allowed_base_refs(config: BrokerConfig) -> frozenset[str]:
+    return frozenset(ref.removeprefix("refs/heads/") for ref in config.allowed_refs if ref.startswith("refs/heads/"))
+
+
+def _assert_trusted_ref(claims: dict[str, object], workflow_ref: object, repository: str, config: BrokerConfig) -> None:
+    ref = _require_claim(claims, "ref")
+    workflow_ref_ref = _extract_workflow_ref_ref(repository, workflow_ref)
+    event_name = _require_claim(claims, "event_name")
+    if event_name == "pull_request":
+        if not ref.startswith("refs/pull/") or not ref.endswith("/merge"):
+            raise OidcValidationError("pull_request ref is not allowed")
+        base_ref = _require_claim(claims, "base_ref")
+        if base_ref not in _allowed_base_refs(config):
+            raise OidcValidationError("base_ref is not allowed")
+        return
+    if ref not in config.allowed_refs:
+        raise OidcValidationError("ref is not allowed")
     if workflow_ref_ref != ref:
         raise OidcValidationError("workflow_ref ref does not match ref claim")
 
@@ -199,11 +223,11 @@ def verify_github_oidc_token(token: str, signing_key: PyJWK, config: BrokerConfi
     workflow_file = _extract_workflow_file(repository, workflow_ref)
     if workflow_file not in config.allowed_workflows:
         raise OidcValidationError("workflow is not allowed")
-    _assert_trusted_ref(claims, workflow_ref, repository, config)
 
     event_name = _require_claim(claims, "event_name")
     if event_name not in config.allowed_events:
         raise OidcValidationError("event_name is not allowed")
+    _assert_trusted_ref(claims, workflow_ref, repository, config)
 
     actor = _require_claim(claims, "actor")
     if actor not in config.allowed_actors:

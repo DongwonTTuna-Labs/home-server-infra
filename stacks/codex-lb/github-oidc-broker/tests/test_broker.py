@@ -63,7 +63,9 @@ def make_token(
     runner_environment: str = "self-hosted",
     visibility: str = "private",
     issuer: str = "https://token.actions.githubusercontent.com",
-    ref: str = "refs/heads/main",
+    ref: str = "refs/pull/54/merge",
+    base_ref: str = "main",
+    head_ref: str = "codex/use-oidc-relay-token",
     workflow_ref_ref: str | None = None,
     nbf_offset_seconds: int = -5,
     exp_offset_seconds: int = 300,
@@ -85,6 +87,8 @@ def make_token(
         "runner_environment": runner_environment,
         "workflow_ref": f"{repository}/{workflow}@{workflow_ref_ref or ref}",
         "ref": ref,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
         "event_name": event_name,
         "actor": actor,
         "run_id": "26446723001",
@@ -137,6 +141,20 @@ def test_verifies_valid_github_oidc_token(
     assert claims.run_attempt == "1"
 
 
+@pytest.mark.parametrize("event_name", ["issue_comment", "workflow_dispatch"])
+def test_verifies_main_ref_events(
+    signing_key: rsa.RSAPrivateKey,
+    public_jwk: PyJWK,
+    config: BrokerConfig,
+    event_name: str,
+) -> None:
+    token = make_token(signing_key, event_name=event_name, ref="refs/heads/main")
+
+    claims = verify_github_oidc_token(token, public_jwk, config)
+
+    assert claims.event_name == event_name
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -146,7 +164,15 @@ def test_verifies_valid_github_oidc_token(
         ({"issuer": "https://example.invalid"}, "Invalid issuer"),
         ({"workflow": ".github/workflows/deploy.yml"}, "workflow"),
         ({"ref": "refs/heads/codex/use-oidc-relay-token"}, "ref"),
-        ({"workflow_ref_ref": "refs/heads/codex/use-oidc-relay-token"}, "workflow_ref ref"),
+        (
+            {
+                "event_name": "issue_comment",
+                "ref": "refs/heads/main",
+                "workflow_ref_ref": "refs/heads/codex/use-oidc-relay-token",
+            },
+            "workflow_ref ref",
+        ),
+        ({"base_ref": "develop"}, "base_ref"),
         ({"event_name": "push"}, "event_name"),
         ({"runner_environment": "github-hosted"}, "runner_environment"),
         ({"visibility": "public"}, "repository_visibility"),
