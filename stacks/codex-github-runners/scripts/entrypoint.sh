@@ -3,15 +3,13 @@ set -euo pipefail
 
 runner_home="${RUNNER_HOME:-/home/runner/actions-runner}"
 runner_workdir="${RUNNER_WORKDIR:-/home/runner/_work}"
-codex_home="${CODEX_HOME:-/home/runner/.codex}"
 github_url="${GITHUB_URL:-https://github.com}"
-runner_labels="${RUNNER_LABELS:-codex}"
-runner_scope="${RUNNER_SCOPE_SLUG:-unknown}"
+runner_labels="${RUNNER_LABELS:-dongwontuna-labs-runner}"
 runner_org="${RUNNER_ORG:-}"
 runner_group="${RUNNER_GROUP:-}"
 
 cd "${runner_home}"
-mkdir -p "${runner_workdir}" "${codex_home}" "${RUNNER_TOOL_CACHE:-${runner_workdir}/_tool}" "${RUNNER_TEMP:-${runner_workdir}/_temp}"
+mkdir -p "${runner_workdir}" "${RUNNER_TOOL_CACHE:-${runner_workdir}/_tool}" "${RUNNER_TEMP:-${runner_workdir}/_temp}"
 
 if [ -z "${runner_org}" ] && [ -z "${REPO_FULL_NAME:-}" ]; then
   echo "RUNNER_ORG or REPO_FULL_NAME is required." >&2
@@ -24,7 +22,7 @@ if [ -n "${runner_org}" ] && [ -n "${REPO_FULL_NAME:-}" ]; then
 fi
 
 if [ -z "${RUNNER_NAME:-}" ]; then
-  echo "RUNNER_NAME is required, for example codex-01." >&2
+  echo "RUNNER_NAME is required, for example home-server-runner-01." >&2
   exit 1
 fi
 
@@ -32,39 +30,8 @@ if [ -z "${GITHUB_PAT:-}" ] && [ -r /run/secrets/github_pat ]; then
   GITHUB_PAT="$(tr -d '\r\n' < /run/secrets/github_pat)"
 fi
 
-update_codex_cli() {
-  if [ "${CODEX_CLI_AUTO_UPDATE:-1}" != "1" ]; then
-    echo "Codex CLI auto-update disabled."
-    return 0
-  fi
-
-  local lock_root="${CODEX_RUNNER_LOCK_DIR:-/var/lib/codex-runner/locks}"
-  local auth_dir="${lock_root}/auth"
-  local holder_id="${runner_scope}-${RUNNER_NAME}"
-  local lock_file="${auth_dir}/${holder_id}.lock"
-
-  mkdir -p "${auth_dir}"
-  echo "Checking Codex CLI version before starting runner ${RUNNER_NAME}."
-
-  (
-    exec 7>"${lock_file}"
-    flock 7
-    /opt/codex-runner/update-codex-cli.sh
-  )
-}
-
-update_codex_cli
-
 cat > "${runner_home}/.env" <<EOF
-ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/codex-runner/hooks/job-started.sh
-ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/codex-runner/hooks/job-completed.sh
-CODEX_RUNNER_LOCK_DIR=${CODEX_RUNNER_LOCK_DIR:-/var/lib/codex-runner/locks}
-CODEX_RUNNER_MAX_PARALLEL=${CODEX_RUNNER_MAX_PARALLEL:-8}
-CODEX_CLI_AUTO_UPDATE=${CODEX_CLI_AUTO_UPDATE:-1}
-CODEX_CLI_VERSION=${CODEX_CLI_VERSION:-latest}
-RUNNER_SCOPE_SLUG=${runner_scope}
 RUNNER_NAME=${RUNNER_NAME}
-CODEX_HOME=${codex_home}
 RUNNER_TOOL_CACHE=${RUNNER_TOOL_CACHE:-${runner_workdir}/_tool}
 RUNNER_TEMP=${RUNNER_TEMP:-${runner_workdir}/_temp}
 EOF
