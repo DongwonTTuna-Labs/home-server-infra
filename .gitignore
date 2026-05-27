@@ -17,8 +17,6 @@ known_hosts
 **/known_hosts
 cert.pem
 **/cert.pem
-gitea.rsa
-**/gitea.rsa
 
 # Runtime data and logs
 state/
@@ -31,9 +29,6 @@ logs/
 *.sqlite-*
 **/*.sqlite
 **/*.sqlite-*
-postgres/
-**/postgres/
-/forgejo/
 runner/data/
 **/runner/data/
 backups/

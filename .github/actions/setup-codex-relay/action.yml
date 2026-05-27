@@ -1,5 +1,5 @@
-name: Setup Codex relay
-description: Mint a short-lived AI relay token from GitHub OIDC and prepare a Codex action home.
+name: Setup Codex OIDC relay
+description: Exchange GitHub OIDC for a short-lived relay credential and prepare a Codex action home.
 
 inputs:
   audience:
@@ -14,20 +14,17 @@ inputs:
     description: Directory to use as the isolated Codex action home.
     required: true
   trusted-actor:
-    description: GitHub actor allowed to mint relay tokens.
+    description: GitHub actor allowed to exchange OIDC with the relay broker.
     required: false
     default: DongwonTTuna
 
 outputs:
   relay_token:
-    description: Short-lived relay API token.
+    description: Short-lived relay credential minted from GitHub OIDC.
     value: ${{ steps.mint.outputs.relay_token }}
   expires_at:
-    description: Relay token expiration time.
+    description: Relay credential expiration time.
     value: ${{ steps.mint.outputs.expires_at }}
-  api_key_id:
-    description: Relay api_keys row id.
-    value: ${{ steps.mint.outputs.api_key_id }}
   codex_args:
     description: Codex CLI arguments for relay-backed read-only review runs.
     value: ${{ steps.codex-args.outputs.codex_args }}
@@ -41,7 +38,7 @@ runs:
       run: |
         printf '%s\n' 'codex_args=["--enable","use_legacy_landlock","--disable","shell_tool","--ignore-user-config","--ignore-rules","--color","never","-c","model_provider=\"ai-relay\"","-c","model_providers.ai-relay.name=\"AI Relay\"","-c","model_providers.ai-relay.base_url=\"https://relay-ai.dongwontuna.net/v1\"","-c","model_providers.ai-relay.wire_api=\"responses\"","-c","model_providers.ai-relay.env_key=\"AI_RELAY_API_KEY\"","-c","model_providers.ai-relay.supports_websockets=true","-c","model_providers.ai-relay.requires_openai_auth=false","-c","shell_environment_policy.exclude=[\"AI_RELAY_API_KEY\"]","-c","sandbox_workspace_write.network_access=false"]' >> "$GITHUB_OUTPUT"
 
-    - name: Mint relay token
+    - name: Exchange GitHub OIDC
       id: mint
       shell: bash
       env:
@@ -51,7 +48,7 @@ runs:
       run: |
         set -euo pipefail
         if [ "${GITHUB_ACTOR:-}" != "$TRUSTED_ACTOR" ] || [ "${GITHUB_TRIGGERING_ACTOR:-}" != "$TRUSTED_ACTOR" ]; then
-          echo "refusing to mint relay token for actor=${GITHUB_ACTOR:-} triggering_actor=${GITHUB_TRIGGERING_ACTOR:-}" >&2
+          echo "refusing OIDC relay exchange for actor=${GITHUB_ACTOR:-} triggering_actor=${GITHUB_TRIGGERING_ACTOR:-}" >&2
           exit 1
         fi
         python3 - <<'PY'
@@ -110,18 +107,18 @@ runs:
         )
         relay_token = exchanged.get("relay_token")
         if exchanged.get("token_type") != "Bearer" or not isinstance(relay_token, str) or not relay_token.startswith("sk-clb-"):
-            raise SystemExit("broker response did not include a valid relay token")
+            raise SystemExit("broker response did not include a valid relay credential")
         print(f"::add-mask::{relay_token}")
 
         with open(require_env("GITHUB_OUTPUT"), "a", encoding="utf-8") as output:
-            for key in ("relay_token", "expires_at", "api_key_id"):
+            for key in ("relay_token", "expires_at"):
                 value = exchanged.get(key)
                 if not isinstance(value, str) or not value:
                     raise SystemExit(f"broker response did not include {key}")
                 output.write(f"{key}={value}\n")
         PY
 
-    - name: Check relay token
+    - name: Check relay credential
       shell: bash
       env:
         AI_RELAY_API_KEY: ${{ steps.mint.outputs.relay_token }}

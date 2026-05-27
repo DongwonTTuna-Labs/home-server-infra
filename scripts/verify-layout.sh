@@ -5,28 +5,27 @@ cd "$(dirname "$0")/.."
 
 required=(
   README.md
-  docs/security-model.md
   docs/secrets.md
-  docs/restore.md
-  docs/migration-status.md
+  .github/actions/setup-codex-relay/action.yml
+  stacks/codex-lb/README.md
   stacks/codex-lb/compose.yaml
   stacks/codex-lb/cloudflared/codex-lb.yml
   stacks/codex-lb/github-oidc-broker/Dockerfile
   stacks/codex-lb/github-oidc-broker/app/broker.py
-  stacks/codex-lb/github-oidc-broker/pyproject.toml
+  stacks/codex-lb/github-oidc-broker/app/cleanup_expired_keys.py
+  stacks/codex-lb/github-oidc-broker/app/codex_lb.py
+  stacks/codex-lb/github-oidc-broker/app/config.py
+  stacks/codex-lb/github-oidc-broker/app/store.py
   stacks/codex-lb/github-oidc-broker/tests/test_broker.py
-  stacks/forgejo/compose.yaml
-  stacks/forgejo/.env.example
-  stacks/forgejo-runner/compose.yaml
-  stacks/forgejo-runner/config.yaml
+  stacks/codex-lb/scripts/install-user-timer.sh
+  stacks/codex-lb/systemd/github-oidc-broker-cleanup.service
+  stacks/codex-lb/systemd/github-oidc-broker-cleanup.timer
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
   stacks/agent-stack/compose.yml
   stacks/agent-stack/secrets/cloudflared.env.example
-  dotfiles/ssh/config.d/forgejo-cloudflared.conf
   dotfiles/codex/config.toml
   dotfiles/codex/rules/default.rules
-  dotfiles/bin/forgejo
 )
 
 for path in "${required[@]}"; do
@@ -36,14 +35,8 @@ for path in "${required[@]}"; do
   fi
 done
 
-if find . -path './.git' -prune -o -path '*/.forgejo/workflows/*' -print | grep -q .; then
-  printf 'Application .forgejo workflows must not be mirrored here.\n' >&2
-  exit 1
-fi
-
 scripts/scan-secrets.sh
 docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
-docker compose -f stacks/forgejo/compose.yaml --env-file stacks/forgejo/.env.example config >/dev/null
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT

@@ -1,9 +1,0 @@
-[Unit]
-Description=Refresh per-runner Codex ChatGPT auth in GitHub Actions runner volumes
-
-[Service]
-Type=oneshot
-WorkingDirectory=__CODEX_RUNNER_DIR__
-Environment=PATH=/home/dongwonttuna/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStartPre=__CODEX_RUNNER_DIR__/scripts/update-codex-cli-all.sh
-ExecStart=__CODEX_RUNNER_DIR__/scripts/refresh-auth-all.sh

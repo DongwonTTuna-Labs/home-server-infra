@@ -1,0 +1,7 @@
+[Unit]
+Description=Cleanup expired GitHub OIDC broker Codex LB API keys
+
+[Service]
+Type=oneshot
+WorkingDirectory=__CODEX_LB_STACK_DIR__
+ExecStart=/usr/bin/docker compose -f __CODEX_LB_STACK_DIR__/compose.yaml run --rm --no-deps github-oidc-broker python -m app.cleanup_expired_keys
