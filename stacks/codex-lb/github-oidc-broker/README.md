@@ -15,7 +15,17 @@ Codex traffic.
 - Allows only workflows running from `refs/heads/main`.
 - Allows only self-hosted runner jobs and the `DongwonTTuna` actor by default.
 - Records each exchanged JWT hash in broker-local SQLite storage to prevent replay.
-- Inserts short-lived API keys directly into the mounted `codex-lb` SQLite DB.
+- Creates short-lived API keys through the `codex-lb` dashboard API.
+- Leaves expired-key deletion to the one-shot cleanup script and user timer.
+
+## Cleanup
+
+Expired broker-issued keys are cleaned up separately:
+
+```bash
+python -m app.cleanup_expired_keys --dry-run
+python -m app.cleanup_expired_keys
+```
 
 ## Local Test
 

@@ -13,6 +13,8 @@ secret stores.
   - `TUNNEL_TOKEN`
 - `stacks/codex-github-runners/state/github_pat`
   - GitHub PAT used for runner registration
+- `${HOME}/.cloudflared/codex-lb.json`
+  - Cloudflare tunnel credentials for `relay-ai.dongwontuna.net`
 
 ## Forgejo Secrets
 
@@ -28,5 +30,7 @@ secret stores.
 - Forgejo JWT and Actions private keys under the live data volume
 - Forgejo SSH host private key under the live data volume
 - Codex `auth.json`, sqlite state, logs, sessions, attachments, generated images
+- `codex-lb-data` Docker volume, including dashboard auth state and encryption key
+- `github-oidc-broker-data` Docker volume, including broker replay/audit SQLite state
 - SSH private keys under `~/.ssh`
 - GitHub CLI `hosts.yml`

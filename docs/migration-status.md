@@ -14,6 +14,7 @@ Current hostnames:
 
 - Web: `https://git.dongwontuna.net`
 - SSH: `git@ssh.dongwontuna.net:DongwonTTuna-Labs/<repo>.git`
+- Codex relay: `https://relay-ai.dongwontuna.net`
 
 Current status:
 
@@ -22,4 +23,5 @@ Current status:
 - Forgejo Actions runner is registered to the organization.
 - Application workflow files remain in their application repositories.
 - GitHub remains a legacy/archive remote during cutover.
-
+- codex-lb runs from the `codex-lb` Docker Compose project.
+- GitHub OIDC broker cleanup runs as user timer `github-oidc-broker-cleanup.timer`.

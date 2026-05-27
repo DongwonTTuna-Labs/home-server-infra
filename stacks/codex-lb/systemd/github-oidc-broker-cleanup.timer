@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GitHub OIDC broker API key cleanup every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
