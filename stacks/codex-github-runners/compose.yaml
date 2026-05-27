@@ -1,18 +1,12 @@
 x-common-environment: &common-environment
   RUNNER_ORG: DongwonTTuna-Labs
   RUNNER_GROUP: Home Server Runners
-  RUNNER_SCOPE_SLUG: home-server
   RUNNER_WORKDIR: /home/runner/_work
-  CODEX_HOME: /home/runner/.codex
-  CODEX_CLI_AUTO_UPDATE: ${CODEX_CLI_AUTO_UPDATE:-1}
-  CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-latest}
-  CODEX_RUNNER_LOCK_DIR: /var/lib/codex-runner/locks
-  CODEX_RUNNER_MAX_PARALLEL: ${CODEX_RUNNER_MAX_PARALLEL:-8}
   RUNNER_TOOL_CACHE: /home/runner/_work/_tool
   RUNNER_TEMP: /home/runner/_work/_temp
 
 x-runner-common: &runner-common
-  image: codex-github-runner:latest
+  image: dongwontuna-labs-runner:latest
   build:
     context: .
   secrets:
@@ -29,137 +23,164 @@ x-runner-common: &runner-common
     - /tmp:rw,nosuid,nodev,size=512m
 
 services:
-  codex-runner-01:
+  home-server-runner-01:
     <<: *runner-common
-    container_name: codex-runner-01
+    container_name: home-server-runner-01
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-01
-      RUNNER_LABELS: codex,codex-01
+      RUNNER_NAME: home-server-runner-01
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-01
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_01_runner:/home/runner/actions-runner
-      - codex_runner_01_home:/home/runner/.codex
-      - codex_runner_01_work:/home/runner/_work
+      - home_server_runner_01_runner:/home/runner/actions-runner
+      - home_server_runner_01_work:/home/runner/_work
 
-  codex-runner-02:
+  home-server-runner-02:
     <<: *runner-common
-    container_name: codex-runner-02
+    container_name: home-server-runner-02
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-02
-      RUNNER_LABELS: codex,codex-02
+      RUNNER_NAME: home-server-runner-02
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-02
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_02_runner:/home/runner/actions-runner
-      - codex_runner_02_home:/home/runner/.codex
-      - codex_runner_02_work:/home/runner/_work
+      - home_server_runner_02_runner:/home/runner/actions-runner
+      - home_server_runner_02_work:/home/runner/_work
 
-  codex-runner-03:
+  home-server-runner-03:
     <<: *runner-common
-    container_name: codex-runner-03
+    container_name: home-server-runner-03
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-03
-      RUNNER_LABELS: codex,codex-03
+      RUNNER_NAME: home-server-runner-03
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-03
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_03_runner:/home/runner/actions-runner
-      - codex_runner_03_home:/home/runner/.codex
-      - codex_runner_03_work:/home/runner/_work
+      - home_server_runner_03_runner:/home/runner/actions-runner
+      - home_server_runner_03_work:/home/runner/_work
 
-  codex-runner-04:
+  home-server-runner-04:
     <<: *runner-common
-    container_name: codex-runner-04
+    container_name: home-server-runner-04
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-04
-      RUNNER_LABELS: codex,codex-04
+      RUNNER_NAME: home-server-runner-04
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-04
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_04_runner:/home/runner/actions-runner
-      - codex_runner_04_home:/home/runner/.codex
-      - codex_runner_04_work:/home/runner/_work
+      - home_server_runner_04_runner:/home/runner/actions-runner
+      - home_server_runner_04_work:/home/runner/_work
 
-  codex-runner-05:
+  home-server-runner-05:
     <<: *runner-common
-    container_name: codex-runner-05
+    container_name: home-server-runner-05
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-05
-      RUNNER_LABELS: codex,codex-05
+      RUNNER_NAME: home-server-runner-05
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-05
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_05_runner:/home/runner/actions-runner
-      - codex_runner_05_home:/home/runner/.codex
-      - codex_runner_05_work:/home/runner/_work
+      - home_server_runner_05_runner:/home/runner/actions-runner
+      - home_server_runner_05_work:/home/runner/_work
 
-  codex-runner-06:
+  home-server-runner-06:
     <<: *runner-common
-    container_name: codex-runner-06
+    container_name: home-server-runner-06
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-06
-      RUNNER_LABELS: codex,codex-06
+      RUNNER_NAME: home-server-runner-06
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-06
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_06_runner:/home/runner/actions-runner
-      - codex_runner_06_home:/home/runner/.codex
-      - codex_runner_06_work:/home/runner/_work
+      - home_server_runner_06_runner:/home/runner/actions-runner
+      - home_server_runner_06_work:/home/runner/_work
 
-  codex-runner-07:
+  home-server-runner-07:
     <<: *runner-common
-    container_name: codex-runner-07
+    container_name: home-server-runner-07
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-07
-      RUNNER_LABELS: codex,codex-07
+      RUNNER_NAME: home-server-runner-07
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-07
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_07_runner:/home/runner/actions-runner
-      - codex_runner_07_home:/home/runner/.codex
-      - codex_runner_07_work:/home/runner/_work
+      - home_server_runner_07_runner:/home/runner/actions-runner
+      - home_server_runner_07_work:/home/runner/_work
 
-  codex-runner-08:
+  home-server-runner-08:
     <<: *runner-common
-    container_name: codex-runner-08
+    container_name: home-server-runner-08
     environment:
       <<: *common-environment
-      RUNNER_NAME: codex-08
-      RUNNER_LABELS: codex,codex-08
+      RUNNER_NAME: home-server-runner-08
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-08
     volumes:
-      - codex_runner_locks:/var/lib/codex-runner/locks
-      - codex_runner_08_runner:/home/runner/actions-runner
-      - codex_runner_08_home:/home/runner/.codex
-      - codex_runner_08_work:/home/runner/_work
+      - home_server_runner_08_runner:/home/runner/actions-runner
+      - home_server_runner_08_work:/home/runner/_work
+
+  home-server-runner-09:
+    <<: *runner-common
+    container_name: home-server-runner-09
+    environment:
+      <<: *common-environment
+      RUNNER_NAME: home-server-runner-09
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-09
+    volumes:
+      - home_server_runner_09_runner:/home/runner/actions-runner
+      - home_server_runner_09_work:/home/runner/_work
+
+  home-server-runner-10:
+    <<: *runner-common
+    container_name: home-server-runner-10
+    environment:
+      <<: *common-environment
+      RUNNER_NAME: home-server-runner-10
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-10
+    volumes:
+      - home_server_runner_10_runner:/home/runner/actions-runner
+      - home_server_runner_10_work:/home/runner/_work
+
+  home-server-runner-11:
+    <<: *runner-common
+    container_name: home-server-runner-11
+    environment:
+      <<: *common-environment
+      RUNNER_NAME: home-server-runner-11
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-11
+    volumes:
+      - home_server_runner_11_runner:/home/runner/actions-runner
+      - home_server_runner_11_work:/home/runner/_work
+
+  home-server-runner-12:
+    <<: *runner-common
+    container_name: home-server-runner-12
+    environment:
+      <<: *common-environment
+      RUNNER_NAME: home-server-runner-12
+      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-12
+    volumes:
+      - home_server_runner_12_runner:/home/runner/actions-runner
+      - home_server_runner_12_work:/home/runner/_work
 
 secrets:
   github_pat:
     file: ./state/github_pat
 
 volumes:
-  codex_runner_locks:
-  codex_runner_01_runner:
-  codex_runner_01_home:
-  codex_runner_01_work:
-  codex_runner_02_runner:
-  codex_runner_02_home:
-  codex_runner_02_work:
-  codex_runner_03_runner:
-  codex_runner_03_home:
-  codex_runner_03_work:
-  codex_runner_04_runner:
-  codex_runner_04_home:
-  codex_runner_04_work:
-  codex_runner_05_runner:
-  codex_runner_05_home:
-  codex_runner_05_work:
-  codex_runner_06_runner:
-  codex_runner_06_home:
-  codex_runner_06_work:
-  codex_runner_07_runner:
-  codex_runner_07_home:
-  codex_runner_07_work:
-  codex_runner_08_runner:
-  codex_runner_08_home:
-  codex_runner_08_work:
+  home_server_runner_01_runner:
+  home_server_runner_01_work:
+  home_server_runner_02_runner:
+  home_server_runner_02_work:
+  home_server_runner_03_runner:
+  home_server_runner_03_work:
+  home_server_runner_04_runner:
+  home_server_runner_04_work:
+  home_server_runner_05_runner:
+  home_server_runner_05_work:
+  home_server_runner_06_runner:
+  home_server_runner_06_work:
+  home_server_runner_07_runner:
+  home_server_runner_07_work:
+  home_server_runner_08_runner:
+  home_server_runner_08_work:
+  home_server_runner_09_runner:
+  home_server_runner_09_work:
+  home_server_runner_10_runner:
+  home_server_runner_10_work:
+  home_server_runner_11_runner:
+  home_server_runner_11_work:
+  home_server_runner_12_runner:
+  home_server_runner_12_work:

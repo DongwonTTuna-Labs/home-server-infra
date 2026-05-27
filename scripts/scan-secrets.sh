@@ -21,7 +21,7 @@ tracked_files() {
 
 check "no forbidden tracked paths" bash -c '
   ! git ls-files | grep -E \
-    "(^|/)(\\.env|\\.forgejo-admin-token|auth\\.json|github_pat|known_hosts(\\.old)?|cert\\.pem|gitea\\.rsa|private\\.pem|id_[^/]+|.*\\.sqlite.*|.*\\.log)$|(^|/)(state|logs|postgres|backups|metadata|mirrors)(/|$)|^forgejo/|(^|/)runner/data(/|$)"
+    "(^|/)(\\.env|auth\\.json|github_pat|known_hosts(\\.old)?|cert\\.pem|private\\.pem|id_[^/]+|.*\\.sqlite.*|.*\\.log)$|(^|/)(state|logs|backups|metadata|mirrors)(/|$)|(^|/)runner/data(/|$)"
 '
 
 check "no private key material" bash -c '
@@ -29,7 +29,7 @@ check "no private key material" bash -c '
 '
 
 check "no obvious token values" bash -c '
-  ! git grep -nE "(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|refresh_token[\"[:space:]:=]+[A-Za-z0-9._-]{20,}|access_token[\"[:space:]:=]+[A-Za-z0-9._-]{20,}|TUNNEL_TOKEN=[A-Za-z0-9._-]{40,}|FORGEJO_TOKEN=[A-Za-z0-9._-]{40,})" -- .
+  ! git grep -nE "(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|refresh_token[\"[:space:]:=]+[A-Za-z0-9._-]{20,}|access_token[\"[:space:]:=]+[A-Za-z0-9._-]{20,}|TUNNEL_TOKEN=[A-Za-z0-9._-]{40,})" -- .
 '
 
 if [ "$fail" -ne 0 ]; then

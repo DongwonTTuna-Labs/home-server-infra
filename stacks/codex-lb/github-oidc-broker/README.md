@@ -1,8 +1,9 @@
 # codex-lb GitHub OIDC Broker
 
-Small sidecar that exchanges GitHub Actions OIDC tokens for short-lived `codex-lb`
-API keys. It keeps upstream `codex-lb` on `ghcr.io/soju06/codex-lb:latest` while
-removing the long-lived `AI_RELAY_API_KEY` GitHub secret from Codex review jobs.
+Small sidecar that exchanges GitHub Actions OIDC tokens for short-lived
+`codex-lb` credentials. It keeps upstream `codex-lb` on
+`ghcr.io/soju06/codex-lb:latest` while removing the long-lived
+`AI_RELAY_API_KEY` GitHub secret from Codex review jobs.
 
 The broker only serves `/oidc/health` and `/oidc/exchange`. It does not proxy
 Codex traffic.
@@ -15,7 +16,17 @@ Codex traffic.
 - Allows only workflows running from `refs/heads/main`.
 - Allows only self-hosted runner jobs and the `DongwonTTuna` actor by default.
 - Records each exchanged JWT hash in broker-local SQLite storage to prevent replay.
-- Inserts short-lived API keys directly into the mounted `codex-lb` SQLite DB.
+- Creates short-lived API keys through the `codex-lb` dashboard API.
+- Leaves expired-key deletion to the one-shot cleanup script and user timer.
+
+## Cleanup
+
+Expired broker-issued keys are cleaned up separately:
+
+```bash
+python -m app.cleanup_expired_keys --dry-run
+python -m app.cleanup_expired_keys
+```
 
 ## Local Test
 

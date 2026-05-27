@@ -1,32 +1,21 @@
 # Secrets Inventory
 
-Do not commit these values. Store them only on the host or in Forgejo/Cloudflare
-secret stores.
+Do not commit these values. Store them only on the host or in the relevant
+external secret store.
 
 ## Local Files
 
-- `stacks/forgejo/.env`
-  - `POSTGRES_PASSWORD`
-  - `FORGEJO_TOKEN`
-  - `FORGEJO_RUNNER_SECRET`
 - `stacks/agent-stack/secrets/cloudflared.env`
   - `TUNNEL_TOKEN`
+- `${HOME}/.cloudflared/codex-lb.json`
+  - Cloudflare tunnel credentials for `relay-ai.dongwontuna.net`
 - `stacks/codex-github-runners/state/github_pat`
   - GitHub PAT used for runner registration
 
-## Forgejo Secrets
-
-- Local `fj-local-cli` access token
-  - Scope: `write:issue,write:repository,read:user,read:organization`
-  - Repository access: all repositories
-- `FORGEJO_BOT_TOKEN`
-- `CLOUDFLARE_API_TOKEN` for deploy-capable repositories
-- Optional `CODEX_REVIEW_COMMAND` when Codex review automation is enabled
-
 ## Excluded Runtime Secrets
 
-- Forgejo JWT and Actions private keys under the live data volume
-- Forgejo SSH host private key under the live data volume
 - Codex `auth.json`, sqlite state, logs, sessions, attachments, generated images
+- `codex-lb-data` Docker volume, including dashboard auth state and encryption key
+- `github-oidc-broker-data` Docker volume, including broker replay/audit SQLite state
 - SSH private keys under `~/.ssh`
 - GitHub CLI `hosts.yml`

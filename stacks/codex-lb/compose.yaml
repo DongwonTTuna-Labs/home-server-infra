@@ -35,12 +35,11 @@ services:
       BROKER_ALLOWED_ACTORS: DongwonTTuna
       BROKER_ALLOWED_REFS: refs/heads/main
       BROKER_TOKEN_TTL_SECONDS: "3600"
-      BROKER_CODEX_LB_DB_PATH: /var/lib/codex-lb/store.db
       BROKER_DB_PATH: /var/lib/github-oidc-broker/broker.db
     ports:
       - "127.0.0.1:2465:2465"
     volumes:
-      - codex-lb-data:/var/lib/codex-lb
+      - codex-lb-data:/var/lib/codex-lb:ro
       - github-oidc-broker-data:/var/lib/github-oidc-broker
 
   cloudflared-codex-lb:
@@ -53,7 +52,8 @@ services:
       com.centurylinklabs.watchtower.enable: "false"
     command: ["--no-autoupdate", "tunnel", "--config", "/etc/cloudflared/codex-lb.yml", "--no-autoupdate", "--metrics", "127.0.0.1:20243", "run"]
     volumes:
-      - /home/dongwonttuna/.cloudflared:/etc/cloudflared:ro
+      - ./cloudflared/codex-lb.yml:/etc/cloudflared/codex-lb.yml:ro
+      - ${HOME}/.cloudflared/codex-lb.json:/etc/cloudflared/codex-lb.json:ro
 
   watchtower:
     image: containrrr/watchtower:latest
