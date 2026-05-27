@@ -23,6 +23,8 @@ class DashboardClientConfig(Protocol):
     codex_lb_encryption_key_path: str
     dashboard_session_ttl_seconds: int
     http_timeout_seconds: float
+    api_key_cost_limit_microdollars: int
+    api_key_cost_limit_window: str
 
 
 def _utc_now() -> datetime:
@@ -91,6 +93,14 @@ class CodexLbDashboardClient:
             json={
                 "name": f"gha:{repository_name}:{workflow_name}:{run_id}:{run_attempt}",
                 "expiresAt": _api_datetime(expires_at),
+                "limits": [
+                    {
+                        "limitType": "cost_usd",
+                        "limitWindow": self.config.api_key_cost_limit_window,
+                        "maxValue": self.config.api_key_cost_limit_microdollars,
+                        "modelFilter": None,
+                    }
+                ],
             },
         )
         if response.status_code != 200:

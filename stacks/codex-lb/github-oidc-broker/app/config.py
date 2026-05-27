@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 
 DEFAULT_AUDIENCE = "https://relay-ai.dongwontuna.net/github-actions"
@@ -19,13 +20,17 @@ DEFAULT_ALLOWED_WORKFLOWS = frozenset(
         ".github/workflows/resolve-checker.yml",
     }
 )
-DEFAULT_ALLOWED_EVENTS = frozenset({"pull_request", "issue_comment", "workflow_dispatch"})
+DEFAULT_ALLOWED_EVENTS = frozenset({"pull_request", "pull_request_target", "issue_comment", "workflow_dispatch"})
 DEFAULT_ALLOWED_ACTORS = frozenset({"DongwonTTuna"})
 DEFAULT_ALLOWED_REFS = frozenset({"refs/heads/main"})
 DEFAULT_CODEX_LB_BASE_URL = "http://codex-lb:2455"
 DEFAULT_CODEX_LB_ENCRYPTION_KEY_PATH = "/var/lib/codex-lb/encryption.key"
 DEFAULT_DASHBOARD_SESSION_TTL_SECONDS = 60
 DEFAULT_HTTP_TIMEOUT_SECONDS = 10.0
+DEFAULT_API_KEY_COST_LIMIT_USD = "50"
+DEFAULT_API_KEY_COST_LIMIT_WINDOW = "weekly"
+MICRODOLLARS_PER_USD = Decimal("1000000")
+API_KEY_COST_LIMIT_WINDOWS = frozenset({"daily", "weekly", "monthly", "5h", "7d"})
 
 
 def _csv_env(name: str, default: Iterable[str]) -> frozenset[str]:
@@ -33,6 +38,25 @@ def _csv_env(name: str, default: Iterable[str]) -> frozenset[str]:
     if raw is None:
         return frozenset(default)
     return frozenset(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _cost_limit_microdollars_env(name: str, default: str) -> int:
+    raw = os.getenv(name, default).strip()
+    try:
+        usd = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a decimal USD amount") from exc
+    microdollars = int((usd * MICRODOLLARS_PER_USD).to_integral_value(rounding=ROUND_HALF_UP))
+    if microdollars < 1:
+        raise ValueError(f"{name} must be greater than zero")
+    return microdollars
+
+
+def _cost_limit_window_env(name: str, default: str) -> str:
+    window = os.getenv(name, default).strip()
+    if window not in API_KEY_COST_LIMIT_WINDOWS:
+        raise ValueError(f"{name} must be one of {', '.join(sorted(API_KEY_COST_LIMIT_WINDOWS))}")
+    return window
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +74,8 @@ class BrokerConfig:
     codex_lb_encryption_key_path: str = DEFAULT_CODEX_LB_ENCRYPTION_KEY_PATH
     dashboard_session_ttl_seconds: int = DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
     http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS
+    api_key_cost_limit_microdollars: int = 50_000_000
+    api_key_cost_limit_window: str = DEFAULT_API_KEY_COST_LIMIT_WINDOW
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -72,4 +98,12 @@ class BrokerConfig:
                 os.getenv("BROKER_DASHBOARD_SESSION_TTL_SECONDS", str(DEFAULT_DASHBOARD_SESSION_TTL_SECONDS))
             ),
             http_timeout_seconds=float(os.getenv("BROKER_HTTP_TIMEOUT_SECONDS", str(DEFAULT_HTTP_TIMEOUT_SECONDS))),
+            api_key_cost_limit_microdollars=_cost_limit_microdollars_env(
+                "BROKER_API_KEY_COST_LIMIT_USD",
+                DEFAULT_API_KEY_COST_LIMIT_USD,
+            ),
+            api_key_cost_limit_window=_cost_limit_window_env(
+                "BROKER_API_KEY_COST_LIMIT_WINDOW",
+                DEFAULT_API_KEY_COST_LIMIT_WINDOW,
+            ),
         )

@@ -31,10 +31,12 @@ services:
       BROKER_ALLOWED_OWNER: DongwonTTuna-Labs
       BROKER_ALLOWED_REPOSITORIES: rs-builder-relayer-client,polymarket-liquidity-farming-rs,bioden
       BROKER_ALLOWED_WORKFLOWS: .github/workflows/codex-pr-review.yml,.github/workflows/resolve-checker.yml
-      BROKER_ALLOWED_EVENTS: pull_request,issue_comment,workflow_dispatch
+      BROKER_ALLOWED_EVENTS: pull_request,pull_request_target,issue_comment,workflow_dispatch
       BROKER_ALLOWED_ACTORS: DongwonTTuna
       BROKER_ALLOWED_REFS: refs/heads/main
       BROKER_TOKEN_TTL_SECONDS: "3600"
+      BROKER_API_KEY_COST_LIMIT_USD: "50"
+      BROKER_API_KEY_COST_LIMIT_WINDOW: weekly
       BROKER_DB_PATH: /var/lib/github-oidc-broker/broker.db
     ports:
       - "127.0.0.1:2465:2465"
