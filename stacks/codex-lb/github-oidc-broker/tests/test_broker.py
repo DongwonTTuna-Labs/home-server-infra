@@ -27,7 +27,7 @@ from app.codex_lb import (
     CodexLbDashboardClient,
     DashboardSessionCookieFactory,
 )
-from app.config import DEFAULT_AUDIENCE, BrokerConfig
+from app.config import DEFAULT_ALLOWED_EVENTS, DEFAULT_AUDIENCE, BrokerConfig
 from app.models import GithubOidcClaims, IssuedToken
 from app.store import AuditStore, ReplayStore
 
@@ -54,12 +54,22 @@ def config() -> BrokerConfig:
         allowed_owner="DongwonTTuna-Labs",
         allowed_repositories={"rs-builder-relayer-client", "polymarket-liquidity-farming-rs", "bioden"},
         allowed_workflows={".github/workflows/codex-pr-review.yml", ".github/workflows/resolve-checker.yml"},
-        allowed_events={"pull_request", "issue_comment", "workflow_dispatch"},
+        allowed_events={"pull_request", "pull_request_target", "issue_comment", "workflow_dispatch"},
         allowed_actors={"DongwonTTuna"},
         allowed_refs={"refs/heads/main"},
         token_ttl_seconds=3600,
         codex_lb_base_url="http://codex-lb.test",
     )
+
+
+def test_config_parses_api_key_cost_limit_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROKER_API_KEY_COST_LIMIT_USD", "50")
+    monkeypatch.setenv("BROKER_API_KEY_COST_LIMIT_WINDOW", "weekly")
+
+    parsed = BrokerConfig.from_env()
+
+    assert parsed.api_key_cost_limit_microdollars == 50_000_000
+    assert parsed.api_key_cost_limit_window == "weekly"
 
 
 def make_token(
@@ -167,6 +177,25 @@ def test_verifies_valid_github_oidc_token(
     assert claims.run_attempt == "1"
 
 
+def test_default_event_allowlist_includes_pull_request_target() -> None:
+    assert "pull_request_target" in DEFAULT_ALLOWED_EVENTS
+
+
+def test_verifies_trusted_pull_request_target_token(
+    signing_key: rsa.RSAPrivateKey,
+    public_jwk: PyJWK,
+    config: BrokerConfig,
+) -> None:
+    claims = verify_github_oidc_token(
+        make_token(signing_key, event_name="pull_request_target"),
+        public_jwk,
+        config,
+    )
+
+    assert claims.event_name == "pull_request_target"
+    assert claims.workflow_file == ".github/workflows/codex-pr-review.yml"
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -271,6 +300,14 @@ def test_dashboard_client_creates_key_through_codex_lb_api(config: BrokerConfig)
         assert DASHBOARD_SESSION_COOKIE in request.headers["cookie"]
         assert body["name"] == "gha:bioden:codex-pr-review.yml:26446723001:1"
         assert body["expiresAt"].endswith("Z")
+        assert body["limits"] == [
+            {
+                "limitType": "cost_usd",
+                "limitWindow": "weekly",
+                "maxValue": 50_000_000,
+                "modelFilter": None,
+            }
+        ]
         return httpx.Response(200, json={"id": "api-key-id", "key": "sk-clb-secret", "expiresAt": body["expiresAt"]})
 
     client = CodexLbDashboardClient(config, transport=httpx.MockTransport(handler), session_factory=StaticSessionFactory())
