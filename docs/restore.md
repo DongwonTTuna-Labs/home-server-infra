@@ -9,7 +9,7 @@ This repository restores configuration, not live data.
 3. Start the stack:
 
    ```sh
-   docker compose -f stacks/codex-lb/compose.yaml build github-oidc-broker
+   docker compose -f stacks/codex-lb/compose.yaml build codex-lb github-oidc-broker
    docker compose -f stacks/codex-lb/compose.yaml up -d
    ```
 

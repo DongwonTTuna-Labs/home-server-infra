@@ -23,7 +23,7 @@ These are required on each host but are not committed:
 ## Deploy
 
 ```sh
-docker compose -f stacks/codex-lb/compose.yaml build github-oidc-broker
+docker compose -f stacks/codex-lb/compose.yaml build codex-lb github-oidc-broker
 docker compose -f stacks/codex-lb/compose.yaml up -d
 stacks/codex-lb/scripts/install-user-timer.sh
 ```
