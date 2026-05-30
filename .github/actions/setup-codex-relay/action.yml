@@ -1,20 +1,24 @@
 name: Setup Codex OIDC relay
-description: Exchange GitHub OIDC for a short-lived relay credential and prepare a Codex action home.
+description: Exchange GitHub OIDC for a short-lived native codex-lb credential and prepare a Codex action home.
 
 inputs:
   audience:
-    description: GitHub OIDC audience for the relay exchange.
+    description: GitHub OIDC audience for the native relay exchange.
     required: false
     default: https://relay-ai.dongwontuna.net/github-actions
   broker-url:
-    description: OIDC token exchange endpoint. The broker remains the default until native codex-lb trust bootstrap is committed.
+    description: OIDC token exchange endpoint. The input name is kept for workflow compatibility.
     required: false
-    default: https://relay-ai.dongwontuna.net/oidc/exchange
+    default: https://relay-ai.dongwontuna.net/v1/oidc/token
   codex-home:
     description: Directory to use as the isolated Codex action home.
     required: true
   trusted-actor:
-    description: GitHub actor allowed to exchange OIDC for a relay credential.
+    description: Single GitHub actor allowed to exchange OIDC with the relay. Prefer trusted-actors for new workflows.
+    required: false
+    default: ""
+  trusted-actors:
+    description: Comma-separated GitHub actors allowed to exchange OIDC with the relay.
     required: false
     default: DongwonTTuna
 
@@ -36,7 +40,7 @@ runs:
       id: codex-args
       shell: bash
       run: |
-        printf '%s\n' 'codex_args=["--enable","use_legacy_landlock","--disable","shell_tool","--ignore-user-config","--ignore-rules","--color","never","-c","model_provider=\"ai-relay\"","-c","model_providers.ai-relay.name=\"AI Relay\"","-c","model_providers.ai-relay.base_url=\"https://relay-ai.dongwontuna.net/v1\"","-c","model_providers.ai-relay.wire_api=\"responses\"","-c","model_providers.ai-relay.env_key=\"AI_RELAY_API_KEY\"","-c","model_providers.ai-relay.supports_websockets=true","-c","model_providers.ai-relay.requires_openai_auth=false","-c","shell_environment_policy.exclude=[\"AI_RELAY_API_KEY\"]","-c","sandbox_workspace_write.network_access=false"]' >> "$GITHUB_OUTPUT"
+        printf '%s\n' 'codex_args=["--enable","use_legacy_landlock","--ignore-user-config","--ignore-rules","--color","never","-c","model_provider=\"ai-relay\"","-c","model_providers.ai-relay.name=\"AI Relay\"","-c","model_providers.ai-relay.base_url=\"https://relay-ai.dongwontuna.net/v1\"","-c","model_providers.ai-relay.wire_api=\"responses\"","-c","model_providers.ai-relay.env_key=\"AI_RELAY_API_KEY\"","-c","model_providers.ai-relay.supports_websockets=true","-c","model_providers.ai-relay.requires_openai_auth=false","-c","shell_environment_policy.exclude=[\"AI_RELAY_API_KEY\"]","-c","sandbox_workspace_write.network_access=false"]' >> "$GITHUB_OUTPUT"
 
     - name: Exchange GitHub OIDC
       id: mint
@@ -45,9 +49,30 @@ runs:
         EXCHANGE_AUDIENCE: ${{ inputs.audience }}
         EXCHANGE_URL: ${{ inputs.broker-url }}
         TRUSTED_ACTOR: ${{ inputs.trusted-actor }}
+        TRUSTED_ACTORS: ${{ inputs.trusted-actors }}
       run: |
         set -euo pipefail
-        if [ "${GITHUB_ACTOR:-}" != "$TRUSTED_ACTOR" ] || [ "${GITHUB_TRIGGERING_ACTOR:-}" != "$TRUSTED_ACTOR" ]; then
+        trusted_values="$TRUSTED_ACTORS"
+        if [ -n "$TRUSTED_ACTOR" ]; then
+          trusted_values="${trusted_values:+$trusted_values,}$TRUSTED_ACTOR"
+        fi
+        actor_allowed=false
+        triggering_actor_allowed=false
+        IFS=',' read -r -a trusted_actors <<< "$trusted_values"
+        for trusted in "${trusted_actors[@]}"; do
+          trusted="${trusted#"${trusted%%[![:space:]]*}"}"
+          trusted="${trusted%"${trusted##*[![:space:]]}"}"
+          if [ -z "$trusted" ]; then
+            continue
+          fi
+          if [ "${GITHUB_ACTOR:-}" = "$trusted" ]; then
+            actor_allowed=true
+          fi
+          if [ "${GITHUB_TRIGGERING_ACTOR:-}" = "$trusted" ]; then
+            triggering_actor_allowed=true
+          fi
+        done
+        if [ "$actor_allowed" != true ] || [ "$triggering_actor_allowed" != true ]; then
           echo "refusing OIDC relay exchange for actor=${GITHUB_ACTOR:-} triggering_actor=${GITHUB_TRIGGERING_ACTOR:-}" >&2
           exit 1
         fi
