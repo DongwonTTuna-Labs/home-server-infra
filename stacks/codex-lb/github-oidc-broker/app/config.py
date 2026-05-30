@@ -25,7 +25,16 @@ DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW = {
     ".github/workflows/codex-pr-review.yml": frozenset({"pull_request_target", "issue_comment"}),
     ".github/workflows/resolve-checker.yml": frozenset({"workflow_run", "workflow_dispatch"}),
 }
-DEFAULT_ALLOWED_ACTORS = frozenset({"DongwonTTuna"})
+DEFAULT_ALLOWED_ACTORS_BY_WORKFLOW_EVENT = {
+    ".github/workflows/codex-pr-review.yml": {
+        "pull_request_target": frozenset({"DongwonTTuna", "codex-reviewer-for-dongwonttuna[bot]"}),
+        "issue_comment": frozenset({"DongwonTTuna"}),
+    },
+    ".github/workflows/resolve-checker.yml": {
+        "workflow_run": frozenset({"DongwonTTuna", "codex-reviewer-for-dongwonttuna[bot]"}),
+        "workflow_dispatch": frozenset({"DongwonTTuna"}),
+    },
+}
 DEFAULT_ALLOWED_REFS = frozenset({"refs/heads/main"})
 DEFAULT_CODEX_LB_BASE_URL = "http://codex-lb:2455"
 DEFAULT_CODEX_LB_ENCRYPTION_KEY_PATH = "/var/lib/codex-lb/encryption.key"
@@ -69,6 +78,44 @@ def _workflow_events_env(name: str, default: dict[str, frozenset[str]]) -> dict[
     return result
 
 
+def _workflow_event_actors_env(
+    name: str,
+    default: dict[str, dict[str, frozenset[str]]],
+) -> dict[str, dict[str, frozenset[str]]]:
+    if os.getenv("BROKER_ALLOWED_ACTORS") is not None:
+        raise ValueError("BROKER_ALLOWED_ACTORS is no longer supported; use BROKER_ALLOWED_ACTORS_BY_WORKFLOW_EVENT")
+    raw = os.getenv(name)
+    if raw is None:
+        return {
+            workflow: {event: frozenset(actors) for event, actors in events.items()}
+            for workflow, events in default.items()
+        }
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON object mapping workflow files to event actor maps") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object mapping workflow files to event actor maps")
+    result: dict[str, dict[str, frozenset[str]]] = {}
+    for workflow, events in parsed.items():
+        if not isinstance(workflow, str) or not workflow.strip():
+            raise ValueError(f"{name} workflow keys must be non-empty strings")
+        if not isinstance(events, dict) or not events:
+            raise ValueError(f"{name}[{workflow!r}] must be a non-empty event actor map")
+        normalized_events: dict[str, frozenset[str]] = {}
+        for event, actors in events.items():
+            if not isinstance(event, str) or not event.strip():
+                raise ValueError(f"{name}[{workflow!r}] event keys must be non-empty strings")
+            if not isinstance(actors, list) or not actors:
+                raise ValueError(f"{name}[{workflow!r}][{event!r}] must be a non-empty actor list")
+            normalized_actors = frozenset(str(actor).strip() for actor in actors if str(actor).strip())
+            if len(normalized_actors) != len(actors):
+                raise ValueError(f"{name}[{workflow!r}][{event!r}] contains an empty actor")
+            normalized_events[event.strip()] = normalized_actors
+        result[workflow.strip()] = normalized_events
+    return result
+
+
 def _cost_limit_microdollars_env(name: str, default: str) -> int:
     raw = os.getenv(name, default).strip()
     try:
@@ -99,7 +146,12 @@ class BrokerConfig:
             workflow: frozenset(events) for workflow, events in DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW.items()
         }
     )
-    allowed_actors: set[str] | frozenset[str] = DEFAULT_ALLOWED_ACTORS
+    allowed_actors_by_workflow_event: dict[str, dict[str, set[str] | frozenset[str]]] = field(
+        default_factory=lambda: {
+            workflow: {event: frozenset(actors) for event, actors in events.items()}
+            for workflow, events in DEFAULT_ALLOWED_ACTORS_BY_WORKFLOW_EVENT.items()
+        }
+    )
     allowed_refs: set[str] | frozenset[str] = DEFAULT_ALLOWED_REFS
     token_ttl_seconds: int = 3600
     broker_db_path: str = "/var/lib/github-oidc-broker/broker.db"
@@ -121,7 +173,10 @@ class BrokerConfig:
                 "BROKER_ALLOWED_EVENTS_BY_WORKFLOW",
                 DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW,
             ),
-            allowed_actors=_csv_env("BROKER_ALLOWED_ACTORS", DEFAULT_ALLOWED_ACTORS),
+            allowed_actors_by_workflow_event=_workflow_event_actors_env(
+                "BROKER_ALLOWED_ACTORS_BY_WORKFLOW_EVENT",
+                DEFAULT_ALLOWED_ACTORS_BY_WORKFLOW_EVENT,
+            ),
             allowed_refs=_csv_env("BROKER_ALLOWED_REFS", DEFAULT_ALLOWED_REFS),
             token_ttl_seconds=int(os.getenv("BROKER_TOKEN_TTL_SECONDS", "3600")),
             broker_db_path=os.getenv("BROKER_DB_PATH", "/var/lib/github-oidc-broker/broker.db"),

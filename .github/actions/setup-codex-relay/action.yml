@@ -13,8 +13,8 @@ inputs:
   codex-home:
     description: Directory to use as the isolated Codex action home.
     required: true
-  trusted-actor:
-    description: GitHub actor allowed to exchange OIDC with the relay broker.
+  trusted-actors:
+    description: Comma-separated GitHub actors allowed to exchange OIDC with the relay broker.
     required: false
     default: DongwonTTuna
 
@@ -44,10 +44,26 @@ runs:
       env:
         BROKER_AUDIENCE: ${{ inputs.audience }}
         BROKER_URL: ${{ inputs.broker-url }}
-        TRUSTED_ACTOR: ${{ inputs.trusted-actor }}
+        TRUSTED_ACTORS: ${{ inputs.trusted-actors }}
       run: |
         set -euo pipefail
-        if [ "${GITHUB_ACTOR:-}" != "$TRUSTED_ACTOR" ] || [ "${GITHUB_TRIGGERING_ACTOR:-}" != "$TRUSTED_ACTOR" ]; then
+        actor_allowed=false
+        triggering_actor_allowed=false
+        IFS=',' read -r -a trusted_actors <<< "$TRUSTED_ACTORS"
+        for trusted in "${trusted_actors[@]}"; do
+          trusted="${trusted#"${trusted%%[![:space:]]*}"}"
+          trusted="${trusted%"${trusted##*[![:space:]]}"}"
+          if [ -z "$trusted" ]; then
+            continue
+          fi
+          if [ "${GITHUB_ACTOR:-}" = "$trusted" ]; then
+            actor_allowed=true
+          fi
+          if [ "${GITHUB_TRIGGERING_ACTOR:-}" = "$trusted" ]; then
+            triggering_actor_allowed=true
+          fi
+        done
+        if [ "$actor_allowed" != true ] || [ "$triggering_actor_allowed" != true ]; then
           echo "refusing OIDC relay exchange for actor=${GITHUB_ACTOR:-} triggering_actor=${GITHUB_TRIGGERING_ACTOR:-}" >&2
           exit 1
         fi

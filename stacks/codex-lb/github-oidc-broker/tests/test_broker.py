@@ -58,7 +58,16 @@ def config() -> BrokerConfig:
             ".github/workflows/codex-pr-review.yml": {"pull_request_target", "issue_comment"},
             ".github/workflows/resolve-checker.yml": {"workflow_run", "workflow_dispatch"},
         },
-        allowed_actors={"DongwonTTuna"},
+        allowed_actors_by_workflow_event={
+            ".github/workflows/codex-pr-review.yml": {
+                "pull_request_target": {"DongwonTTuna", "codex-reviewer-for-dongwonttuna[bot]"},
+                "issue_comment": {"DongwonTTuna"},
+            },
+            ".github/workflows/resolve-checker.yml": {
+                "workflow_run": {"DongwonTTuna", "codex-reviewer-for-dongwonttuna[bot]"},
+                "workflow_dispatch": {"DongwonTTuna"},
+            },
+        },
         allowed_refs={"refs/heads/main"},
         token_ttl_seconds=3600,
         codex_lb_base_url="http://codex-lb.test",
@@ -228,6 +237,53 @@ def test_verifies_allowed_workflow_event_pairs(
 
 
 @pytest.mark.parametrize(
+    ("workflow", "event_name", "actor"),
+    [
+        (".github/workflows/codex-pr-review.yml", "pull_request_target", "codex-reviewer-for-dongwonttuna[bot]"),
+        (".github/workflows/resolve-checker.yml", "workflow_run", "codex-reviewer-for-dongwonttuna[bot]"),
+    ],
+)
+def test_verifies_allowed_workflow_event_actor_pairs(
+    signing_key: rsa.RSAPrivateKey,
+    public_jwk: PyJWK,
+    config: BrokerConfig,
+    workflow: str,
+    event_name: str,
+    actor: str,
+) -> None:
+    claims = verify_github_oidc_token(
+        make_token(signing_key, workflow=workflow, event_name=event_name, actor=actor),
+        public_jwk,
+        config,
+    )
+
+    assert claims.actor == actor
+
+
+@pytest.mark.parametrize(
+    ("workflow", "event_name", "actor"),
+    [
+        (".github/workflows/codex-pr-review.yml", "issue_comment", "codex-reviewer-for-dongwonttuna[bot]"),
+        (".github/workflows/resolve-checker.yml", "workflow_dispatch", "codex-reviewer-for-dongwonttuna[bot]"),
+    ],
+)
+def test_rejects_disallowed_workflow_event_actor_pairs(
+    signing_key: rsa.RSAPrivateKey,
+    public_jwk: PyJWK,
+    config: BrokerConfig,
+    workflow: str,
+    event_name: str,
+    actor: str,
+) -> None:
+    with pytest.raises(OidcValidationError, match="workflow_event_actor_pair_denied"):
+        verify_github_oidc_token(
+            make_token(signing_key, workflow=workflow, event_name=event_name, actor=actor),
+            public_jwk,
+            config,
+        )
+
+
+@pytest.mark.parametrize(
     ("workflow", "event_name"),
     [
         (".github/workflows/codex-pr-review.yml", "workflow_run"),
@@ -254,6 +310,13 @@ def test_config_rejects_legacy_global_allowed_events(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("BROKER_ALLOWED_EVENTS", "workflow_run")
 
     with pytest.raises(ValueError, match="BROKER_ALLOWED_EVENTS is no longer supported"):
+        BrokerConfig.from_env()
+
+
+def test_config_rejects_legacy_global_allowed_actors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROKER_ALLOWED_ACTORS", "DongwonTTuna,codex-reviewer-for-dongwonttuna[bot]")
+
+    with pytest.raises(ValueError, match="BROKER_ALLOWED_ACTORS is no longer supported"):
         BrokerConfig.from_env()
 
 
