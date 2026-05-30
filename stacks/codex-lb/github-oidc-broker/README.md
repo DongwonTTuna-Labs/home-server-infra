@@ -12,7 +12,9 @@ Codex traffic.
 
 - Accepts GitHub Actions OIDC JWTs from `https://token.actions.githubusercontent.com`.
 - Requires audience `https://relay-ai.dongwontuna.net/github-actions`.
-- Allows only private `DongwonTTuna-Labs` repositories and selected workflow files.
+- Allows only private `DongwonTTuna-Labs` repositories and selected workflow/event pairs.
+- Default pairs are `codex-pr-review.yml` with `pull_request_target`/`issue_comment`,
+  and `resolve-checker.yml` with `workflow_run`/`workflow_dispatch`.
 - Allows only workflows running from `refs/heads/main`.
 - Allows only self-hosted runner jobs and the `DongwonTTuna` actor by default.
 - Records each exchanged JWT hash in broker-local SQLite storage to prevent replay.
