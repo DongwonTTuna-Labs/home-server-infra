@@ -1,20 +1,24 @@
 name: Setup Codex OIDC relay
-description: Exchange GitHub OIDC for a short-lived relay credential and prepare a Codex action home.
+description: Exchange GitHub OIDC for a short-lived native codex-lb credential and prepare a Codex action home.
 
 inputs:
   audience:
-    description: GitHub OIDC audience for the relay broker.
+    description: GitHub OIDC audience for the native relay exchange.
     required: false
     default: https://relay-ai.dongwontuna.net/github-actions
   broker-url:
-    description: Relay broker token exchange endpoint.
+    description: OIDC token exchange endpoint. The input name is kept for workflow compatibility.
     required: false
-    default: https://relay-ai.dongwontuna.net/oidc/exchange
+    default: https://relay-ai.dongwontuna.net/v1/oidc/token
   codex-home:
     description: Directory to use as the isolated Codex action home.
     required: true
+  trusted-actor:
+    description: Single GitHub actor allowed to exchange OIDC with the relay. Prefer trusted-actors for new workflows.
+    required: false
+    default: ""
   trusted-actors:
-    description: Comma-separated GitHub actors allowed to exchange OIDC with the relay broker.
+    description: Comma-separated GitHub actors allowed to exchange OIDC with the relay.
     required: false
     default: DongwonTTuna
 
@@ -42,14 +46,19 @@ runs:
       id: mint
       shell: bash
       env:
-        BROKER_AUDIENCE: ${{ inputs.audience }}
-        BROKER_URL: ${{ inputs.broker-url }}
+        EXCHANGE_AUDIENCE: ${{ inputs.audience }}
+        EXCHANGE_URL: ${{ inputs.broker-url }}
+        TRUSTED_ACTOR: ${{ inputs.trusted-actor }}
         TRUSTED_ACTORS: ${{ inputs.trusted-actors }}
       run: |
         set -euo pipefail
+        trusted_values="$TRUSTED_ACTORS"
+        if [ -n "$TRUSTED_ACTOR" ]; then
+          trusted_values="${trusted_values:+$trusted_values,}$TRUSTED_ACTOR"
+        fi
         actor_allowed=false
         triggering_actor_allowed=false
-        IFS=',' read -r -a trusted_actors <<< "$TRUSTED_ACTORS"
+        IFS=',' read -r -a trusted_actors <<< "$trusted_values"
         for trusted in "${trusted_actors[@]}"; do
           trusted="${trusted#"${trusted%%[![:space:]]*}"}"
           trusted="${trusted%"${trusted##*[![:space:]]}"}"
@@ -92,7 +101,7 @@ runs:
 
         parts = urllib.parse.urlsplit(require_env("ACTIONS_ID_TOKEN_REQUEST_URL"))
         query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-        query.append(("audience", require_env("BROKER_AUDIENCE")))
+        query.append(("audience", require_env("EXCHANGE_AUDIENCE")))
         request_url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
         oidc_payload = request_json(
             urllib.request.Request(
@@ -111,7 +120,7 @@ runs:
 
         exchanged = request_json(
             urllib.request.Request(
-                require_env("BROKER_URL"),
+                require_env("EXCHANGE_URL"),
                 data=json.dumps({"token": oidc_token}).encode("utf-8"),
                 method="POST",
                 headers={
@@ -121,17 +130,18 @@ runs:
                 },
             )
         )
-        relay_token = exchanged.get("relay_token")
-        if exchanged.get("token_type") != "Bearer" or not isinstance(relay_token, str) or not relay_token.startswith("sk-clb-"):
-            raise SystemExit("broker response did not include a valid relay credential")
+        token_type = exchanged.get("tokenType") or exchanged.get("token_type")
+        relay_token = exchanged.get("apiKey") or exchanged.get("relay_token")
+        if token_type != "Bearer" or not isinstance(relay_token, str) or not relay_token.startswith("sk-clb-"):
+            raise SystemExit("exchange response did not include a valid relay credential")
         print(f"::add-mask::{relay_token}")
 
         with open(require_env("GITHUB_OUTPUT"), "a", encoding="utf-8") as output:
-            for key in ("relay_token", "expires_at"):
-                value = exchanged.get(key)
-                if not isinstance(value, str) or not value:
-                    raise SystemExit(f"broker response did not include {key}")
-                output.write(f"{key}={value}\n")
+            expires_at = exchanged.get("expiresAt") or exchanged.get("expires_at")
+            if not isinstance(expires_at, str) or not expires_at:
+                raise SystemExit("exchange response did not include expires_at")
+            output.write(f"relay_token={relay_token}\n")
+            output.write(f"expires_at={expires_at}\n")
         PY
 
     - name: Check relay credential
