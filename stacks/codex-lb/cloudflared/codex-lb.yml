@@ -3,8 +3,5 @@ credentials-file: /etc/cloudflared/codex-lb.json
 
 ingress:
   - hostname: relay-ai.dongwontuna.net
-    path: ^/oidc/.*
-    service: http://localhost:2465
-  - hostname: relay-ai.dongwontuna.net
     service: http://localhost:2455
   - service: http_status:404
