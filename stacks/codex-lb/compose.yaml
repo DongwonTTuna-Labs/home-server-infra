@@ -2,9 +2,9 @@ name: codex-lb
 
 services:
   codex-lb:
-    image: codex-lb:oidc-pr4-49ada06
+    image: codex-lb:oidc-pr4-9c8e9f9
     build:
-      context: https://github.com/DongwonTTuna-Labs/codex-lb.git#49ada06f0046d4f1ff55279c1264a88ccee81b9d
+      context: https://github.com/DongwonTTuna-Labs/codex-lb.git#9c8e9f9fd821d224838c97586f55b1573965bfc3
       dockerfile: Dockerfile
     container_name: codex-lb
     pull_policy: build
