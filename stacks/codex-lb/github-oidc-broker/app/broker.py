@@ -103,8 +103,9 @@ def verify_github_oidc_token(token: str, signing_key: PyJWK, config: BrokerConfi
     _assert_trusted_ref(claims, workflow_ref, repository, config)
 
     event_name = _require_claim(claims, "event_name")
-    if event_name not in config.allowed_events:
-        raise OidcValidationError("event_name is not allowed")
+    allowed_events_for_workflow = config.allowed_events_by_workflow.get(workflow_file)
+    if not allowed_events_for_workflow or event_name not in allowed_events_for_workflow:
+        raise OidcValidationError("workflow_event_pair_denied")
 
     actor = _require_claim(claims, "actor")
     if actor not in config.allowed_actors:

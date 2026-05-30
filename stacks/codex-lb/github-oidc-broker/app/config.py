@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 
@@ -20,7 +21,10 @@ DEFAULT_ALLOWED_WORKFLOWS = frozenset(
         ".github/workflows/resolve-checker.yml",
     }
 )
-DEFAULT_ALLOWED_EVENTS = frozenset({"pull_request", "pull_request_target", "issue_comment", "workflow_dispatch"})
+DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW = {
+    ".github/workflows/codex-pr-review.yml": frozenset({"pull_request_target", "issue_comment"}),
+    ".github/workflows/resolve-checker.yml": frozenset({"workflow_run", "workflow_dispatch"}),
+}
 DEFAULT_ALLOWED_ACTORS = frozenset({"DongwonTTuna"})
 DEFAULT_ALLOWED_REFS = frozenset({"refs/heads/main"})
 DEFAULT_CODEX_LB_BASE_URL = "http://codex-lb:2455"
@@ -38,6 +42,31 @@ def _csv_env(name: str, default: Iterable[str]) -> frozenset[str]:
     if raw is None:
         return frozenset(default)
     return frozenset(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _workflow_events_env(name: str, default: dict[str, frozenset[str]]) -> dict[str, frozenset[str]]:
+    if os.getenv("BROKER_ALLOWED_EVENTS") is not None:
+        raise ValueError("BROKER_ALLOWED_EVENTS is no longer supported; use BROKER_ALLOWED_EVENTS_BY_WORKFLOW")
+    raw = os.getenv(name)
+    if raw is None:
+        return {workflow: frozenset(events) for workflow, events in default.items()}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON object mapping workflow files to event lists") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object mapping workflow files to event lists")
+    result: dict[str, frozenset[str]] = {}
+    for workflow, events in parsed.items():
+        if not isinstance(workflow, str) or not workflow.strip():
+            raise ValueError(f"{name} workflow keys must be non-empty strings")
+        if not isinstance(events, list) or not events:
+            raise ValueError(f"{name}[{workflow!r}] must be a non-empty event list")
+        normalized = frozenset(str(event).strip() for event in events if str(event).strip())
+        if len(normalized) != len(events):
+            raise ValueError(f"{name}[{workflow!r}] contains an empty event")
+        result[workflow.strip()] = normalized
+    return result
 
 
 def _cost_limit_microdollars_env(name: str, default: str) -> int:
@@ -65,7 +94,11 @@ class BrokerConfig:
     allowed_owner: str = DEFAULT_ALLOWED_OWNER
     allowed_repositories: set[str] | frozenset[str] = DEFAULT_ALLOWED_REPOSITORIES
     allowed_workflows: set[str] | frozenset[str] = DEFAULT_ALLOWED_WORKFLOWS
-    allowed_events: set[str] | frozenset[str] = DEFAULT_ALLOWED_EVENTS
+    allowed_events_by_workflow: dict[str, set[str] | frozenset[str]] = field(
+        default_factory=lambda: {
+            workflow: frozenset(events) for workflow, events in DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW.items()
+        }
+    )
     allowed_actors: set[str] | frozenset[str] = DEFAULT_ALLOWED_ACTORS
     allowed_refs: set[str] | frozenset[str] = DEFAULT_ALLOWED_REFS
     token_ttl_seconds: int = 3600
@@ -84,7 +117,10 @@ class BrokerConfig:
             allowed_owner=os.getenv("BROKER_ALLOWED_OWNER", DEFAULT_ALLOWED_OWNER),
             allowed_repositories=_csv_env("BROKER_ALLOWED_REPOSITORIES", DEFAULT_ALLOWED_REPOSITORIES),
             allowed_workflows=_csv_env("BROKER_ALLOWED_WORKFLOWS", DEFAULT_ALLOWED_WORKFLOWS),
-            allowed_events=_csv_env("BROKER_ALLOWED_EVENTS", DEFAULT_ALLOWED_EVENTS),
+            allowed_events_by_workflow=_workflow_events_env(
+                "BROKER_ALLOWED_EVENTS_BY_WORKFLOW",
+                DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW,
+            ),
             allowed_actors=_csv_env("BROKER_ALLOWED_ACTORS", DEFAULT_ALLOWED_ACTORS),
             allowed_refs=_csv_env("BROKER_ALLOWED_REFS", DEFAULT_ALLOWED_REFS),
             token_ttl_seconds=int(os.getenv("BROKER_TOKEN_TTL_SECONDS", "3600")),

@@ -27,7 +27,7 @@ from app.codex_lb import (
     CodexLbDashboardClient,
     DashboardSessionCookieFactory,
 )
-from app.config import DEFAULT_ALLOWED_EVENTS, DEFAULT_AUDIENCE, BrokerConfig
+from app.config import DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW, DEFAULT_AUDIENCE, BrokerConfig
 from app.models import GithubOidcClaims, IssuedToken
 from app.store import AuditStore, ReplayStore
 
@@ -54,7 +54,10 @@ def config() -> BrokerConfig:
         allowed_owner="DongwonTTuna-Labs",
         allowed_repositories={"rs-builder-relayer-client", "polymarket-liquidity-farming-rs", "bioden"},
         allowed_workflows={".github/workflows/codex-pr-review.yml", ".github/workflows/resolve-checker.yml"},
-        allowed_events={"pull_request", "pull_request_target", "issue_comment", "workflow_dispatch"},
+        allowed_events_by_workflow={
+            ".github/workflows/codex-pr-review.yml": {"pull_request_target", "issue_comment"},
+            ".github/workflows/resolve-checker.yml": {"workflow_run", "workflow_dispatch"},
+        },
         allowed_actors={"DongwonTTuna"},
         allowed_refs={"refs/heads/main"},
         token_ttl_seconds=3600,
@@ -78,7 +81,7 @@ def make_token(
     audience: str = AUDIENCE,
     repository: str = "DongwonTTuna-Labs/bioden",
     workflow: str = ".github/workflows/codex-pr-review.yml",
-    event_name: str = "pull_request",
+    event_name: str = "pull_request_target",
     actor: str = "DongwonTTuna",
     runner_environment: str = "self-hosted",
     visibility: str = "private",
@@ -118,7 +121,7 @@ def broker_claims() -> GithubOidcClaims:
         repository="DongwonTTuna-Labs/bioden",
         repository_name="bioden",
         workflow_file=".github/workflows/codex-pr-review.yml",
-        event_name="pull_request",
+        event_name="pull_request_target",
         actor="DongwonTTuna",
         run_id="26446723001",
         run_attempt="1",
@@ -177,8 +180,11 @@ def test_verifies_valid_github_oidc_token(
     assert claims.run_attempt == "1"
 
 
-def test_default_event_allowlist_includes_pull_request_target() -> None:
-    assert "pull_request_target" in DEFAULT_ALLOWED_EVENTS
+def test_default_event_allowlist_is_workflow_specific() -> None:
+    assert DEFAULT_ALLOWED_EVENTS_BY_WORKFLOW == {
+        ".github/workflows/codex-pr-review.yml": frozenset({"pull_request_target", "issue_comment"}),
+        ".github/workflows/resolve-checker.yml": frozenset({"workflow_run", "workflow_dispatch"}),
+    }
 
 
 def test_verifies_trusted_pull_request_target_token(
@@ -197,6 +203,61 @@ def test_verifies_trusted_pull_request_target_token(
 
 
 @pytest.mark.parametrize(
+    ("workflow", "event_name"),
+    [
+        (".github/workflows/codex-pr-review.yml", "issue_comment"),
+        (".github/workflows/resolve-checker.yml", "workflow_run"),
+        (".github/workflows/resolve-checker.yml", "workflow_dispatch"),
+    ],
+)
+def test_verifies_allowed_workflow_event_pairs(
+    signing_key: rsa.RSAPrivateKey,
+    public_jwk: PyJWK,
+    config: BrokerConfig,
+    workflow: str,
+    event_name: str,
+) -> None:
+    claims = verify_github_oidc_token(
+        make_token(signing_key, workflow=workflow, event_name=event_name),
+        public_jwk,
+        config,
+    )
+
+    assert claims.workflow_file == workflow
+    assert claims.event_name == event_name
+
+
+@pytest.mark.parametrize(
+    ("workflow", "event_name"),
+    [
+        (".github/workflows/codex-pr-review.yml", "workflow_run"),
+        (".github/workflows/resolve-checker.yml", "pull_request_target"),
+        (".github/workflows/resolve-checker.yml", "issue_comment"),
+    ],
+)
+def test_rejects_disallowed_workflow_event_pairs(
+    signing_key: rsa.RSAPrivateKey,
+    public_jwk: PyJWK,
+    config: BrokerConfig,
+    workflow: str,
+    event_name: str,
+) -> None:
+    with pytest.raises(OidcValidationError, match="workflow_event_pair_denied"):
+        verify_github_oidc_token(
+            make_token(signing_key, workflow=workflow, event_name=event_name),
+            public_jwk,
+            config,
+        )
+
+
+def test_config_rejects_legacy_global_allowed_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROKER_ALLOWED_EVENTS", "workflow_run")
+
+    with pytest.raises(ValueError, match="BROKER_ALLOWED_EVENTS is no longer supported"):
+        BrokerConfig.from_env()
+
+
+@pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"audience": "wrong-audience"}, "Audience"),
@@ -206,7 +267,7 @@ def test_verifies_trusted_pull_request_target_token(
         ({"workflow": ".github/workflows/deploy.yml"}, "workflow"),
         ({"ref": "refs/heads/codex/use-oidc-relay-token"}, "ref"),
         ({"workflow_ref_ref": "refs/heads/codex/use-oidc-relay-token"}, "workflow_ref ref"),
-        ({"event_name": "push"}, "event_name"),
+        ({"event_name": "push"}, "workflow_event_pair_denied"),
         ({"runner_environment": "github-hosted"}, "runner_environment"),
         ({"visibility": "public"}, "repository_visibility"),
         ({"actor": "mallory"}, "actor"),
@@ -266,7 +327,7 @@ def test_audit_store_records_non_secret_exchange_metadata(tmp_path) -> None:
 
     assert row[0] == "DongwonTTuna-Labs/bioden"
     assert row[1] == ".github/workflows/codex-pr-review.yml"
-    assert row[2] == "pull_request"
+    assert row[2] == "pull_request_target"
     assert row[3] == "DongwonTTuna"
     assert row[4] == "26446723001"
     assert row[5] == "1"
