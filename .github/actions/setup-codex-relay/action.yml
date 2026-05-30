@@ -36,7 +36,7 @@ runs:
       id: codex-args
       shell: bash
       run: |
-        printf '%s\n' 'codex_args=["--enable","use_legacy_landlock","--disable","shell_tool","--ignore-user-config","--ignore-rules","--color","never","-c","model_provider=\"ai-relay\"","-c","model_providers.ai-relay.name=\"AI Relay\"","-c","model_providers.ai-relay.base_url=\"https://relay-ai.dongwontuna.net/v1\"","-c","model_providers.ai-relay.wire_api=\"responses\"","-c","model_providers.ai-relay.env_key=\"AI_RELAY_API_KEY\"","-c","model_providers.ai-relay.supports_websockets=true","-c","model_providers.ai-relay.requires_openai_auth=false","-c","shell_environment_policy.exclude=[\"AI_RELAY_API_KEY\"]","-c","sandbox_workspace_write.network_access=false"]' >> "$GITHUB_OUTPUT"
+        printf '%s\n' 'codex_args=["--enable","use_legacy_landlock","--ignore-user-config","--ignore-rules","--color","never","-c","model_provider=\"ai-relay\"","-c","model_providers.ai-relay.name=\"AI Relay\"","-c","model_providers.ai-relay.base_url=\"https://relay-ai.dongwontuna.net/v1\"","-c","model_providers.ai-relay.wire_api=\"responses\"","-c","model_providers.ai-relay.env_key=\"AI_RELAY_API_KEY\"","-c","model_providers.ai-relay.supports_websockets=true","-c","model_providers.ai-relay.requires_openai_auth=false","-c","shell_environment_policy.exclude=[\"AI_RELAY_API_KEY\"]","-c","sandbox_workspace_write.network_access=false"]' >> "$GITHUB_OUTPUT"
 
     - name: Exchange GitHub OIDC
       id: mint

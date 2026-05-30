@@ -16,3 +16,11 @@ def test_setup_action_uses_trusted_actors_csv_without_legacy_input() -> None:
     assert "trusted-actor" not in inputs
     assert "TRUSTED_ACTORS" in run_script
     assert "${{ inputs.trusted-actor }}" not in ACTION_PATH.read_text(encoding="utf-8")
+
+
+def test_setup_action_allows_read_only_shell_without_network_or_secret_leak() -> None:
+    action_text = ACTION_PATH.read_text(encoding="utf-8")
+
+    assert '"--disable","shell_tool"' not in action_text
+    assert '"sandbox_workspace_write.network_access=false"' in action_text
+    assert '"shell_environment_policy.exclude=[\\"AI_RELAY_API_KEY\\"]"' in action_text
