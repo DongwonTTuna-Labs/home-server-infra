@@ -25,6 +25,25 @@ for path in "${required[@]}"; do
   fi
 done
 
+runner_dockerfile=stacks/codex-github-runners/Dockerfile
+runner_compose=stacks/codex-github-runners/compose.yaml
+runner_readme=stacks/codex-github-runners/README.md
+
+if grep -Eq '(^|[[:space:]])sudo([[:space:]\\]|$)|NOPASSWD|/etc/sudoers' "$runner_dockerfile"; then
+  printf 'Runner image must not install sudo or add sudoers rules.\n' >&2
+  exit 1
+fi
+
+if ! grep -q 'no-new-privileges:true' "$runner_compose"; then
+  printf 'Runner compose must keep no-new-privileges:true.\n' >&2
+  exit 1
+fi
+
+if ! grep -q 'include `sudo`' "$runner_readme" || ! grep -q 'preinstall Codex' "$runner_readme"; then
+  printf 'Runner README must document the rootless Codex action contract.\n' >&2
+  exit 1
+fi
+
 scripts/scan-secrets.sh
 docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
 

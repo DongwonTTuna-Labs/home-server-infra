@@ -39,8 +39,10 @@ chmod 0600 state/github_pat
 The shared image is published locally as `dongwontuna-labs-runner:latest`. It
 also includes the latest Node.js 24.x line, Bun, Rust, Cargo, Clippy, Rustfmt,
 the native C build toolchain, pkg-config, OpenSSL headers, Python, Git, SSH,
-curl, jq, and `lsb_release` from the `lsb-release` package. GitHub workflows
-should use the `dongwontuna-labs-runner` label.
+curl, jq, and `lsb_release` from the `lsb-release` package. The image does not
+include `sudo` or preinstall Codex; workflows that use `openai/codex-action`
+must use the action-managed Codex runtime without enabling its proxy hardening
+path. GitHub workflows should use the `dongwontuna-labs-runner` label.
 
 The PAT in `state/github_pat` needs permission to manage self-hosted runners in
 the `DongwonTTuna-Labs` organization. The organization currently requires
