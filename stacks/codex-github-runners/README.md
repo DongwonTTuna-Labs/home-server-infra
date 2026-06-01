@@ -79,8 +79,9 @@ Docker socket is not mounted into any runner.
 The runner containers intentionally do not set Docker's
 `no-new-privileges:true` option. Pinned `openai/codex-action` jobs start a local
 Responses API proxy and use `sudo chmod`/`sudo chown` to make the proxy
-server-info file root-owned before running Codex. The image still does not
-preinstall Codex; the action installs and owns its runtime per job.
+server-info file root-owned before running Codex. The image grants the runner
+user passwordless sudo for those two commands only. It still does not preinstall
+Codex; the action installs and owns its runtime per job.
 
 ## Operational Checks
 

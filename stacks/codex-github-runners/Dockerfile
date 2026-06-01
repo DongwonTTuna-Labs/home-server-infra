@@ -46,6 +46,8 @@ RUN command -v lsb_release \
     && lsb_release -a
 
 RUN useradd --create-home --shell /bin/bash --uid 1001 runner \
+    && printf '%s\n' 'runner ALL=(root) NOPASSWD: /usr/bin/chmod, /usr/bin/chown' > /etc/sudoers.d/runner-codex-action \
+    && chmod 0440 /etc/sudoers.d/runner-codex-action \
     && mkdir -p \
         "${BUN_INSTALL}" \
         "${CARGO_HOME}" \
