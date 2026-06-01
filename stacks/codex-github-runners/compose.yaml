@@ -17,8 +17,6 @@ x-runner-common: &runner-common
   cpus: "1.50"
   pids_limit: 768
   shm_size: 256m
-  security_opt:
-    - no-new-privileges:true
   tmpfs:
     - /tmp:rw,nosuid,nodev,size=512m
 

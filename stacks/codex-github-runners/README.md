@@ -76,6 +76,12 @@ Docker resource limits are intentionally modest:
 
 Docker socket is not mounted into any runner.
 
+The runner containers intentionally do not set Docker's
+`no-new-privileges:true` option. Pinned `openai/codex-action` jobs start a local
+Responses API proxy and use `sudo chmod`/`sudo chown` to make the proxy
+server-info file root-owned before running Codex. The image still does not
+preinstall Codex; the action installs and owns its runtime per job.
+
 ## Operational Checks
 
 The org runner API PAT is stored at:
