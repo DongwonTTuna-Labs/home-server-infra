@@ -25,6 +25,7 @@ RUN apt-get update \
         gh \
         gzip \
         jq \
+        lsb-release \
         libssl-dev \
         openssh-client \
         pkg-config \
@@ -40,6 +41,9 @@ RUN apt-get update \
         zip \
         zstd \
     && rm -rf /var/lib/apt/lists/*
+
+RUN command -v lsb_release \
+    && lsb_release -a
 
 RUN useradd --create-home --shell /bin/bash --uid 1001 runner \
     && mkdir -p \
