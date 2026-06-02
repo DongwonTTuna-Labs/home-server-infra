@@ -51,14 +51,16 @@ without reading the PAT.
 
 ## Codex OIDC Relay Auth
 
-Codex review workflows authenticate with GitHub OIDC. Workflows should grant
-`id-token: write` and use the shared relay setup action to exchange the GitHub
-OIDC token with `https://relay-ai.dongwontuna.net/oidc/exchange`.
+Codex review workflows authenticate with GitHub OIDC. Workflows grant
+`id-token: write` and exchange the GitHub OIDC token for a short-lived codex-lb
+relay key at `https://relay-ai.dongwontuna.net/v1/oidc/token`. The exchange now
+lives in the consuming repo's own helper (`codex-review oidc relay-token`); the
+relay key is passed to `openai/codex-action` as `openai-api-key` together with
+`responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses`.
 
-There is no long-lived `AI_RELAY_API_KEY` organization secret. The workflow may
-still set a short-lived exchange result into `AI_RELAY_API_KEY` for the Codex
-provider process, but that value is minted per job and is not stored in GitHub
-secrets.
+Trust is decided by codex-lb's OIDC federation (provider + binding in its
+database), seeded via `stacks/codex-lb/seed-oidc-trust.py`. There is no
+long-lived relay key stored in GitHub secrets — it is minted per job.
 
 ## Resource Model
 
