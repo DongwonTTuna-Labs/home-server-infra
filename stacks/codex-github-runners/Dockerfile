@@ -56,6 +56,14 @@ RUN useradd --create-home --shell /bin/bash --uid 1001 runner \
         "${RUSTUP_HOME}" \
         /opt/codex-runner
 
+# openai/codex-action starts a responses-api-proxy and root-owns its server-info
+# file via `sudo chmod 444` / `sudo chown root` (unconditional, no opt-out). Grant
+# the runner passwordless sudo scoped to exactly those two commands so the native
+# proxy path works; no broader sudo is permitted.
+RUN printf '%s\n' 'runner ALL=(root) NOPASSWD: /usr/bin/chmod, /usr/bin/chown' > /etc/sudoers.d/runner-codex-action \
+    && chmod 0440 /etc/sudoers.d/runner-codex-action \
+    && visudo -cf /etc/sudoers.d/runner-codex-action
+
 WORKDIR ${RUNNER_HOME}
 
 RUN curl -fsSL -o actions-runner.tar.gz \
