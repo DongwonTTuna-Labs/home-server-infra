@@ -4,6 +4,7 @@ ARG RUNNER_VERSION=2.334.0
 ARG NODE_MAJOR=24
 ARG RUST_VERSION=1.95.0
 ARG CODEX_CLI_VERSION=0.135.0
+ARG GH_VERSION=2.93.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BUN_INSTALL=/usr/local/bun
@@ -23,7 +24,6 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
-        gh \
         gzip \
         jq \
         lsb-release \
@@ -45,6 +45,25 @@ RUN apt-get update \
 
 RUN command -v lsb_release \
     && lsb_release -a
+
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) gh_arch="amd64" ;; \
+      arm64) gh_arch="arm64" ;; \
+      *) echo "Unsupported GitHub CLI architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    tarball="gh_${GH_VERSION}_linux_${gh_arch}.tar.gz"; \
+    checksums="gh_${GH_VERSION}_checksums.txt"; \
+    release_url="https://github.com/cli/cli/releases/download/v${GH_VERSION}"; \
+    curl -fsSL "$release_url/$tarball" -o "/tmp/$tarball"; \
+    curl -fsSL "$release_url/$checksums" -o "/tmp/$checksums"; \
+    cd /tmp; \
+    grep "  $tarball$" "$checksums" | sha256sum -c -; \
+    tar -xzf "/tmp/$tarball" -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "/tmp/$tarball" "/tmp/$checksums" "/tmp/gh_${GH_VERSION}_linux_${gh_arch}"; \
+    gh --version
 
 RUN useradd --create-home --shell /bin/bash --uid 1001 runner \
     && mkdir -p \
