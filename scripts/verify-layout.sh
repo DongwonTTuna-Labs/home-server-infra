@@ -6,9 +6,9 @@ cd "$(dirname "$0")/.."
 required=(
   README.md
   docs/secrets.md
-  .github/actions/setup-codex-relay/action.yml
   stacks/codex-lb/README.md
   stacks/codex-lb/compose.yaml
+  stacks/codex-lb/seed-oidc-trust.py
   stacks/codex-lb/cloudflared/codex-lb.yml
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
