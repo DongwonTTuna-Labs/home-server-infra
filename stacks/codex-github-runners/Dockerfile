@@ -3,6 +3,7 @@ FROM ubuntu:24.04
 ARG RUNNER_VERSION=2.334.0
 ARG NODE_MAJOR=24
 ARG RUST_VERSION=1.95.0
+ARG CODEX_CLI_VERSION=0.135.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BUN_INSTALL=/usr/local/bun
@@ -80,6 +81,11 @@ RUN set -eux; \
     grep "  $tarball$" SHASUMS256.txt | sha256sum -c -; \
     tar -xJf "/tmp/$tarball" -C /usr/local --strip-components=1; \
     rm -f "/tmp/$tarball" /tmp/SHASUMS256.txt \
+    && npm cache clean --force
+
+RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+    && command -v codex \
+    && codex --version \
     && npm cache clean --force
 
 RUN curl -fsSL https://bun.sh/install \
