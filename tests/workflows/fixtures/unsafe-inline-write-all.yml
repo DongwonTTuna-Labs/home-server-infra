@@ -1,0 +1,12 @@
+name: Unsafe Inline Write All
+
+on:
+  workflow_dispatch:
+
+permissions: { contents: read, write-all: true }
+
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true

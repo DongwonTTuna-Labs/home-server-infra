@@ -1,0 +1,558 @@
+name: Codex Loop Reusable Core
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: Pull request number to process.
+        type: number
+        required: true
+      head_sha:
+        description: Expected pull request head SHA.
+        type: string
+        required: true
+      base_ref:
+        description: Expected pull request base ref.
+        type: string
+        required: true
+      stage:
+        description: Loop stage; must be review, design, fix, or issue.
+        type: string
+        required: true
+      iteration:
+        description: Zero-based loop iteration.
+        type: number
+        required: true
+      correlation_id:
+        description: Stable loop correlation id.
+        type: string
+        required: true
+      requested_by:
+        description: GitHub actor or app slug that requested this step.
+        type: string
+        required: true
+      max_iterations:
+        description: Maximum accepted loop iterations.
+        type: number
+        required: false
+        default: 5
+      dry_run:
+        description: Keep write/finalize behavior deterministic without live secrets.
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      CODEX_GITHUB_APP_ID:
+        description: GitHub App id used only by non-dry-run write/finalize steps.
+        required: false
+      CODEX_GITHUB_APP_PRIVATE_KEY:
+        description: GitHub App private key used only by non-dry-run write/finalize steps.
+        required: false
+    outputs:
+      next_stage:
+        description: Next loop stage requested by the core.
+        value: ${{ jobs.finalize.outputs.next_stage }}
+      lgtm:
+        description: Whether the current run reached an LGTM terminal state.
+        value: ${{ jobs.finalize.outputs.lgtm }}
+      should_redispatch:
+        description: Whether a trusted caller should continue the loop.
+        value: ${{ jobs.finalize.outputs.should_redispatch }}
+      terminal_reason:
+        description: Empty for non-terminal continuation, otherwise the terminal reason.
+        value: ${{ jobs.finalize.outputs.terminal_reason }}
+
+permissions: {}
+
+concurrency:
+  group: codex-loop-${{ inputs.correlation_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Inputs
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      valid: ${{ steps.validate_payload.outputs.valid }}
+      terminal_reason: ${{ steps.validate_payload.outputs.terminal_reason }}
+      stage: ${{ steps.validate_payload.outputs.stage }}
+      iteration: ${{ steps.validate_payload.outputs.iteration }}
+      max_iterations: ${{ steps.validate_payload.outputs.max_iterations }}
+    steps:
+      - name: Validate payload schema
+        id: validate_payload
+        shell: bash
+        env:
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
+          INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          terminal_reason=""
+          valid="true"
+
+          require_non_empty() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "${value}" ]]; then
+              terminal_reason="missing-${name}"
+              valid="false"
+            fi
+          }
+
+          require_non_empty pr_number "${INPUT_PR_NUMBER}"
+          require_non_empty head_sha "${INPUT_HEAD_SHA}"
+          require_non_empty base_ref "${INPUT_BASE_REF}"
+          require_non_empty stage "${INPUT_STAGE}"
+          require_non_empty iteration "${INPUT_ITERATION}"
+          require_non_empty correlation_id "${INPUT_CORRELATION_ID}"
+          require_non_empty requested_by "${INPUT_REQUESTED_BY}"
+          require_non_empty max_iterations "${INPUT_MAX_ITERATIONS}"
+
+          if [[ "${valid}" == "true" ]]; then
+            case "${INPUT_STAGE}" in
+              review|design|fix|issue) ;;
+              *)
+                terminal_reason="invalid-stage"
+                valid="false"
+                ;;
+            esac
+          fi
+
+          if [[ "${valid}" == "true" ]]; then
+            if ! [[ "${INPUT_ITERATION}" =~ ^[0-9]+$ ]] || ! [[ "${INPUT_MAX_ITERATIONS}" =~ ^[0-9]+$ ]]; then
+              terminal_reason="invalid-iteration"
+              valid="false"
+            elif (( INPUT_ITERATION > INPUT_MAX_ITERATIONS )); then
+              terminal_reason="max-iterations-exceeded"
+              valid="false"
+            fi
+          fi
+
+          {
+            echo "valid=${valid}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "stage=${INPUT_STAGE}"
+            echo "iteration=${INPUT_ITERATION}"
+            echo "max_iterations=${INPUT_MAX_ITERATIONS}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop validation"
+            echo "payload schema: workflow_call typed inputs"
+            echo "stage=${INPUT_STAGE}"
+            echo "iteration=${INPUT_ITERATION}"
+            echo "max_iterations=${INPUT_MAX_ITERATIONS}"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "valid=${valid}"
+            if [[ -n "${terminal_reason}" ]]; then
+              echo "terminal_reason=${terminal_reason}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${valid}" != "true" ]]; then
+            exit 1
+          fi
+
+  trust-and-stale-guard:
+    name: Trust And Stale Guard
+    needs: validate
+    if: ${{ always() && needs.validate.outputs.valid == 'true' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      trusted: ${{ steps.guard.outputs.trusted }}
+      fork: ${{ steps.guard.outputs.fork }}
+      stale: ${{ steps.guard.outputs.stale }}
+      closed: ${{ steps.guard.outputs.closed }}
+      terminal_reason: ${{ steps.guard.outputs.terminal_reason }}
+      current_head_sha: ${{ steps.guard.outputs.current_head_sha }}
+      head_repo_full_name: ${{ steps.guard.outputs.head_repo_full_name }}
+    steps:
+      - name: Check live pull request state
+        id: guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh pr view "${INPUT_PR_NUMBER}" --json state,headRefOid,baseRefName,headRepositoryOwner,headRepository,author)"
+          state="$(jq -r '.state' <<< "${pr_json}")"
+          current_head_sha="$(jq -r '.headRefOid' <<< "${pr_json}")"
+          live_base_ref="$(jq -r '.baseRefName' <<< "${pr_json}")"
+          head_repo_owner="$(jq -r '.headRepositoryOwner.login // empty' <<< "${pr_json}")"
+          head_repo_name="$(jq -r '.headRepository.name // empty' <<< "${pr_json}")"
+          author_login="$(jq -r '.author.login // empty' <<< "${pr_json}")"
+          head_repo_full_name="${head_repo_owner}/${head_repo_name}"
+
+          trusted="true"
+          fork="false"
+          stale="false"
+          closed="false"
+          terminal_reason=""
+
+          if [[ "${state}" != "OPEN" ]]; then
+            closed="true"
+            trusted="false"
+            terminal_reason="pr-closed"
+          elif [[ "${current_head_sha}" != "${INPUT_HEAD_SHA}" ]]; then
+            stale="true"
+            trusted="false"
+            terminal_reason="stale-head-sha"
+          elif [[ "${live_base_ref}" != "${INPUT_BASE_REF}" ]]; then
+            trusted="false"
+            terminal_reason="base-ref-mismatch"
+          elif [[ "${head_repo_full_name}" != "${REPOSITORY}" ]]; then
+            fork="true"
+            trusted="false"
+            terminal_reason="fork-pr"
+          elif [[ "${REPOSITORY_OWNER}" != "DongwonTTuna-Labs" ]]; then
+            trusted="false"
+            terminal_reason="untrusted-repository-owner"
+          elif [[ "${INPUT_REQUESTED_BY}" != "${author_login}" && "${INPUT_REQUESTED_BY}" != "DongwonTTuna" && "${INPUT_REQUESTED_BY}" != *"[bot]" ]]; then
+            trusted="false"
+            terminal_reason="untrusted-requester"
+          fi
+
+          {
+            echo "trusted=${trusted}"
+            echo "fork=${fork}"
+            echo "stale=${stale}"
+            echo "closed=${closed}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "current_head_sha=${current_head_sha}"
+            echo "head_repo_full_name=${head_repo_full_name}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop trust and stale guard"
+            echo "state=${state}"
+            echo "current_head_sha=${current_head_sha}"
+            echo "head_repo=${head_repo_full_name}"
+            echo "trusted=${trusted}"
+            if [[ -n "${terminal_reason}" ]]; then
+              echo "terminal_reason=${terminal_reason}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  setup-relay:
+    name: Setup Codex Relay
+    needs: [validate, trust-and-stale-guard]
+    if: ${{ needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    outputs:
+      relay_configured: ${{ steps.relay.outputs.relay_configured }}
+      responses_endpoint: ${{ steps.relay.outputs.responses_endpoint }}
+      terminal_reason: ${{ steps.relay.outputs.terminal_reason }}
+    steps:
+      - name: Configure native codex-lb relay
+        id: relay
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+          CODEX_RESPONSES_ENDPOINT: https://relay-ai.dongwontuna.net/v1/responses
+        run: |
+          set -euo pipefail
+
+          terminal_reason=""
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            relay_configured="false"
+            echo "dry_run=true; skipping live codex-review oidc relay-token exchange"
+          else
+            relay_token="$(codex-review oidc relay-token \
+              --audience "${CODEX_OIDC_AUDIENCE}" \
+              --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+            if [[ -z "${relay_token}" ]]; then
+              terminal_reason="relay-token-empty"
+              relay_configured="false"
+            else
+              echo "::add-mask::${relay_token}"
+              relay_configured="true"
+            fi
+          fi
+
+          {
+            echo "relay_configured=${relay_configured}"
+            echo "responses_endpoint=${CODEX_RESPONSES_ENDPOINT}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex relay setup"
+            echo "audience=${CODEX_OIDC_AUDIENCE}"
+            echo "token_endpoint=${CODEX_OIDC_TOKEN_ENDPOINT}"
+            echo "helper=codex-review oidc relay-token"
+            echo "responses_endpoint=${CODEX_RESPONSES_ENDPOINT}"
+            echo "relay_configured=${relay_configured}"
+            if [[ -n "${terminal_reason}" ]]; then
+              echo "terminal_reason=${terminal_reason}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ -n "${terminal_reason}" ]]; then
+            exit 1
+          fi
+
+  run-stage:
+    name: Run Stage
+    needs: [validate, trust-and-stale-guard, setup-relay]
+    if: ${{ always() && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.setup-relay.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    outputs:
+      next_stage: ${{ steps.stage_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.stage_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.stage_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
+    steps:
+      - name: Mint relay token for live Codex action
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex stage
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          prompt: |
+            Run Codex loop stage `${{ inputs.stage }}` for PR #${{ inputs.pr_number }}.
+            Expected head SHA: `${{ inputs.head_sha }}`.
+            Correlation id: `${{ inputs.correlation_id }}`.
+            Write the machine-readable stage decision to `.codex-loop-stage-result.json`.
+            The file must contain exactly these JSON keys: `next_stage`, `lgtm`, `should_redispatch`, `terminal_reason`.
+            `next_stage` must be one of `review`, `design`, `fix`, or `issue` when non-empty.
+            `lgtm` and `should_redispatch` must be booleans.
+            `terminal_reason` must be a string and may be empty only when `should_redispatch` is true.
+            Do not mutate labels or comments.
+
+      - name: Write deterministic dry-run stage result
+        if: ${{ inputs.dry_run == true }}
+        shell: bash
+        env:
+          INPUT_STAGE: ${{ inputs.stage }}
+        run: |
+          set -euo pipefail
+
+          next_stage="review"
+          terminal_reason="dry-run-placeholder"
+
+          case "${INPUT_STAGE}" in
+            review)
+              next_stage="design"
+              ;;
+            design)
+              next_stage="fix"
+              ;;
+            fix)
+              next_stage="review"
+              ;;
+            issue)
+              next_stage="issue"
+              terminal_reason="issue-stage-placeholder"
+              ;;
+          esac
+
+          jq -n \
+            --arg next_stage "${next_stage}" \
+            --arg terminal_reason "${terminal_reason}" \
+            '{next_stage: $next_stage, lgtm: false, should_redispatch: false, terminal_reason: $terminal_reason}' \
+            > .codex-loop-stage-result.json
+
+      - name: Parse stage result JSON
+        id: stage_outputs
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          result_file=".codex-loop-stage-result.json"
+          if [[ ! -s "${result_file}" ]]; then
+            echo "missing-stage-result-json" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          next_stage="$(jq -er '.next_stage | strings' "${result_file}")"
+          lgtm="$(jq -er '.lgtm | booleans | tostring' "${result_file}")"
+          should_redispatch="$(jq -er '.should_redispatch | booleans | tostring' "${result_file}")"
+          terminal_reason="$(jq -er '.terminal_reason | strings' "${result_file}")"
+
+          if [[ -n "${next_stage}" ]]; then
+            case "${next_stage}" in
+              review|design|fix|issue) ;;
+              *)
+                echo "invalid-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${should_redispatch}" == "true" && -z "${next_stage}" ]]; then
+            echo "redispatch-missing-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if [[ "${should_redispatch}" == "false" && "${lgtm}" == "false" && -z "${terminal_reason}" ]]; then
+            echo "terminal-reason-required" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop stage"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "relay_configured=${RELAY_CONFIGURED}"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  finalize:
+    name: Finalize Loop
+    needs: [validate, trust-and-stale-guard, setup-relay, run-stage]
+    if: ${{ always() }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      next_stage: ${{ steps.finalize.outputs.next_stage }}
+      lgtm: ${{ steps.finalize.outputs.lgtm }}
+      should_redispatch: ${{ steps.finalize.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.finalize.outputs.terminal_reason }}
+    steps:
+      - name: Resolve final loop outputs
+        id: finalize
+        shell: bash
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          VALIDATE_REASON: ${{ needs.validate.outputs.terminal_reason }}
+          TRUST_RESULT: ${{ needs.trust-and-stale-guard.result }}
+          TRUSTED: ${{ needs.trust-and-stale-guard.outputs.trusted }}
+          TRUST_REASON: ${{ needs.trust-and-stale-guard.outputs.terminal_reason }}
+          SETUP_RESULT: ${{ needs.setup-relay.result }}
+          SETUP_REASON: ${{ needs.setup-relay.outputs.terminal_reason }}
+          RUN_STAGE_RESULT: ${{ needs.run-stage.result }}
+          RUN_STAGE_NEXT_STAGE: ${{ needs.run-stage.outputs.next_stage }}
+          RUN_STAGE_LGTM: ${{ needs.run-stage.outputs.lgtm }}
+          RUN_STAGE_REDISPATCH: ${{ needs.run-stage.outputs.should_redispatch }}
+          RUN_STAGE_REASON: ${{ needs.run-stage.outputs.terminal_reason }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          next_stage="${RUN_STAGE_NEXT_STAGE:-}"
+          lgtm="${RUN_STAGE_LGTM:-false}"
+          should_redispatch="${RUN_STAGE_REDISPATCH:-false}"
+          terminal_reason="${RUN_STAGE_REASON:-}"
+
+          if [[ "${VALIDATE_RESULT}" != "success" ]]; then
+            terminal_reason="${VALIDATE_REASON:-validation-failed}"
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+          elif [[ "${TRUST_RESULT}" != "success" || "${TRUSTED}" != "true" ]]; then
+            terminal_reason="${TRUST_REASON:-trust-or-stale-guard-failed}"
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+          elif [[ "${SETUP_RESULT}" != "success" ]]; then
+            terminal_reason="${SETUP_REASON:-relay-setup-failed}"
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+          elif [[ "${RUN_STAGE_RESULT}" != "success" ]]; then
+            terminal_reason="${RUN_STAGE_REASON:-stage-failed}"
+            lgtm="false"
+            should_redispatch="false"
+          fi
+
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            should_redispatch="false"
+            if [[ -z "${terminal_reason}" ]]; then
+              terminal_reason="dry-run"
+            fi
+          elif [[ "${should_redispatch}" == "true" ]]; then
+            next_stage=""
+            should_redispatch="false"
+            terminal_reason="trusted-fix-push-not-implemented"
+          fi
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop finalize"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_STEP_SUMMARY}"

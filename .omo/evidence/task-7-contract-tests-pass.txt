@@ -1,0 +1,21 @@
+# Task 7 workflow contract tests pass
+
+Command: uvx pytest tests/workflows -q
+Result: PASS
+Observed output:
+.................                                                        [100%]
+17 passed in 0.01s
+
+Command: python -m py_compile tests/workflows/test_workflow_contracts.py
+Result: PASS
+Observed output: no output
+
+Command: actionlint .github/workflows/codex-loop-reusable.yml .github/workflows/codex-loop-dispatch.yml .github/workflows/codex-loop-manual.yml
+Result: PASS
+Observed output: no output
+
+Command: git diff --check
+Result: PASS
+Observed output: no output
+
+Note: lsp_diagnostics could not run because basedpyright-langserver is not installed in this environment.

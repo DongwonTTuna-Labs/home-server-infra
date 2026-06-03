@@ -1,0 +1,74 @@
+name: Codex Loop Manual Debug Adapter
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to debug.
+        type: number
+        required: true
+      head_sha:
+        description: Expected pull request head SHA. Required for dry-run and live debug runs.
+        type: string
+        required: true
+      base_ref:
+        description: Expected pull request base ref.
+        type: string
+        required: true
+      stage:
+        description: Loop stage to debug.
+        type: choice
+        required: true
+        default: review
+        options:
+          - review
+          - design
+          - fix
+          - issue
+      iteration:
+        description: Zero-based loop iteration.
+        type: number
+        required: true
+        default: 0
+      correlation_id:
+        description: Stable debug correlation id.
+        type: string
+        required: true
+      requested_by:
+        description: GitHub actor or app slug requesting this debug run.
+        type: string
+        required: true
+      max_iterations:
+        description: Maximum accepted loop iterations.
+        type: number
+        required: false
+        default: 5
+      dry_run:
+        description: Keep manual debug runs non-writing by default.
+        type: boolean
+        required: false
+        default: true
+
+# payload schema: workflow_dispatch typed inputs map directly to workflow_call inputs.
+permissions: {}
+
+jobs:
+  manual-debug-adapter:
+    name: Manual Debug Adapter Only
+    # These job permissions are the ceiling for the called reusable workflow; this manual adapter remains debug-only and dry-run by default.
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    uses: ./.github/workflows/codex-loop-reusable.yml
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      head_sha: ${{ inputs.head_sha }}
+      base_ref: ${{ inputs.base_ref }}
+      stage: ${{ inputs.stage }}
+      iteration: ${{ inputs.iteration }}
+      correlation_id: ${{ inputs.correlation_id }}
+      requested_by: ${{ inputs.requested_by }}
+      max_iterations: ${{ inputs.max_iterations }}
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit

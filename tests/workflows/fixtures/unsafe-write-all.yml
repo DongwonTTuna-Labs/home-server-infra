@@ -1,0 +1,12 @@
+name: Unsafe Write All
+
+on:
+  workflow_dispatch:
+
+permissions: write-all
+
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true

@@ -1,0 +1,46 @@
+# Task 6 dry-run default evidence
+
+Repository: /Users/dongwon/Documents/Programming/DongwonTTuna-Labs/home-server-infra
+Workflow: .github/workflows/codex-loop-manual.yml
+
+Command:
+```bash
+python3 - <<'PY'
+from pathlib import Path
+text = Path('.github/workflows/codex-loop-manual.yml').read_text()
+checks = {
+    'workflow_dispatch': 'workflow_dispatch:' in text,
+    'dry_run_default_true': 'dry_run:' in text and 'default: true' in text,
+    'uses_reusable': 'uses: ./.github/workflows/codex-loop-reusable.yml' in text,
+    'maps_head_sha': 'head_sha: ${{ inputs.head_sha }}' in text,
+    'manual_debug_only_name': 'Manual Debug Adapter Only' in text,
+    'payload_schema_marker': 'payload schema' in text,
+    'permission_ceiling_comment': 'permissions are the ceiling for the called reusable workflow' in text,
+    'contents_write': 'contents: write' in text,
+    'pull_requests_write': 'pull-requests: write' in text,
+    'id_token_write': 'id-token: write' in text,
+    'no_repository_dispatch': 'repository_dispatch:' not in text,
+    'no_pull_request_target': 'pull_request_target:' not in text,
+}
+for name, ok in checks.items():
+    print(f'{name}={ok}')
+if not all(checks.values()):
+    raise SystemExit(1)
+PY
+```
+
+Result:
+```text
+workflow_dispatch=True
+dry_run_default_true=True
+uses_reusable=True
+maps_head_sha=True
+manual_debug_only_name=True
+payload_schema_marker=True
+permission_ceiling_comment=True
+contents_write=True
+pull_requests_write=True
+id_token_write=True
+no_repository_dispatch=True
+no_pull_request_target=True
+```

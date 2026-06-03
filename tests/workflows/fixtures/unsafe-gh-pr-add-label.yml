@@ -1,0 +1,14 @@
+name: Unsafe PR Label
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr edit 123 --add-label codex-loop-active

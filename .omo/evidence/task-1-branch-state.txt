@@ -1,0 +1,29 @@
+Task 1 branch preparation evidence
+Target repo: /Users/dongwon/Documents/Programming/DongwonTTuna-Labs/home-server-infra
+Timestamp: 2026-06-03
+
+Initial branch before preparation: feature/install-codex-cli-on-runners
+Initial HEAD before preparation: c83740b69c9769f2c47954652972d0fc94b6426a
+Cached origin/main before fetch: 79d9c7f6dcdf912f10dc866a3ac6f1f8a5991d42
+
+Fetch: GIT_MASTER=1 git fetch origin completed successfully
+origin/main after fetch: 917256f7334861698fb3ba9a95ae12ec31e8a081
+Implementation branch: work/codex-loop-reusable-workflow
+Branch creation: created from origin/main and set to track origin/main
+Current branch after preparation: work/codex-loop-reusable-workflow
+Current HEAD after preparation: 917256f7334861698fb3ba9a95ae12ec31e8a081
+
+Status after branch creation:
+## work/codex-loop-reusable-workflow...origin/main
+?? stacks/codex-lb/github-oidc-broker/
+
+origin/main freshness: fetched immediately before branch creation; HEAD equals origin/main
+merge-base expectation: origin/main is an ancestor of HEAD because HEAD equals origin/main
+
+Relay action correction: .github/actions/setup-codex-relay/action.yml is absent on current HEAD 917256f7334861698fb3ba9a95ae12ec31e8a081.
+Relay action history: `GIT_MASTER=1 git log --all --oneline -- .github/actions/setup-codex-relay/action.yml` shows the path existed historically and was later retired/removed, including `10f5357 feat(codex-lb): seed simple OIDC trust binding; retire setup-codex-relay`; the file is absent on current origin/main.
+.github directory: absent on current HEAD; `.github/workflows` is therefore absent on current origin/main.
+.github/workflows: absent; `test -d .github/workflows && ls .github/workflows || true` produced no output.
+
+No commit was created.
+No destructive git command was used.

@@ -1,0 +1,11 @@
+Task 9 rollback documentation check
+Command: python3 rollback marker check against docs/codex-loop-reusable.md
+Result: PASS
+Verified markers:
+- Start with the least destructive stop
+- disable or remove the consumer workflow call
+- disable the event adapter next
+- remove the `.github/workflows/codex-loop-dispatch.yml` trigger or adapter
+- without callers or dispatch adapters it is inert
+- gh run cancel <run-id>
+- Rotate or suspend GitHub App credentials

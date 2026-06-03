@@ -1,0 +1,15 @@
+Task 8 consumer snippet evidence
+
+Required `uses:` target is present:
+uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/codex-loop-reusable.yml@<sha-or-tag>
+
+Production pin guidance is present:
+Production consumers must pin the reusable workflow by commit SHA or by an approved internal tag. Don't pin production consumers to a branch.
+
+Adapter coverage is present:
+- pull_request_target adapter starts with stage: review, iteration: 0, dry_run: true.
+- repository_dispatch continuation example uses event_type=codex-loop and client_payload keys for pr_number, head_sha, base_ref, stage, iteration, correlation_id, requested_by, and dry_run.
+
+Correction check:
+- Inputs table documents `dry_run` default as true for the core and adapters.
+- Inputs table uses `max_iterations` plural, matching `.github/workflows/codex-loop-reusable.yml` and adapters.

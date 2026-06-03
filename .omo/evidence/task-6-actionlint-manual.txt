@@ -1,0 +1,31 @@
+# Task 6 manual adapter actionlint evidence
+
+Repository: /Users/dongwon/Documents/Programming/DongwonTTuna-Labs/home-server-infra
+Workflow: .github/workflows/codex-loop-manual.yml
+
+Correction: manual reusable-workflow caller job now declares the permission ceiling required by the called workflow while keeping top-level `permissions: {}`.
+
+Command:
+```bash
+actionlint .github/workflows/codex-loop-manual.yml
+```
+
+Result: passed with no output.
+
+Command:
+```bash
+uvx pytest tests/workflows -q
+```
+
+Result:
+```text
+.........                                                                [100%]
+9 passed in 0.01s
+```
+
+Command:
+```bash
+git diff --check
+```
+
+Result: passed with no output.

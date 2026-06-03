@@ -1,0 +1,9 @@
+guardrail 'Labels and comments MUST NOT be used for internal loop state.': status=PASS
+guardrail 'labels and comments MUST NOT be used for internal loop state': status=PASS
+guardrail 'It MUST NOT use PR labels for internal loop state': status=PASS
+guardrail 'MUST NOT use issue/PR comments for internal loop state': status=PASS
+guardrail 'Terminal failures must be visible through job summary and artifacts.': status=PASS
+forbidden 'PAT fallback is allowed': present=False status=PASS
+forbidden 'public marketplace': present=False status=PASS
+forbidden 'existing Codex relay setup path': present=False status=PASS
+forbidden "This change doesn't add workflow YAML files": present=False status=PASS

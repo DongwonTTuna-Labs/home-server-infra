@@ -1,0 +1,20 @@
+$ actionlint --version
+1.7.12
+installed by building from source
+built with go1.26.1 compiler for darwin/arm64
+exit_code=0
+
+$ actionlint .github/workflows/codex-loop-reusable.yml
+exit_code=0
+
+$ uvx pytest tests/workflows -q
+..ss.....                                                                [100%]
+7 passed, 2 skipped in 0.01s
+exit_code=0
+
+$ python3 codex-action marker check
+openai/codex-action@v1: present
+responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses: present
+needs.setup-relay.outputs.relay_configured == 'true': present
+inputs.dry_run == false: present
+exit_code=0
