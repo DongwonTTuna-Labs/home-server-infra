@@ -1,7 +1,0 @@
-$ python3 targeted missing-payload validation fixture
-payload_missing=pr_number
-valid=false
-terminal_reason=missing-pr_number
-expected_terminal_reason=missing-pr_number
-workflow_markers_present=true
-exit_code=0

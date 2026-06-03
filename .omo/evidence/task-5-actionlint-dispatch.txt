@@ -1,3 +1,0 @@
-$ actionlint .github/workflows/codex-loop-dispatch.yml
-
-exit_code=0

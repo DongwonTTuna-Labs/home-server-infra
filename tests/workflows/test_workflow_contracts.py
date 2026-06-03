@@ -243,7 +243,6 @@ def assert_reusable_redispatch_disabled_until_fix_push(workflow_text: str) -> No
 def assert_required_deliverables_not_ignored() -> None:
     required_paths = (
         ".github/workflows/codex-loop-dispatch.yml",
-        ".omo/evidence/task-5-actionlint-dispatch.txt",
     )
     result = subprocess.run(
         ["git", "check-ignore", "-v", *required_paths],

@@ -38,6 +38,9 @@ metadata/
 mirrors/
 **/mirrors/
 
+# Local agent/runtime artifacts
+.omo/
+
 # Python cache artifacts
 __pycache__/
 **/__pycache__/
@@ -53,6 +56,5 @@ __pycache__/
 !stacks/agent-stack/secrets/cloudflared.env.example
 !**/.env.example
 
-# Planned Codex loop deliverables that contain "pat" as part of dispatch/path text.
+# Planned Codex loop deliverable that contains "pat" as part of dispatch text.
 !.github/workflows/codex-loop-dispatch.yml
-!.omo/evidence/task-5-actionlint-dispatch.txt
