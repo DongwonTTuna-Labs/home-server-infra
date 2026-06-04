@@ -1,0 +1,47 @@
+{
+  "$id": "https://example.invalid/codex-review/shared-review-finding.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "file": {
+      "type": "string"
+    },
+    "finding_id": {
+      "type": "string"
+    },
+    "line": {
+      "type": "integer"
+    },
+    "root_cause_key": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "severity": {
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low",
+        "info"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "finding_id",
+    "severity",
+    "file",
+    "line",
+    "root_cause_key"
+  ],
+  "title": "shared-review-finding.v1",
+  "type": "object"
+}

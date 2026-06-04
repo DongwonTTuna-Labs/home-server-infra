@@ -1,0 +1,62 @@
+{
+  "$id": "https://example.invalid/codex-review/design-plan.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "edit_sequence": {
+      "type": "array"
+    },
+    "acceptance_criteria": {
+      "type": "array"
+    },
+    "execution_blockers": {
+      "type": "array"
+    },
+    "inspection_evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "observation": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "purpose",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "openspec_backed": {
+      "type": "boolean"
+    },
+    "openspec_sources": {
+      "type": "array"
+    },
+    "plan_hash": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "tests": {
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "edit_sequence",
+    "tests",
+    "inspection_evidence"
+  ],
+  "title": "design-plan.v1",
+  "type": "object"
+}

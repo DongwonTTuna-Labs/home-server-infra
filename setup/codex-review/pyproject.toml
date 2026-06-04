@@ -1,0 +1,17 @@
+[project]
+name = "codex-review"
+version = "3.0.0"
+description = "Codex Review v3 GitHub Actions helper package"
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6",
+  "jsonschema>=4",
+  "cryptography>=40",
+]
+
+[project.scripts]
+codex-review = "codex_review.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

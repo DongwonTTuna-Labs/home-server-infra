@@ -1,0 +1,46 @@
+{
+  "$id": "https://example.invalid/codex-review/design-inventory.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "item_count": {
+      "type": "integer"
+    },
+    "items": {
+      "type": "array"
+    },
+    "inspection_evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "observation": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "purpose",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "items",
+    "inspection_evidence"
+  ],
+  "title": "design-inventory.v1",
+  "type": "object"
+}

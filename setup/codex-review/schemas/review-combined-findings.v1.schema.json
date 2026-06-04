@@ -1,0 +1,28 @@
+{
+  "$id": "https://example.invalid/codex-review/review-combined-findings.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "duplicates": {
+      "type": "array"
+    },
+    "finding_count": {
+      "type": "integer"
+    },
+    "findings": {
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "summary_by_axis": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "findings"
+  ],
+  "title": "review-combined-findings.v1",
+  "type": "object"
+}

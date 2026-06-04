@@ -1,0 +1,112 @@
+# Codex Review v3 trusted-core runtime configuration.
+# These are generic, org-wide safe defaults. Repository-specific values
+# (trusted authors, forbidden files, dangerous keywords, test commands) are
+# supplied by a consumer override that is deep-merged over these defaults via
+# --config-override or the CODEX_REVIEW_CONFIG_OVERRIDE env var. See
+# tests/fixtures/config/consumer_override.yml for the consumer override shape.
+
+base_branch: main
+
+# Repo-specific identities. Left empty in the trusted core; a consumer override
+# sets its own GitHub actor and review-bot authors.
+trusted:
+  user: ""
+  codex_review_authors: []
+
+review:
+  axes:
+    - correctness
+    - security
+    - performance
+    - test-coverage
+    - domain
+  max_inline_comments: 12
+  max_inline_comments_per_file: 3
+  require_changed_right_line: true
+  # Anti re-flag: findings matching a thread previously resolved in one of these
+  # states are suppressed before techlead triage. resolved_by_code is re-allowed
+  # only if the resolved location changed since resolution (recheck below).
+  suppress_resolved_states:
+    - false_positive
+    - stale_obsolete
+    - duplicate_of_issue
+    - defer_to_issue
+  resolved_by_code_recheck_changed: true
+
+# Token budgets for model prompt assembly. The model context window is ~240k tokens;
+# model_token_budget is the per-prompt safety ceiling and the others bound the
+# largest variable-size sections so a big PR cannot silently overflow the window.
+context:
+  model_token_budget: 180000
+  diff_summary_tokens: 4000
+  per_file_patch_tokens: 3000
+  total_patch_tokens: 24000
+  findings_tokens: 12000
+  openspec_tokens: 8000
+
+lifecycle:
+  max_threads_per_triage: 16
+  max_root_cause_groups_per_run: 8
+  char_budget: 24000
+  terminal_states:
+    - resolved_by_code
+    - defer_to_issue
+    - duplicate_of_issue
+    - false_positive
+    - stale_obsolete
+  non_terminal_states:
+    - fix_now
+    - current_head_keep_open
+    - needs_human
+    - blocked_by_conflict
+
+design:
+  require_design_chief: true
+  max_clusters: 12
+  max_cluster_analysis_batch_size: 4
+
+autofix:
+  enabled: true
+  # Convergence guards: stop the loop instead of ping-ponging forever.
+  max_rounds: 5            # max autofix pushes per PR before escalating to an issue
+  oscillation_window: 10   # how many recent pushes to remember for cycle detection
+  pingpong_threshold: 2    # same finding addressed in >= N prior rounds => oscillation
+  revert_threshold: 0.8    # Jaccard of added-vs-prior-removed lines => revert loop
+  allowed_prefixes:
+    - src/
+    - tests/
+    - docs/
+    - .github/scripts/
+  # Protect the review system's own control surface in any consumer repo.
+  forbidden_prefixes:
+    - .codex/
+    - .github/actions/
+    - .github/workflows/
+    - setup/codex-review/prompts/
+    - setup/codex-review/schemas/
+  # Repo-specific protected files (e.g. lockfiles, manifests) come from the
+  # consumer override; the core ships none.
+  forbidden_files: []
+  # Generic security-sensitive keywords. Language/venue-specific keywords are
+  # added by the consumer override.
+  dangerous_keywords:
+    - api key
+    - auth
+    - credential
+    - private key
+    - public api
+    - secret
+    - signature
+    - signing
+    - token
+
+# Pre-push test commands are repo-specific; the consumer override defines its
+# allowlist and default_ids. The core ships an empty allowlist so no command
+# runs unless a consumer opts in.
+loop:
+  # Bounded artifact-state cap for repository_dispatch attempts per correlation.
+  dispatch_per_correlation_cap: 20
+
+tests:
+  allowlist: {}
+  default_ids: []

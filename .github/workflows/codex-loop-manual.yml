@@ -38,6 +38,14 @@ on:
         description: GitHub actor or app slug requesting this debug run.
         type: string
         required: true
+      state_run_id:
+        description: Exact upstream workflow run id that owns the prior loop-state artifact.
+        type: string
+        required: true
+      state_artifact_name:
+        description: Exact prior loop-state artifact name to download from state_run_id.
+        type: string
+        required: true
       max_iterations:
         description: Maximum accepted loop iterations.
         type: number
@@ -69,6 +77,8 @@ jobs:
       iteration: ${{ inputs.iteration }}
       correlation_id: ${{ inputs.correlation_id }}
       requested_by: ${{ inputs.requested_by }}
+      state_run_id: ${{ inputs.state_run_id }}
+      state_artifact_name: ${{ inputs.state_artifact_name }}
       max_iterations: ${{ inputs.max_iterations }}
       dry_run: ${{ inputs.dry_run }}
     secrets: inherit

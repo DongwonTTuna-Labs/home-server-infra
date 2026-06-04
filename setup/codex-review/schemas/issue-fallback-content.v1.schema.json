@@ -1,0 +1,23 @@
+{
+  "$id": "https://example.invalid/codex-review/issue-fallback-content.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "body": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "title",
+    "body"
+  ],
+  "title": "issue-fallback-content.v1",
+  "type": "object"
+}

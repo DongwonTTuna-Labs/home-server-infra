@@ -1,0 +1,31 @@
+{
+  "$id": "https://example.invalid/codex-review/resolve-gate-result.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "decisions": {
+      "type": "array"
+    },
+    "route": {
+      "enum": [
+        "run_review",
+        "stop_lgtm",
+        "stop_needs_human",
+        "run_design_from_existing_threads",
+        "stop_noop"
+      ]
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "thread_count": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "route"
+  ],
+  "title": "resolve-gate-result.v1",
+  "type": "object"
+}

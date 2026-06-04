@@ -1,0 +1,54 @@
+{
+  "$id": "https://example.invalid/codex-review/design-chief-decision.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "fix_policy": {
+      "type": "object"
+    },
+    "inspection_evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "observation": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "purpose",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "approved_for_fix",
+        "needs_human",
+        "rejected_plan",
+        "no_fix_needed"
+      ]
+    },
+    "task_hints": {
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "inspection_evidence"
+  ],
+  "title": "design-chief-decision.v1",
+  "type": "object"
+}

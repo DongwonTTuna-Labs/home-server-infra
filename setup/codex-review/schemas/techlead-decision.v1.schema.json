@@ -1,0 +1,73 @@
+{
+  "$id": "https://example.invalid/codex-review/techlead-decision.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "decisions": {
+      "items": {
+        "properties": {
+          "action": {
+            "enum": [
+              "publish_and_fix_now",
+              "summary_only_fix_now",
+              "defer_to_issue",
+              "deny_false_positive",
+              "needs_human",
+              "needs_design",
+              "publish_only",
+              "drop_duplicate"
+            ]
+          },
+          "finding_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "inspection_evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "observation": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "purpose",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "needs_design": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "decisions",
+    "inspection_evidence"
+  ],
+  "title": "techlead-decision.v1",
+  "type": "object"
+}

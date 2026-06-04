@@ -31,6 +31,14 @@ on:
         description: GitHub actor or app slug that requested this step.
         type: string
         required: true
+      state_run_id:
+        description: Exact upstream workflow run id that owns the prior loop-state artifact.
+        type: string
+        required: true
+      state_artifact_name:
+        description: Exact prior loop-state artifact name to download from state_run_id.
+        type: string
+        required: true
       max_iterations:
         description: Maximum accepted loop iterations.
         type: number
@@ -51,16 +59,25 @@ on:
     outputs:
       next_stage:
         description: Next loop stage requested by the core.
-        value: ${{ jobs.finalize.outputs.next_stage }}
+        value: ${{ jobs.finalize-stage.outputs.next_stage }}
       lgtm:
         description: Whether the current run reached an LGTM terminal state.
-        value: ${{ jobs.finalize.outputs.lgtm }}
+        value: ${{ jobs.finalize-stage.outputs.lgtm }}
       should_redispatch:
         description: Whether a trusted caller should continue the loop.
-        value: ${{ jobs.finalize.outputs.should_redispatch }}
+        value: ${{ jobs.finalize-stage.outputs.should_redispatch }}
       terminal_reason:
         description: Empty for non-terminal continuation, otherwise the terminal reason.
-        value: ${{ jobs.finalize.outputs.terminal_reason }}
+        value: ${{ jobs.finalize-stage.outputs.terminal_reason }}
+      state_run_id:
+        description: Workflow run id that owns the selected final state artifact.
+        value: ${{ jobs.finalize-stage.outputs.state_run_id }}
+      state_artifact_name:
+        description: Selected final state artifact name for the caller to pass into the next stage.
+        value: ${{ jobs.finalize-stage.outputs.state_artifact_name }}
+      updated_head_sha:
+        description: Remote-verified PR head SHA after a successful fix-push; empty otherwise (including pushed_unverified).
+        value: ${{ jobs.finalize-stage.outputs.updated_head_sha }}
 
 permissions: {}
 
@@ -95,6 +112,8 @@ jobs:
           INPUT_ITERATION: ${{ inputs.iteration }}
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
           INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
+          INPUT_STATE_RUN_ID: ${{ inputs.state_run_id }}
+          INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
           INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
@@ -104,10 +123,9 @@ jobs:
           valid="true"
 
           require_non_empty() {
-            local name="$1"
             local value="$2"
             if [[ -z "${value}" ]]; then
-              terminal_reason="missing-${name}"
+              terminal_reason="validation_failed"
               valid="false"
             fi
           }
@@ -119,13 +137,25 @@ jobs:
           require_non_empty iteration "${INPUT_ITERATION}"
           require_non_empty correlation_id "${INPUT_CORRELATION_ID}"
           require_non_empty requested_by "${INPUT_REQUESTED_BY}"
+          require_non_empty state_run_id "${INPUT_STATE_RUN_ID}"
+          require_non_empty state_artifact_name "${INPUT_STATE_ARTIFACT_NAME}"
           require_non_empty max_iterations "${INPUT_MAX_ITERATIONS}"
+
+          if [[ "${valid}" == "true" ]]; then
+            if ! [[ "${INPUT_STATE_RUN_ID}" =~ ^[0-9]+$ ]] || (( INPUT_STATE_RUN_ID <= 0 )); then
+              terminal_reason="validation_failed"
+              valid="false"
+            elif [[ "${INPUT_STATE_ARTIFACT_NAME}" == */* || "${INPUT_STATE_ARTIFACT_NAME}" == "." || "${INPUT_STATE_ARTIFACT_NAME}" == ".." ]]; then
+              terminal_reason="validation_failed"
+              valid="false"
+            fi
+          fi
 
           if [[ "${valid}" == "true" ]]; then
             case "${INPUT_STAGE}" in
               review|design|fix|issue) ;;
               *)
-                terminal_reason="invalid-stage"
+                terminal_reason="validation_failed"
                 valid="false"
                 ;;
             esac
@@ -133,10 +163,10 @@ jobs:
 
           if [[ "${valid}" == "true" ]]; then
             if ! [[ "${INPUT_ITERATION}" =~ ^[0-9]+$ ]] || ! [[ "${INPUT_MAX_ITERATIONS}" =~ ^[0-9]+$ ]]; then
-              terminal_reason="invalid-iteration"
+              terminal_reason="validation_failed"
               valid="false"
-            elif (( INPUT_ITERATION > INPUT_MAX_ITERATIONS )); then
-              terminal_reason="max-iterations-exceeded"
+            elif (( INPUT_ITERATION >= INPUT_MAX_ITERATIONS )); then
+              terminal_reason="max_iterations"
               valid="false"
             fi
           fi
@@ -156,6 +186,8 @@ jobs:
             echo "iteration=${INPUT_ITERATION}"
             echo "max_iterations=${INPUT_MAX_ITERATIONS}"
             echo "dry_run=${INPUT_DRY_RUN}"
+            echo "state_run_id=${INPUT_STATE_RUN_ID}"
+            echo "state_artifact_name=${INPUT_STATE_ARTIFACT_NAME}"
             echo "valid=${valid}"
             if [[ -n "${terminal_reason}" ]]; then
               echo "terminal_reason=${terminal_reason}"
@@ -184,6 +216,7 @@ jobs:
       terminal_reason: ${{ steps.guard.outputs.terminal_reason }}
       current_head_sha: ${{ steps.guard.outputs.current_head_sha }}
       head_repo_full_name: ${{ steps.guard.outputs.head_repo_full_name }}
+      head_ref: ${{ steps.guard.outputs.head_ref }}
     steps:
       - name: Check live pull request state
         id: guard
@@ -199,9 +232,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          pr_json="$(gh pr view "${INPUT_PR_NUMBER}" --json state,headRefOid,baseRefName,headRepositoryOwner,headRepository,author)"
+          pr_json="$(gh pr view "${INPUT_PR_NUMBER}" --json state,headRefOid,headRefName,baseRefName,headRepositoryOwner,headRepository,author)"
           state="$(jq -r '.state' <<< "${pr_json}")"
           current_head_sha="$(jq -r '.headRefOid' <<< "${pr_json}")"
+          head_ref="$(jq -r '.headRefName' <<< "${pr_json}")"
           live_base_ref="$(jq -r '.baseRefName' <<< "${pr_json}")"
           head_repo_owner="$(jq -r '.headRepositoryOwner.login // empty' <<< "${pr_json}")"
           head_repo_name="$(jq -r '.headRepository.name // empty' <<< "${pr_json}")"
@@ -217,24 +251,24 @@ jobs:
           if [[ "${state}" != "OPEN" ]]; then
             closed="true"
             trusted="false"
-            terminal_reason="pr-closed"
+            terminal_reason="pr_closed"
           elif [[ "${current_head_sha}" != "${INPUT_HEAD_SHA}" ]]; then
             stale="true"
             trusted="false"
-            terminal_reason="stale-head-sha"
+            terminal_reason="stale_head"
           elif [[ "${live_base_ref}" != "${INPUT_BASE_REF}" ]]; then
             trusted="false"
-            terminal_reason="base-ref-mismatch"
+            terminal_reason="base_ref_mismatch"
           elif [[ "${head_repo_full_name}" != "${REPOSITORY}" ]]; then
             fork="true"
             trusted="false"
-            terminal_reason="fork-pr"
+            terminal_reason="fork_pr"
           elif [[ "${REPOSITORY_OWNER}" != "DongwonTTuna-Labs" ]]; then
             trusted="false"
-            terminal_reason="untrusted-repository-owner"
+            terminal_reason="untrusted_repository_owner"
           elif [[ "${INPUT_REQUESTED_BY}" != "${author_login}" && "${INPUT_REQUESTED_BY}" != "DongwonTTuna" && "${INPUT_REQUESTED_BY}" != *"[bot]" ]]; then
             trusted="false"
-            terminal_reason="untrusted-requester"
+            terminal_reason="untrusted_requester"
           fi
 
           {
@@ -245,12 +279,14 @@ jobs:
             echo "terminal_reason=${terminal_reason}"
             echo "current_head_sha=${current_head_sha}"
             echo "head_repo_full_name=${head_repo_full_name}"
+            echo "head_ref=${head_ref}"
           } >> "${GITHUB_OUTPUT}"
 
           {
             echo "## Codex loop trust and stale guard"
             echo "state=${state}"
             echo "current_head_sha=${current_head_sha}"
+            echo "head_ref=${head_ref}"
             echo "head_repo=${head_repo_full_name}"
             echo "trusted=${trusted}"
             if [[ -n "${terminal_reason}" ]]; then
@@ -268,12 +304,43 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      actions: read
       id-token: write
     outputs:
       relay_configured: ${{ steps.relay.outputs.relay_configured }}
       responses_endpoint: ${{ steps.relay.outputs.responses_endpoint }}
       terminal_reason: ${{ steps.relay.outputs.terminal_reason }}
     steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Checkout target base reference
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.base_ref }}
+          path: target-base
+          persist-credentials: false
+
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
       - name: Configure native codex-lb relay
         id: relay
         shell: bash
@@ -294,7 +361,7 @@ jobs:
               --audience "${CODEX_OIDC_AUDIENCE}" \
               --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
             if [[ -z "${relay_token}" ]]; then
-              terminal_reason="relay-token-empty"
+              terminal_reason="stage_failed"
               relay_configured="false"
             else
               echo "::add-mask::${relay_token}"
@@ -324,93 +391,1322 @@ jobs:
             exit 1
           fi
 
-  run-stage:
-    name: Run Stage
+      - name: Download prior loop state artifact
+        id: download_prior_state
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.state_artifact_name }}
+          run-id: ${{ inputs.state_run_id }}
+          path: codex-review-artifacts/prior-state
+
+      - name: Read prior loop state artifact
+        shell: bash
+        env:
+          INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
+        run: |
+          set -euo pipefail
+          # Best-effort prior loop-state read only; setup-relay is NOT the bundle
+          # integrity authority. The non-blocking download above keeps a missing prior
+          # stage bundle from failing setup-relay and preempting the verify-bundle gate
+          # in design-prepare/fix-dispatch, which routes it to artifact_missing.
+          # read-state tolerates an absent path and falls back to empty loop-state.
+          codex-review loop read-state \
+            --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json" \
+            --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}" \
+            --out .codex-loop-state.json
+
+      - name: Upload current loop state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}.json
+          path: .codex-loop-state.json
+          retention-days: 7
+
+  review-collect:
+    name: Review Collect And Gate
     needs: [validate, trust-and-stale-guard, setup-relay]
-    if: ${{ always() && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.setup-relay.result == 'success' }}
+    if: ${{ always() && inputs.stage == 'review' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.setup-relay.result == 'success' }}
     runs-on:
       group: "Home Server Runners"
       labels: dongwontuna-labs-runner
     permissions:
       contents: read
       pull-requests: read
-      id-token: write
+      actions: read
+    outputs:
+      route: ${{ steps.gate.outputs.route }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Collect review threads and resolve gate route
+        id: gate
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/resolve_gate
+          # Dry-run gate: no relay token is minted in dry-run, so the lifecycle model
+          # cannot run and live thread collection (issues:read, app token) is out of
+          # scope here. An empty inventory + empty lifecycle deterministically routes
+          # the loop to run_review through the trusted resolve_gate router.
+          printf '{}' > codex-review-artifacts/resolve_gate/thread-inventory.json
+          printf '{}' > codex-review-artifacts/resolve_gate/lifecycle-result.json
+          codex-review resolve_gate route \
+            --inventory codex-review-artifacts/resolve_gate/thread-inventory.json \
+            --result codex-review-artifacts/resolve_gate/lifecycle-result.json \
+            --out codex-review-artifacts/resolve_gate/gate-result.json
+          route="$(jq -er '.route' codex-review-artifacts/resolve_gate/gate-result.json)"
+          echo "route=${route}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop review collect"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "route=${route}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  review-axes:
+    name: Review Findings By Axis
+    needs: [setup-relay, review-collect]
+    if: ${{ always() && inputs.stage == 'review' && needs.review-collect.result == 'success' && needs.review-collect.outputs.route == 'run_review' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        axis: [correctness, security, performance, test-coverage, domain]
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Produce deterministic axis findings
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          MATRIX_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "codex-review-artifacts/review/${MATRIX_AXIS}"
+          # Dry-run axis review: the relay token is not configured in dry-run, so the
+          # per-axis inspection model is not invoked. Emit the schema-valid empty
+          # findings fallback so the fan-in stays deterministic. The live model step
+          # that inspects PR-head data is reserved for a separate live-capable change.
+          codex-review review default-result \
+            --axis "${MATRIX_AXIS}" \
+            --out "codex-review-artifacts/review/${MATRIX_AXIS}/findings.json"
+
+          {
+            echo "## Codex loop review axis ${MATRIX_AXIS}"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload axis findings artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-review-${{ matrix.axis }}-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/review/${{ matrix.axis }}/findings.json
+          retention-days: 7
+
+  review-combine:
+    name: Review Combine Findings
+    needs: [setup-relay, review-axes]
+    if: ${{ always() && inputs.stage == 'review' && needs.review-axes.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      finding_count: ${{ steps.combine.outputs.finding_count }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download axis findings artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codex-loop-review-*-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/review-downloads
+
+      - name: Combine axis findings
+        id: combine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/review
+          codex-review review combine \
+            --artifacts codex-review-artifacts/review-downloads \
+            --out codex-review-artifacts/review/combined-findings.json
+          finding_count="$(jq -er '.finding_count' codex-review-artifacts/review/combined-findings.json)"
+          echo "finding_count=${finding_count}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop review combine"
+            echo "finding_count=${finding_count}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload combined findings artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-review-combined-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/review/combined-findings.json
+          retention-days: 7
+
+  review-techlead:
+    name: Review Techlead Decision And Route
+    needs: [setup-relay, review-collect, review-combine]
+    if: ${{ always() && inputs.stage == 'review' && needs.review-combine.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
     outputs:
       next_stage: ${{ steps.stage_outputs.outputs.next_stage }}
       lgtm: ${{ steps.stage_outputs.outputs.lgtm }}
       should_redispatch: ${{ steps.stage_outputs.outputs.should_redispatch }}
       terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
     steps:
-      - name: Mint relay token for live Codex action
-        id: live_relay
-        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
         shell: bash
-        env:
-          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
-          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
         run: |
           set -euo pipefail
-          relay_token="$(codex-review oidc relay-token \
-            --audience "${CODEX_OIDC_AUDIENCE}" \
-            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
-          if [[ -z "${relay_token}" ]]; then
-            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download combined findings artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-review-combined-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/review
+
+      - name: Download setup loop state artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}.json
+          path: .
+
+      - name: Decide, classify and route review with posting disabled
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/techlead
+          # Dry-run techlead: no relay token, so the decision model is not invoked.
+          # Derive the deterministic decision fallback from the combined findings.
+          codex-review techlead default-result \
+            --in codex-review-artifacts/review/combined-findings.json \
+            --out codex-review-artifacts/techlead/techlead-decision.json
+          codex-review techlead classify \
+            --in codex-review-artifacts/techlead/techlead-decision.json \
+            --artifacts codex-review-artifacts/review/combined-findings.json \
+            --out codex-review-artifacts/techlead/review-publication.json
+
+          printf '{}' > codex-review-artifacts/techlead/pr-context.json
+          printf '{}' > codex-review-artifacts/techlead/changed-lines.json
+          # Posting is disabled: --dry-run never creates a PR review or comment and
+          # never consumes a write token. Review jobs are read-only by design, so the
+          # loop never posts to the PR in dry-run; routing is carried by job outputs
+          # and the review state-bundle artifact instead of labels or comments.
+          codex-review techlead publish --dry-run \
+            --in codex-review-artifacts/techlead/review-publication.json \
+            --pr-context codex-review-artifacts/techlead/pr-context.json \
+            --changed-lines codex-review-artifacts/techlead/changed-lines.json \
+            --out codex-review-artifacts/techlead/publish-report.json
+          posting_disabled="$(jq -er '.dry_run' codex-review-artifacts/techlead/publish-report.json)"
+          if [[ "${posting_disabled}" != "true" ]]; then
+            echo "review-posting-not-disabled" >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
-          echo "::add-mask::${relay_token}"
-          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Run live Codex stage
-        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          prompt: |
-            Run Codex loop stage `${{ inputs.stage }}` for PR #${{ inputs.pr_number }}.
-            Expected head SHA: `${{ inputs.head_sha }}`.
-            Correlation id: `${{ inputs.correlation_id }}`.
-            Write the machine-readable stage decision to `.codex-loop-stage-result.json`.
-            The file must contain exactly these JSON keys: `next_stage`, `lgtm`, `should_redispatch`, `terminal_reason`.
-            `next_stage` must be one of `review`, `design`, `fix`, or `issue` when non-empty.
-            `lgtm` and `should_redispatch` must be booleans.
-            `terminal_reason` must be a string and may be empty only when `should_redispatch` is true.
-            Do not mutate labels or comments.
+          codex-review loop route-after-techlead \
+            --in codex-review-artifacts/techlead/techlead-decision.json \
+            --out codex-review-artifacts/techlead/route.json
 
-      - name: Write deterministic dry-run stage result
-        if: ${{ inputs.dry_run == true }}
+          {
+            echo "## Codex loop review techlead"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "relay_configured=${RELAY_CONFIGURED}"
+            echo "posting_disabled=${posting_disabled}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Normalize review route into stage result
         shell: bash
-        env:
-          INPUT_STAGE: ${{ inputs.stage }}
         run: |
           set -euo pipefail
 
-          next_stage="review"
-          terminal_reason="dry-run-placeholder"
-
-          case "${INPUT_STAGE}" in
-            review)
-              next_stage="design"
-              ;;
-            design)
-              next_stage="fix"
-              ;;
-            fix)
-              next_stage="review"
-              ;;
-            issue)
-              next_stage="issue"
-              terminal_reason="issue-stage-placeholder"
-              ;;
+          route="$(jq -er '.route' codex-review-artifacts/techlead/route.json)"
+          case "${route}" in
+            stop_lgtm)
+              next_stage=""; lgtm="true"; should_redispatch="false"; terminal_reason="" ;;
+            run_design)
+              next_stage="design"; lgtm="false"; should_redispatch="true"; terminal_reason="" ;;
+            stop_after_publish)
+              next_stage=""; lgtm="false"; should_redispatch="false"; terminal_reason="tests_failed" ;;
+            stop_needs_human)
+              next_stage=""; lgtm="false"; should_redispatch="false"; terminal_reason="policy_rejected" ;;
+            *)
+              next_stage=""; lgtm="false"; should_redispatch="false"; terminal_reason="model_output_invalid" ;;
           esac
 
           jq -n \
             --arg next_stage "${next_stage}" \
+            --argjson lgtm "${lgtm}" \
+            --argjson should_redispatch "${should_redispatch}" \
             --arg terminal_reason "${terminal_reason}" \
-            '{next_stage: $next_stage, lgtm: false, should_redispatch: false, terminal_reason: $terminal_reason}' \
+            '{next_stage: $next_stage, lgtm: $lgtm, should_redispatch: $should_redispatch, terminal_reason: $terminal_reason}' \
             > .codex-loop-stage-result.json
 
-      - name: Parse stage result JSON
+      - name: Parse review stage result JSON
+        id: stage_outputs
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          result_file=".codex-loop-stage-result.json"
+          if [[ ! -s "${result_file}" ]]; then
+            echo "missing-stage-result-json" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          next_stage="$(jq -er '.next_stage | strings' "${result_file}")"
+          lgtm="$(jq -er '.lgtm | booleans | tostring' "${result_file}")"
+          should_redispatch="$(jq -er '.should_redispatch | booleans | tostring' "${result_file}")"
+          terminal_reason="$(jq -er '.terminal_reason | strings' "${result_file}")"
+
+          if [[ -n "${next_stage}" ]]; then
+            case "${next_stage}" in
+              review|design|fix|issue) ;;
+              *)
+                echo "invalid-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${should_redispatch}" == "true" && -z "${next_stage}" ]]; then
+            echo "redispatch-missing-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if [[ "${should_redispatch}" == "false" && "${lgtm}" == "false" && -z "${terminal_reason}" ]]; then
+            echo "terminal-reason-required" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if [[ "${should_redispatch}" == "true" ]]; then
+            jq -n \
+              --arg correlation_id "${INPUT_CORRELATION_ID}" \
+              --arg stage "${next_stage}" \
+              --arg head_sha "${INPUT_HEAD_SHA}" \
+              --arg state_run_id "${CURRENT_RUN_ID}" \
+              --arg state_artifact_name "codex-loop-review-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" \
+              --arg status "staged" \
+              --argjson iteration "$(( INPUT_ITERATION + 1 ))" \
+              '{correlation_id:$correlation_id, stage:$stage, iteration:$iteration, head_sha:$head_sha, state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, status:$status}' \
+              > codex-review-artifacts/techlead/dispatch-candidate.json
+            codex-review loop append-dispatch-ledger \
+              --in codex-review-artifacts/techlead/dispatch-candidate.json \
+              --ledger .codex-loop-state.json \
+              --out codex-review-artifacts/techlead/dispatch-ledger.json
+          else
+            jq -n --slurpfile state .codex-loop-state.json \
+              '{schema_version:"dispatch-ledger.v1", entries: ($state[0].dispatch_ledger // [])}' \
+              > codex-review-artifacts/techlead/dispatch-ledger.json
+          fi
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop review stage"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "relay_configured=${RELAY_CONFIGURED}"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload review state bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-review-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/techlead
+          retention-days: 7
+
+  design-prepare:
+    name: Design Prepare Clusters
+    needs: [validate, trust-and-stale-guard, setup-relay]
+    if: ${{ always() && inputs.stage == 'design' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.setup-relay.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      analysis_matrix: ${{ steps.prepare.outputs.analysis_matrix }}
+      has_analysis_batches: ${{ steps.prepare.outputs.has_analysis_batches }}
+      bundle_ok: ${{ steps.verify_bundle.outputs.bundle_ok }}
+      bundle_terminal_reason: ${{ steps.verify_bundle.outputs.bundle_terminal_reason }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download prior review loop-state artifact
+        id: download_prior_state
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.state_artifact_name }}
+          run-id: ${{ inputs.state_run_id }}
+          path: codex-review-artifacts/prior-state
+
+      - name: Verify prior review state bundle integrity
+        id: verify_bundle
+        shell: bash
+        env:
+          INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
+        run: |
+          set -euo pipefail
+          # The prior review bundle was downloaded by the exact state_run_id +
+          # state_artifact_name (no head-SHA / latest-run discovery). Verify it
+          # carries the files the design stage depends on before consuming it. A
+          # missing or corrupt bundle is routed to a canonical terminal reason by
+          # finalize-stage instead of being treated as empty success.
+          codex-review loop verify-bundle \
+            --kind review \
+            --name "${INPUT_STATE_ARTIFACT_NAME}" \
+            --dir codex-review-artifacts/prior-state \
+            --out codex-review-artifacts/prior-state-verify.json
+          bundle_ok="$(jq -er '.ok | tostring' codex-review-artifacts/prior-state-verify.json)"
+          bundle_terminal_reason="$(jq -r '.terminal_reason // ""' codex-review-artifacts/prior-state-verify.json)"
+          {
+            echo "bundle_ok=${bundle_ok}"
+            echo "bundle_terminal_reason=${bundle_terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop design prior-state bundle"
+            echo "bundle_kind=$(jq -r '.kind' codex-review-artifacts/prior-state-verify.json)"
+            echo "bundle_ok=${bundle_ok}"
+            echo "missing=$(jq -c '.missing' codex-review-artifacts/prior-state-verify.json)"
+            echo "invalid=$(jq -c '.invalid' codex-review-artifacts/prior-state-verify.json)"
+            if [[ "${bundle_ok}" != "true" ]]; then
+              echo "bundle-required-file-missing"
+              echo "terminal_reason=${bundle_terminal_reason}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Build design context, inventory and clusters
+        id: prepare
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/design
+          # Design consumes the prior review loop state through the explicit
+          # state_run_id/state_artifact_name transport already validated upstream.
+          # No head-SHA, latest-run, or branch discovery is used to locate it.
+          codex-review loop read-state \
+            --ledger codex-review-artifacts/prior-state/dispatch-ledger.json \
+            --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}" \
+            --out codex-review-artifacts/design/prior-loop-state.json
+          jq -n --slurpfile state codex-review-artifacts/design/prior-loop-state.json \
+            '{schema_version:"dispatch-ledger.v1", entries: ($state[0].dispatch_ledger // [])}' \
+            > codex-review-artifacts/design/dispatch-ledger.json
+          # Dry-run design: no relay token is minted, so the design inventory and
+          # cluster models are not invoked. Build the design context from the prior
+          # review state and emit the schema-valid deterministic inventory/cluster
+          # fallbacks. The live model inventory/clustering that inspects PR-head data
+          # is reserved for a separate live-capable change.
+          printf '{}' > codex-review-artifacts/design/pr-context.json
+          codex-review design context \
+            --in codex-review-artifacts/design/prior-loop-state.json \
+            --pr-context codex-review-artifacts/design/pr-context.json \
+            --out codex-review-artifacts/design/design-context.json
+          codex-review design default-inventory \
+            --in codex-review-artifacts/design/design-context.json \
+            --out codex-review-artifacts/design/design-inventory.json
+          codex-review design default-clusters \
+            --inventory codex-review-artifacts/design/design-inventory.json \
+            --out codex-review-artifacts/design/design-clusters.json
+          # prepare-analysis-matrix writes the design cluster batches plus the
+          # has_analysis_batches / analysis_matrix step outputs that drive the
+          # design-analyze fan-out matrix below.
+          codex-review design prepare-analysis-matrix \
+            --in codex-review-artifacts/design/design-clusters.json \
+            --pr-context codex-review-artifacts/design/design-context.json \
+            --repo-path pr-head \
+            --work-dir codex-review-artifacts/design/batches \
+            --out codex-review-artifacts/design/analysis-matrix.json
+
+          has_analysis_batches="$(jq -er 'if (.include | length) > 0 then "true" else "false" end' codex-review-artifacts/design/analysis-matrix.json)"
+
+          {
+            echo "## Codex loop design prepare"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "has_analysis_batches=${has_analysis_batches}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload design prepare artifact
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-design-prepare-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design
+          retention-days: 7
+
+  design-analyze:
+    name: Design Analyze Clusters
+    needs: [setup-relay, design-prepare]
+    if: ${{ always() && inputs.stage == 'design' && needs.design-prepare.result == 'success' && needs.design-prepare.outputs.has_analysis_batches == 'true' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.design-prepare.outputs.analysis_matrix) }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download design prepare artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-design-prepare-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design
+
+      - name: Produce deterministic cluster analysis
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          MATRIX_BATCH_FILE: ${{ matrix.batch_file }}
+          MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
+        run: |
+          set -euo pipefail
+
+          # Dry-run cluster analysis: the relay token is not configured in dry-run, so
+          # the per-batch cluster-analysis model is not invoked. Emit the schema-valid
+          # deterministic analysis fallback so the design fan-in stays deterministic.
+          # The live model step that inspects PR-head data is reserved for a separate
+          # live-capable change.
+          codex-review design default-analysis \
+            --inventory "${MATRIX_BATCH_FILE}" \
+            --out "${MATRIX_VALIDATED_FILE}"
+
+          {
+            echo "## Codex loop design analyze ${MATRIX_BATCH_FILE}"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload cluster analysis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-design-analysis-${{ matrix.batch_path }}-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: ${{ matrix.validated_file }}
+          retention-days: 7
+
+  design-plan:
+    name: Design Draft Plan
+    needs: [setup-relay, design-prepare, design-analyze]
+    if: ${{ always() && inputs.stage == 'design' && needs.design-prepare.result == 'success' && needs.design-prepare.outputs.bundle_ok == 'true' && (needs.design-analyze.result == 'success' || needs.design-analyze.result == 'skipped') }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      plan_ready: ${{ steps.plan.outputs.plan_ready }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download design prepare artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-design-prepare-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design
+
+      - name: Download cluster analysis artifacts
+        if: ${{ needs.design-prepare.outputs.has_analysis_batches == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codex-loop-design-analysis-*-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design-analysis-downloads
+
+      - name: Collect analyses and draft design plan
+        id: plan
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/design-analysis-downloads
+          codex-review design collect-analyses \
+            --artifacts codex-review-artifacts/design-analysis-downloads \
+            --out codex-review-artifacts/design/cluster-analysis.json
+          # Dry-run design plan: no relay token, so the design coordinator model is not
+          # invoked. Derive the deterministic design-plan fallback from the design
+          # context built off the prior review state and the cluster analyses.
+          codex-review design default-plan \
+            --pr-context codex-review-artifacts/design/design-context.json \
+            --inventory codex-review-artifacts/design/design-clusters.json \
+            --result codex-review-artifacts/design/cluster-analysis.json \
+            --out codex-review-artifacts/design/design-plan.json
+          echo "plan_ready=true" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop design plan"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload design plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-design-plan-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design
+          retention-days: 7
+
+  design-chief:
+    name: Design Chief Decision And Route
+    needs: [setup-relay, design-prepare, design-plan]
+    if: ${{ always() && inputs.stage == 'design' && needs.design-plan.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      next_stage: ${{ steps.stage_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.stage_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.stage_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download design plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-design-plan-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design
+
+      - name: Decide design chief and route with posting disabled
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+
+          # Assemble the design state-bundle (design-plan + chief outputs) so the fix
+          # stage can consume it through the explicit state artifact transport.
+          mkdir -p codex-review-artifacts/design-state-bundle
+          cp codex-review-artifacts/design/dispatch-ledger.json \
+            codex-review-artifacts/design-state-bundle/dispatch-ledger.json
+          cp codex-review-artifacts/design/design-plan.json \
+            codex-review-artifacts/design-state-bundle/design-plan.json
+          # Dry-run design chief: no relay token, so the chief decision model is not
+          # invoked. Derive the deterministic decision fallback from the design plan.
+          codex-review design_chief default-result \
+            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
+            --out codex-review-artifacts/design-state-bundle/chief-decision.json
+
+          printf '{}' > codex-review-artifacts/design-state-bundle/pr-context.json
+          # Posting is disabled: --dry-run never upserts a design-summary comment and
+          # never consumes a write token. Design jobs are read-only by design, so the
+          # loop never posts to the PR in dry-run; routing is carried by job outputs and
+          # the design state-bundle artifact instead of labels or comments.
+          codex-review design_chief publish --dry-run \
+            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
+            --in codex-review-artifacts/design-state-bundle/chief-decision.json \
+            --pr-context codex-review-artifacts/design-state-bundle/pr-context.json \
+            --out codex-review-artifacts/design-state-bundle/publish-report.json
+          posting_disabled="$(jq -er '.dry_run' codex-review-artifacts/design-state-bundle/publish-report.json)"
+          if [[ "${posting_disabled}" != "true" ]]; then
+            echo "design-posting-not-disabled" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          codex-review design_chief route \
+            --in codex-review-artifacts/design-state-bundle/chief-decision.json \
+            --out codex-review-artifacts/design-state-bundle/route.json
+
+          {
+            echo "## Codex loop design chief"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "relay_configured=${RELAY_CONFIGURED}"
+            echo "posting_disabled=${posting_disabled}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Normalize design route into stage result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          route="$(jq -er '.route' codex-review-artifacts/design-state-bundle/route.json)"
+          case "${route}" in
+            run_fix_dispatch)
+              next_stage="fix"; lgtm="false"; should_redispatch="true"; terminal_reason="" ;;
+            stop_needs_human)
+              next_stage=""; lgtm="false"; should_redispatch="false"; terminal_reason="policy_rejected" ;;
+            stop_noop)
+              next_stage=""; lgtm="false"; should_redispatch="false"; terminal_reason="no_fix_needed" ;;
+            *)
+              next_stage=""; lgtm="false"; should_redispatch="false"; terminal_reason="model_output_invalid" ;;
+          esac
+
+          jq -n \
+            --arg next_stage "${next_stage}" \
+            --argjson lgtm "${lgtm}" \
+            --argjson should_redispatch "${should_redispatch}" \
+            --arg terminal_reason "${terminal_reason}" \
+            '{next_stage: $next_stage, lgtm: $lgtm, should_redispatch: $should_redispatch, terminal_reason: $terminal_reason}' \
+            > .codex-loop-stage-result.json
+
+      - name: Parse design stage result JSON
+        id: stage_outputs
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          result_file=".codex-loop-stage-result.json"
+          if [[ ! -s "${result_file}" ]]; then
+            echo "missing-stage-result-json" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          next_stage="$(jq -er '.next_stage | strings' "${result_file}")"
+          lgtm="$(jq -er '.lgtm | booleans | tostring' "${result_file}")"
+          should_redispatch="$(jq -er '.should_redispatch | booleans | tostring' "${result_file}")"
+          terminal_reason="$(jq -er '.terminal_reason | strings' "${result_file}")"
+
+          if [[ -n "${next_stage}" ]]; then
+            case "${next_stage}" in
+              review|design|fix|issue) ;;
+              *)
+                echo "invalid-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${should_redispatch}" == "true" && -z "${next_stage}" ]]; then
+            echo "redispatch-missing-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if [[ "${should_redispatch}" == "false" && "${lgtm}" == "false" && -z "${terminal_reason}" ]]; then
+            echo "terminal-reason-required" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          if [[ "${should_redispatch}" == "true" ]]; then
+            jq -n \
+              --arg correlation_id "${INPUT_CORRELATION_ID}" \
+              --arg stage "${next_stage}" \
+              --arg head_sha "${INPUT_HEAD_SHA}" \
+              --arg state_run_id "${CURRENT_RUN_ID}" \
+              --arg state_artifact_name "codex-loop-design-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" \
+              --arg status "staged" \
+              --argjson iteration "$(( INPUT_ITERATION + 1 ))" \
+              '{correlation_id:$correlation_id, stage:$stage, iteration:$iteration, head_sha:$head_sha, state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, status:$status}' \
+              > codex-review-artifacts/design-state-bundle/dispatch-candidate.json
+            codex-review loop append-dispatch-ledger \
+              --in codex-review-artifacts/design-state-bundle/dispatch-candidate.json \
+              --ledger codex-review-artifacts/design-state-bundle/dispatch-ledger.json \
+              --out codex-review-artifacts/design-state-bundle/dispatch-ledger.json
+          fi
+
+          {
+            echo "## Codex loop design stage"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "relay_configured=${RELAY_CONFIGURED}"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload design state bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-design-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/design-state-bundle
+          retention-days: 7
+
+  fix-dispatch:
+    name: Fix Dispatch Plan Tasks
+    needs: [validate, trust-and-stale-guard, setup-relay]
+    if: ${{ always() && inputs.stage == 'fix' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.setup-relay.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      agent_matrix: ${{ steps.plan_tasks.outputs.agent_matrix }}
+      has_agent_tasks: ${{ steps.plan_tasks.outputs.has_agent_tasks }}
+      no_fix_needed: ${{ steps.manifest_outputs.outputs.no_fix_needed }}
+      bundle_ok: ${{ steps.verify_bundle.outputs.bundle_ok }}
+      bundle_terminal_reason: ${{ steps.verify_bundle.outputs.bundle_terminal_reason }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download design state bundle artifact
+        id: download_design_state
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.state_artifact_name }}
+          run-id: ${{ inputs.state_run_id }}
+          path: codex-review-artifacts/design-state-bundle
+
+      - name: Verify prior design state bundle integrity
+        id: verify_bundle
+        shell: bash
+        env:
+          INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
+        run: |
+          set -euo pipefail
+          # The prior design bundle was downloaded by the exact state_run_id +
+          # state_artifact_name (no head-SHA / latest-run discovery). Verify it
+          # carries the files the fix stage depends on before consuming it. A
+          # missing or corrupt bundle is routed to a canonical terminal reason by
+          # finalize-stage instead of being treated as empty success.
+          codex-review loop verify-bundle \
+            --kind design \
+            --name "${INPUT_STATE_ARTIFACT_NAME}" \
+            --dir codex-review-artifacts/design-state-bundle \
+            --out codex-review-artifacts/design-state-verify.json
+          bundle_ok="$(jq -er '.ok | tostring' codex-review-artifacts/design-state-verify.json)"
+          bundle_terminal_reason="$(jq -r '.terminal_reason // ""' codex-review-artifacts/design-state-verify.json)"
+          {
+            echo "bundle_ok=${bundle_ok}"
+            echo "bundle_terminal_reason=${bundle_terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop fix prior-state bundle"
+            echo "bundle_kind=$(jq -r '.kind' codex-review-artifacts/design-state-verify.json)"
+            echo "bundle_ok=${bundle_ok}"
+            echo "missing=$(jq -c '.missing' codex-review-artifacts/design-state-verify.json)"
+            echo "invalid=$(jq -c '.invalid' codex-review-artifacts/design-state-verify.json)"
+            if [[ "${bundle_ok}" != "true" ]]; then
+              echo "bundle-required-file-missing"
+              echo "terminal_reason=${bundle_terminal_reason}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Plan fix tasks and prepare run_agents matrix
+        id: plan_tasks
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          REPOSITORY: ${{ github.repository }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/fix_dispatch codex-review-artifacts/fix-context
+          jq -n \
+            --arg repository "${REPOSITORY}" \
+            --arg head_sha "${INPUT_HEAD_SHA}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            '{repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
+            > codex-review-artifacts/fix-context/pr-context.json
+          printf '' > codex-review-artifacts/fix-context/docs-context.md
+
+          codex-review fix_dispatch plan \
+            --in codex-review-artifacts/design-state-bundle/design-plan.json \
+            --chief-decision codex-review-artifacts/design-state-bundle/chief-decision.json \
+            --out codex-review-artifacts/fix_dispatch/manifest.json
+          codex-review fix_dispatch prepare-agents \
+            --inventory codex-review-artifacts/fix_dispatch/manifest.json \
+            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
+            --chief-decision codex-review-artifacts/design-state-bundle/chief-decision.json \
+            --docs-context codex-review-artifacts/fix-context/docs-context.md \
+            --repo-path pr-head \
+            --work-dir codex-review-artifacts/fix_dispatch/agents \
+            --out codex-review-artifacts/fix_dispatch/agent-matrix.json
+
+          agent_matrix="$(jq -c . codex-review-artifacts/fix_dispatch/agent-matrix.json)"
+          has_agent_tasks="$(jq -er 'if (.include | length) > 0 then "true" else "false" end' codex-review-artifacts/fix_dispatch/agent-matrix.json)"
+          {
+            echo "agent_matrix=${agent_matrix}"
+            echo "has_agent_tasks=${has_agent_tasks}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop fix_dispatch plan_tasks"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "has_agent_tasks=${has_agent_tasks}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Emit fix manifest outputs
+        id: manifest_outputs
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          no_fix_needed="$(jq -er 'if .no_fix_needed then "true" else "false" end' codex-review-artifacts/fix_dispatch/manifest.json)"
+          echo "no_fix_needed=${no_fix_needed}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload fix dispatch artifact
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-fix-dispatch-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: |
+            codex-review-artifacts/fix_dispatch
+            codex-review-artifacts/fix-context
+            codex-review-artifacts/design-state-bundle
+          retention-days: 7
+
+  fix-run-agents:
+    name: Fix Run Agents Matrix (run_agents)
+    needs: [setup-relay, fix-dispatch]
+    if: ${{ always() && inputs.stage == 'fix' && needs.fix-dispatch.result == 'success' && needs.fix-dispatch.outputs.has_agent_tasks == 'true' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.fix-dispatch.outputs.agent_matrix) }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download fix dispatch artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-fix-dispatch-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts
+
+      - name: Produce deterministic fix agent result
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          MATRIX_TASK_FILE: ${{ matrix.task_file }}
+          MATRIX_OUTPUT_FILE: ${{ matrix.output_file }}
+          MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
+        run: |
+          set -euo pipefail
+
+          # Dry-run fix agent: no relay token is configured, so the live agent model is
+          # not invoked. Emit and validate the schema-valid deterministic no-safe-fix
+          # fallback for each planned task while preserving the real matrix fan-out.
+          codex-review fix_dispatch default-agent-result \
+            --inventory "${MATRIX_TASK_FILE}" \
+            --out "${MATRIX_OUTPUT_FILE}"
+          codex-review fix_dispatch validate-agent-result \
+            --inventory "${MATRIX_TASK_FILE}" \
+            --in "${MATRIX_OUTPUT_FILE}" \
+            --repo-path pr-head \
+            --out "${MATRIX_VALIDATED_FILE}"
+
+          {
+            echo "## Codex loop fix run_agents ${MATRIX_TASK_FILE}"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload fix agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-fix-agent-${{ matrix.task_path }}-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/fix_dispatch/agents/${{ matrix.task_path }}
+          retention-days: 7
+
+  fix-merge-validate:
+    name: Fix Merge Validate (merge_validate / fix_merge)
+    needs: [setup-relay, fix-dispatch, fix-run-agents]
+    if: ${{ always() && inputs.stage == 'fix' && needs.fix-dispatch.result == 'success' && needs.fix-dispatch.outputs.bundle_ok == 'true' && (needs.fix-run-agents.result == 'success' || needs.fix-run-agents.result == 'skipped') }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      next_stage: ${{ steps.stage_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.stage_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.stage_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download fix dispatch artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-fix-dispatch-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts
+
+      - name: Download fix agent artifacts
+        if: ${{ needs.fix-dispatch.outputs.has_agent_tasks == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codex-loop-fix-agent-*-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/fix-agent-downloads
+
+      - name: Download setup loop state artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}.json
+          path: .
+
+      - name: Merge, semantic-safety, validate-fix and check-loop-budget
+        id: validation_result
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/fix-agent-downloads codex-review-artifacts/fix_merge codex-review-artifacts/push codex-review-artifacts/fix-state-bundle
+          cp codex-review-artifacts/design-state-bundle/dispatch-ledger.json \
+            codex-review-artifacts/fix-state-bundle/dispatch-ledger.json
+          codex-review fix_dispatch collect \
+            --inventory codex-review-artifacts/fix_dispatch/manifest.json \
+            --artifacts codex-review-artifacts/fix-agent-downloads \
+            --out codex-review-artifacts/fix_dispatch/collection.json
+          codex-review fix_merge premerge \
+            --in codex-review-artifacts/fix_dispatch/collection.json \
+            --repo-path pr-head \
+            --out codex-review-artifacts/fix_merge/premerge-report.json
+          codex-review fix_merge prepare-merge-model \
+            --inventory codex-review-artifacts/fix_merge/premerge-report.json \
+            --in codex-review-artifacts/fix_dispatch/collection.json \
+            --pr-context codex-review-artifacts/fix-context/pr-context.json \
+            --docs-context codex-review-artifacts/fix-context/docs-context.md \
+            --repo-path pr-head \
+            --prompt-out codex-review-artifacts/fix_merge/merge-prompt.md \
+            --raw-out codex-review-artifacts/fix_merge/merged-fix.raw.json \
+            --out codex-review-artifacts/fix_merge/merge-route.json
+          if [[ "$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)" == "true" ]]; then
+            codex-review fix_merge default-merged-fix \
+              --inventory codex-review-artifacts/fix_merge/premerge-report.json \
+              --out codex-review-artifacts/fix_merge/merged-fix.raw.json
+          fi
+          codex-review fix_merge validate \
+            --inventory codex-review-artifacts/fix_merge/premerge-report.json \
+            --chief-decision codex-review-artifacts/design-state-bundle/chief-decision.json \
+            --in codex-review-artifacts/fix_merge/merged-fix.raw.json \
+            --repo-path pr-head \
+            --out codex-review-artifacts/fix_merge/merged-fix.json
+          codex-review fix_merge build-semantic-safety-prompt \
+            --in codex-review-artifacts/fix_merge/merged-fix.json \
+            --pr-context codex-review-artifacts/fix-context/pr-context.json \
+            --docs-context codex-review-artifacts/fix-context/docs-context.md \
+            --repo-path pr-head \
+            --out codex-review-artifacts/fix_merge/semantic-safety-prompt.md
+          patch_hash="$(jq -r '(.patch // .patch_text // "")' codex-review-artifacts/fix_merge/merged-fix.json | shasum -a 256 | cut -d ' ' -f 1)"
+          status="$(jq -er '.status | strings' codex-review-artifacts/fix_merge/merged-fix.json)"
+          if [[ "${status}" == "no_fix" || "${status}" == "blocked" || "${patch_hash}" == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]]; then
+            jq -n --arg patch_hash "${patch_hash}" \
+              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"not_required", approved:false, patch_hash:$patch_hash, summary:"No ready patch requires semantic push approval in dry-run fix wiring.", blocking_reason:null, reviewed_criteria:[], semantic_findings:[], commit_plan:[]}' \
+              > codex-review-artifacts/fix_merge/semantic-safety.raw.json
+          else
+            jq -n --arg patch_hash "${patch_hash}" \
+              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"rejected", approved:false, patch_hash:$patch_hash, summary:"Dry-run semantic safety model is deferred for Wave 3.", blocking_reason:"live semantic patch safety approval is deferred; this dry-run stage does not authorize push", reviewed_criteria:["exact patch hash computed", "push withheld"], semantic_findings:[], commit_plan:[]}' \
+              > codex-review-artifacts/fix_merge/semantic-safety.raw.json
+          fi
+          codex-review fix_merge validate-semantic-safety \
+            --in codex-review-artifacts/fix_merge/semantic-safety.raw.json \
+            --inventory codex-review-artifacts/fix_merge/merged-fix.json \
+            --out codex-review-artifacts/fix_merge/semantic-safety.json
+          codex-review push validate-fix \
+            --in codex-review-artifacts/fix_merge/merged-fix.json \
+            --semantic-safety codex-review-artifacts/fix_merge/semantic-safety.json \
+            --pr-context codex-review-artifacts/fix-context/pr-context.json \
+            --repo-path pr-head \
+            --out codex-review-artifacts/push/validated-fix.json
+          codex-review push check-loop-budget \
+            --in codex-review-artifacts/push/validated-fix.json \
+            --result codex-review-artifacts/fix_merge/merged-fix.json \
+            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
+            --loop-state .codex-loop-state.json \
+            --out codex-review-artifacts/push/validated-fix.json
+          codex-review push write-validation-outputs \
+            --in codex-review-artifacts/push/validated-fix.json
+
+          cp codex-review-artifacts/fix_merge/merged-fix.json codex-review-artifacts/fix-state-bundle/merged-fix.json
+          cp codex-review-artifacts/push/validated-fix.json codex-review-artifacts/fix-state-bundle/validated-fix.json
+          cp codex-review-artifacts/fix_merge/semantic-safety.json codex-review-artifacts/fix-state-bundle/semantic-safety.json
+          cp codex-review-artifacts/fix_dispatch/manifest.json codex-review-artifacts/fix-state-bundle/manifest.json
+
+          {
+            echo "## Codex loop fix merge_validate"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "validation_status=$(jq -er '.status | strings' codex-review-artifacts/push/validated-fix.json)"
+            echo "semantic_safety=$(jq -er '.status | strings' codex-review-artifacts/fix_merge/semantic-safety.json)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Normalize fix validation into stage result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          validation_status="$(jq -er '.status | strings' codex-review-artifacts/push/validated-fix.json)"
+          validated="$(jq -er '.validated | booleans | tostring' codex-review-artifacts/push/validated-fix.json)"
+          loop_budget_ok="$(jq -r 'if has("loop_budget_ok") then .loop_budget_ok else true end | tostring' codex-review-artifacts/push/validated-fix.json)"
+          next_stage=""
+          lgtm="false"
+          should_redispatch="false"
+          terminal_reason=""
+
+          if [[ "${validated}" == "true" && "${loop_budget_ok}" == "true" ]]; then
+            next_stage="review"
+            should_redispatch="true"
+          else
+            case "${validation_status}" in
+              no_fix|empty_patch)
+                terminal_reason="no_fix_needed" ;;
+              no_diff_repeat|no-diff-repeat|oscillation_detected|max_rounds_reached)
+                terminal_reason="no_fix_changes" ;;
+              dry_run)
+                terminal_reason="dry_run" ;;
+              *)
+                terminal_reason="model_output_invalid" ;;
+            esac
+          fi
+
+          jq -n \
+            --arg next_stage "${next_stage}" \
+            --argjson lgtm "${lgtm}" \
+            --argjson should_redispatch "${should_redispatch}" \
+            --arg terminal_reason "${terminal_reason}" \
+            '{next_stage: $next_stage, lgtm: $lgtm, should_redispatch: $should_redispatch, terminal_reason: $terminal_reason}' \
+            > .codex-loop-stage-result.json
+
+      - name: Parse fix stage result JSON
         id: stage_outputs
         shell: bash
         env:
@@ -459,7 +1755,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
           {
-            echo "## Codex loop stage"
+            echo "## Codex loop fix stage"
             echo "dry_run=${INPUT_DRY_RUN}"
             echo "responses_endpoint=${RESPONSES_ENDPOINT}"
             echo "relay_configured=${RELAY_CONFIGURED}"
@@ -469,77 +1765,402 @@ jobs:
             echo "terminal_reason=${terminal_reason}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  finalize:
-    name: Finalize Loop
-    needs: [validate, trust-and-stale-guard, setup-relay, run-stage]
-    if: ${{ always() }}
+      - name: Upload fix state bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-fix-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/fix-state-bundle
+          retention-days: 7
+
+  fix-push:
+    name: Fix Push Validated Patch
+    needs: [validate, trust-and-stale-guard, setup-relay, fix-merge-validate]
+    # Defense-in-depth: explicit fork == 'false' so a fork PR can never reach the App push
+    # token or git push even if the trusted derivation regresses (trusted implies non-fork).
+    if: ${{ always() && inputs.stage == 'fix' && inputs.dry_run == false && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.setup-relay.result == 'success' && needs.fix-merge-validate.result == 'success' }}
     runs-on:
       group: "Home Server Runners"
       labels: dongwontuna-labs-runner
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
+      actions: read
     outputs:
-      next_stage: ${{ steps.finalize.outputs.next_stage }}
-      lgtm: ${{ steps.finalize.outputs.lgtm }}
-      should_redispatch: ${{ steps.finalize.outputs.should_redispatch }}
-      terminal_reason: ${{ steps.finalize.outputs.terminal_reason }}
+      next_stage: ${{ steps.stage_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.stage_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.stage_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
+      updated_head_sha: ${{ steps.stage_outputs.outputs.updated_head_sha }}
     steps:
-      - name: Resolve final loop outputs
-        id: finalize
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Fresh checkout PR head for write
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head-write
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download fix state bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-loop-fix-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/fix-state-bundle
+
+      - name: Prepare trusted push context
         shell: bash
         env:
-          VALIDATE_RESULT: ${{ needs.validate.result }}
-          VALIDATE_REASON: ${{ needs.validate.outputs.terminal_reason }}
-          TRUST_RESULT: ${{ needs.trust-and-stale-guard.result }}
-          TRUSTED: ${{ needs.trust-and-stale-guard.outputs.trusted }}
-          TRUST_REASON: ${{ needs.trust-and-stale-guard.outputs.terminal_reason }}
-          SETUP_RESULT: ${{ needs.setup-relay.result }}
-          SETUP_REASON: ${{ needs.setup-relay.outputs.terminal_reason }}
-          RUN_STAGE_RESULT: ${{ needs.run-stage.result }}
-          RUN_STAGE_NEXT_STAGE: ${{ needs.run-stage.outputs.next_stage }}
-          RUN_STAGE_LGTM: ${{ needs.run-stage.outputs.lgtm }}
-          RUN_STAGE_REDISPATCH: ${{ needs.run-stage.outputs.should_redispatch }}
-          RUN_STAGE_REASON: ${{ needs.run-stage.outputs.terminal_reason }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPO_FULL_NAME: ${{ needs.trust-and-stale-guard.outputs.head_repo_full_name }}
+          HEAD_REF: ${{ needs.trust-and-stale-guard.outputs.head_ref }}
         run: |
           set -euo pipefail
 
-          next_stage="${RUN_STAGE_NEXT_STAGE:-}"
-          lgtm="${RUN_STAGE_LGTM:-false}"
-          should_redispatch="${RUN_STAGE_REDISPATCH:-false}"
-          terminal_reason="${RUN_STAGE_REASON:-}"
+          owner="${REPOSITORY%%/*}"
+          repo="${REPOSITORY#*/}"
+          mkdir -p codex-review-artifacts/push
+          jq -n \
+            --arg owner "${owner}" \
+            --arg repo "${repo}" \
+            --arg repository "${REPOSITORY}" \
+            --arg head_repo_full_name "${HEAD_REPO_FULL_NAME}" \
+            --arg base_repo_full_name "${REPOSITORY}" \
+            --arg head_ref "${HEAD_REF}" \
+            --arg head_sha "${INPUT_HEAD_SHA}" \
+            --arg current_head_sha "${INPUT_HEAD_SHA}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            --argjson same_repo true \
+            '{owner: $owner, repo: $repo, repository: $repository, pr_number: $pr_number, head_sha: $head_sha, current_head_sha: $current_head_sha, base_ref: $base_ref, same_repo: $same_repo, head_repo_full_name: $head_repo_full_name, base_repo_full_name: $base_repo_full_name, head_ref: $head_ref}' \
+            > codex-review-artifacts/push/pr-context.json
 
-          if [[ "${VALIDATE_RESULT}" != "success" ]]; then
-            terminal_reason="${VALIDATE_REASON:-validation-failed}"
-            next_stage=""
-            lgtm="false"
-            should_redispatch="false"
-          elif [[ "${TRUST_RESULT}" != "success" || "${TRUSTED}" != "true" ]]; then
-            terminal_reason="${TRUST_REASON:-trust-or-stale-guard-failed}"
-            next_stage=""
-            lgtm="false"
-            should_redispatch="false"
-          elif [[ "${SETUP_RESULT}" != "success" ]]; then
-            terminal_reason="${SETUP_REASON:-relay-setup-failed}"
-            next_stage=""
-            lgtm="false"
-            should_redispatch="false"
-          elif [[ "${RUN_STAGE_RESULT}" != "success" ]]; then
-            terminal_reason="${RUN_STAGE_REASON:-stage-failed}"
-            lgtm="false"
-            should_redispatch="false"
+      - name: Mint GitHub App installation token for push
+        id: app_token
+        shell: bash
+        env:
+          CODEX_APP_ID: ${{ secrets.CODEX_GITHUB_APP_ID }}
+          CODEX_APP_PRIVATE_KEY: ${{ secrets.CODEX_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          codex-review auth app-token \
+            --mode push \
+            --pr-context codex-review-artifacts/push/pr-context.json \
+            --out codex-review-artifacts/push/app-token.json
+
+      - name: Revalidate live head, apply validated patch, commit and push
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+          CODEX_REVIEW_APP_TOKEN_PERMISSIONS_JSON: ${{ steps.app_token.outputs.permissions_json }}
+        run: |
+          set -euo pipefail
+          codex-review push commit-push \
+            --in codex-review-artifacts/fix-state-bundle/merged-fix.json \
+            --validation codex-review-artifacts/fix-state-bundle/validated-fix.json \
+            --pr-context codex-review-artifacts/push/pr-context.json \
+            --repo-path pr-head-write \
+            --out codex-review-artifacts/push/push-result.json
+
+      - name: Normalize push result into stage result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          push_status="$(jq -er '.status | strings' codex-review-artifacts/push/push-result.json)"
+          pushed="$(jq -er '.pushed | booleans | tostring' codex-review-artifacts/push/push-result.json)"
+          verified="$(jq -r 'if has("verified") then .verified else false end | tostring' codex-review-artifacts/push/push-result.json)"
+          result_updated_head_sha="$(jq -r '.updated_head_sha // ""' codex-review-artifacts/push/push-result.json)"
+          next_stage=""
+          lgtm="false"
+          should_redispatch="false"
+          terminal_reason=""
+          updated_head_sha=""
+
+          if [[ "${push_status}" == "pushed" && "${pushed}" == "true" ]]; then
+            # Security gate: a successful push must carry verified=true and a non-empty
+            # remote-confirmed head before continuing; otherwise route pushed_unverified.
+            if [[ "${verified}" != "true" || -z "${result_updated_head_sha}" ]]; then
+              echo "pushed-without-verified-updated-head-sha" >> "${GITHUB_STEP_SUMMARY}"
+              terminal_reason="pushed_unverified"
+            else
+              next_stage="review"
+              should_redispatch="true"
+              updated_head_sha="${result_updated_head_sha}"
+            fi
+          else
+            case "${push_status}" in
+              stale_head|no_fix_changes|empty_patch|validation_failed|tests_failed|semantic_safety_missing|semantic_safety_rejected|semantic_safety_hash_mismatch|policy_rejected|push_failed|pushed_unverified)
+                terminal_reason="${push_status}" ;;
+              no_fix|blocked)
+                terminal_reason="no_fix_needed" ;;
+              *)
+                terminal_reason="model_output_invalid" ;;
+            esac
           fi
 
-          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
-            should_redispatch="false"
-            if [[ -z "${terminal_reason}" ]]; then
-              terminal_reason="dry-run"
-            fi
-          elif [[ "${should_redispatch}" == "true" ]]; then
-            next_stage=""
-            should_redispatch="false"
-            terminal_reason="trusted-fix-push-not-implemented"
+          jq -n \
+            --arg next_stage "${next_stage}" \
+            --argjson lgtm "${lgtm}" \
+            --argjson should_redispatch "${should_redispatch}" \
+            --arg terminal_reason "${terminal_reason}" \
+            --arg updated_head_sha "${updated_head_sha}" \
+            '{next_stage: $next_stage, lgtm: $lgtm, should_redispatch: $should_redispatch, terminal_reason: $terminal_reason, updated_head_sha: $updated_head_sha}' \
+            > .codex-loop-stage-result.json
+
+      - name: Parse push stage result JSON
+        id: stage_outputs
+        shell: bash
+        env:
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          result_file=".codex-loop-stage-result.json"
+          if [[ ! -s "${result_file}" ]]; then
+            echo "missing-stage-result-json" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          next_stage="$(jq -er '.next_stage | strings' "${result_file}")"
+          lgtm="$(jq -er '.lgtm | booleans | tostring' "${result_file}")"
+          should_redispatch="$(jq -er '.should_redispatch | booleans | tostring' "${result_file}")"
+          terminal_reason="$(jq -er '.terminal_reason | strings' "${result_file}")"
+
+          if [[ -n "${next_stage}" ]]; then
+            case "${next_stage}" in
+              review|design|fix|issue) ;;
+              *)
+                echo "invalid-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${should_redispatch}" == "true" && -z "${next_stage}" ]]; then
+            echo "redispatch-missing-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if [[ "${should_redispatch}" == "false" && "${lgtm}" == "false" && -z "${terminal_reason}" ]]; then
+            echo "terminal-reason-required" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          updated_head_sha="$(jq -r '.updated_head_sha // ""' "${result_file}")"
+          cp codex-review-artifacts/fix-state-bundle/merged-fix.json codex-review-artifacts/push/merged-fix.json
+          cp codex-review-artifacts/fix-state-bundle/validated-fix.json codex-review-artifacts/push/validated-fix.json
+          cp codex-review-artifacts/fix-state-bundle/semantic-safety.json codex-review-artifacts/push/semantic-safety.json
+          cp codex-review-artifacts/fix-state-bundle/manifest.json codex-review-artifacts/push/manifest.json
+          if [[ "${should_redispatch}" == "true" ]]; then
+            jq -n \
+              --arg correlation_id "${INPUT_CORRELATION_ID}" \
+              --arg stage "${next_stage}" \
+              --arg head_sha "${updated_head_sha}" \
+              --arg state_run_id "${CURRENT_RUN_ID}" \
+              --arg state_artifact_name "codex-loop-fix-push-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" \
+              --arg status "staged" \
+              --argjson iteration "$(( INPUT_ITERATION + 1 ))" \
+              '{correlation_id:$correlation_id, stage:$stage, iteration:$iteration, head_sha:$head_sha, state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, status:$status}' \
+              > codex-review-artifacts/push/dispatch-candidate.json
+            codex-review loop append-dispatch-ledger \
+              --in codex-review-artifacts/push/dispatch-candidate.json \
+              --ledger codex-review-artifacts/fix-state-bundle/dispatch-ledger.json \
+              --out codex-review-artifacts/push/dispatch-ledger.json
+          else
+            cp codex-review-artifacts/fix-state-bundle/dispatch-ledger.json codex-review-artifacts/push/dispatch-ledger.json
+          fi
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "updated_head_sha=${updated_head_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop fix push"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "updated_head_sha=${updated_head_sha}"
+            echo "push_status=$(jq -er '.status | strings' codex-review-artifacts/push/push-result.json)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload push result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-fix-push-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/push
+          retention-days: 7
+
+  issue-stage:
+    name: Issue Fallback Artifact
+    needs: [validate, trust-and-stale-guard, setup-relay]
+    if: ${{ always() && inputs.stage == 'issue' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.setup-relay.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      next_stage: ${{ steps.stage_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.stage_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.stage_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
+    steps:
+      - name: Checkout trusted Codex loop core
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Build deterministic issue fallback artifact
+        id: issue_fallback
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          REPOSITORY: ${{ github.repository }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/issue_fallback
+          jq -n \
+            --arg repository "${REPOSITORY}" \
+            --arg head_sha "${INPUT_HEAD_SHA}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            '{repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
+            > codex-review-artifacts/issue_fallback/pr-context.json
+          jq -n '{present: false, decision: "artifacts_missing", source_summary: []}' \
+            > codex-review-artifacts/issue_fallback/openspec-context.json
+
+          codex-review issue_fallback infer-reason \
+            --mode artifacts_missing \
+            --out codex-review-artifacts/issue_fallback/reason.json
+          codex-review issue_fallback plan \
+            --in codex-review-artifacts/issue_fallback/reason.json \
+            --pr-context codex-review-artifacts/issue_fallback/pr-context.json \
+            --openspec-context codex-review-artifacts/issue_fallback/openspec-context.json \
+            --out codex-review-artifacts/issue_fallback/plan.json
+          codex-review issue_fallback compose \
+            --in codex-review-artifacts/issue_fallback/plan.json \
+            --result codex-review-artifacts/issue_fallback/plan.json \
+            --out codex-review-artifacts/issue_fallback/issue-fallback.json
+
+          fallback_reason="$(jq -er '.reason | strings' codex-review-artifacts/issue_fallback/issue-fallback.json)"
+          fallback_title="$(jq -er '.title | strings' codex-review-artifacts/issue_fallback/issue-fallback.json)"
+          fallback_body_excerpt="$(jq -er '.body | strings | gsub("\\r"; "") | split("\\n")[:8] | join(" ")' codex-review-artifacts/issue_fallback/issue-fallback.json)"
+          artifact_name="codex-loop-issue-fallback-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+          terminal_reason="artifact_missing"
+
+          jq -n \
+            --arg next_stage "" \
+            --argjson lgtm false \
+            --argjson should_redispatch false \
+            --arg terminal_reason "${terminal_reason}" \
+            '{next_stage: $next_stage, lgtm: $lgtm, should_redispatch: $should_redispatch, terminal_reason: $terminal_reason}' \
+            > .codex-loop-stage-result.json
+
+          {
+            echo "artifact_name=${artifact_name}"
+            echo "fallback_reason=${fallback_reason}"
+            echo "terminal_reason=${terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop issue fallback"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "artifact=${artifact_name}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "fallback_reason=${fallback_reason}"
+            echo "fallback_title=${fallback_title}"
+            echo "fallback_body_excerpt=${fallback_body_excerpt}"
+            echo "issue_creation=deferred_artifact_only"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload issue fallback artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-issue-fallback-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/issue_fallback
+          retention-days: 7
+
+      - name: Parse issue stage result JSON
+        id: stage_outputs
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+        run: |
+          set -euo pipefail
+
+          result_file=".codex-loop-stage-result.json"
+          if [[ ! -s "${result_file}" ]]; then
+            echo "missing-stage-result-json" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          next_stage="$(jq -er '.next_stage | strings' "${result_file}")"
+          lgtm="$(jq -er '.lgtm | booleans | tostring' "${result_file}")"
+          should_redispatch="$(jq -er '.should_redispatch | booleans | tostring' "${result_file}")"
+          terminal_reason="$(jq -er '.terminal_reason | strings' "${result_file}")"
+
+          if [[ -n "${next_stage}" ]]; then
+            case "${next_stage}" in
+              review|design|fix|issue) ;;
+              *)
+                echo "invalid-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ "${should_redispatch}" == "true" && -z "${next_stage}" ]]; then
+            echo "redispatch-missing-next-stage" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if [[ "${should_redispatch}" == "false" && "${lgtm}" == "false" && -z "${terminal_reason}" ]]; then
+            echo "terminal-reason-required" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
           fi
 
           {
@@ -550,9 +2171,653 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
           {
-            echo "## Codex loop finalize"
+            echo "## Codex loop issue stage"
+            echo "dry_run=${INPUT_DRY_RUN}"
+            echo "responses_endpoint=${RESPONSES_ENDPOINT}"
+            echo "relay_configured=${RELAY_CONFIGURED}"
             echo "next_stage=${next_stage}"
             echo "lgtm=${lgtm}"
             echo "should_redispatch=${should_redispatch}"
             echo "terminal_reason=${terminal_reason}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  finalize-stage:
+    name: Finalize Stage Outputs
+    needs: [validate, trust-and-stale-guard, setup-relay, design-prepare, review-techlead, design-chief, fix-dispatch, fix-merge-validate, fix-push, issue-stage]
+    if: ${{ always() }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      next_stage: ${{ steps.effective_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.effective_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.effective_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.effective_outputs.outputs.terminal_reason }}
+      state_run_id: ${{ steps.effective_outputs.outputs.state_run_id }}
+      state_artifact_name: ${{ steps.effective_outputs.outputs.state_artifact_name }}
+      updated_head_sha: ${{ steps.effective_outputs.outputs.updated_head_sha }}
+    steps:
+      - name: Resolve final stage outputs
+        id: finalize
+        shell: bash
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          VALIDATE_REASON: ${{ needs.validate.outputs.terminal_reason }}
+          TRUST_RESULT: ${{ needs.trust-and-stale-guard.result }}
+          TRUSTED: ${{ needs.trust-and-stale-guard.outputs.trusted }}
+          TRUST_REASON: ${{ needs.trust-and-stale-guard.outputs.terminal_reason }}
+          SETUP_RESULT: ${{ needs.setup-relay.result }}
+          SETUP_REASON: ${{ needs.setup-relay.outputs.terminal_reason }}
+          REVIEW_STAGE_RESULT: ${{ needs.review-techlead.result }}
+          REVIEW_STAGE_NEXT_STAGE: ${{ needs.review-techlead.outputs.next_stage }}
+          REVIEW_STAGE_LGTM: ${{ needs.review-techlead.outputs.lgtm }}
+          REVIEW_STAGE_REDISPATCH: ${{ needs.review-techlead.outputs.should_redispatch }}
+          REVIEW_STAGE_REASON: ${{ needs.review-techlead.outputs.terminal_reason }}
+          DESIGN_STAGE_RESULT: ${{ needs.design-chief.result }}
+          DESIGN_STAGE_NEXT_STAGE: ${{ needs.design-chief.outputs.next_stage }}
+          DESIGN_STAGE_LGTM: ${{ needs.design-chief.outputs.lgtm }}
+          DESIGN_STAGE_REDISPATCH: ${{ needs.design-chief.outputs.should_redispatch }}
+          DESIGN_STAGE_REASON: ${{ needs.design-chief.outputs.terminal_reason }}
+          FIX_STAGE_RESULT: ${{ needs.fix-merge-validate.result }}
+          FIX_STAGE_NEXT_STAGE: ${{ needs.fix-merge-validate.outputs.next_stage }}
+          FIX_STAGE_LGTM: ${{ needs.fix-merge-validate.outputs.lgtm }}
+          FIX_STAGE_REDISPATCH: ${{ needs.fix-merge-validate.outputs.should_redispatch }}
+          FIX_STAGE_REASON: ${{ needs.fix-merge-validate.outputs.terminal_reason }}
+          FIX_PUSH_RESULT: ${{ needs.fix-push.result }}
+          FIX_PUSH_NEXT_STAGE: ${{ needs.fix-push.outputs.next_stage }}
+          FIX_PUSH_LGTM: ${{ needs.fix-push.outputs.lgtm }}
+          FIX_PUSH_REDISPATCH: ${{ needs.fix-push.outputs.should_redispatch }}
+          FIX_PUSH_REASON: ${{ needs.fix-push.outputs.terminal_reason }}
+          FIX_PUSH_UPDATED_HEAD_SHA: ${{ needs.fix-push.outputs.updated_head_sha }}
+          ISSUE_STAGE_RESULT: ${{ needs.issue-stage.result }}
+          ISSUE_STAGE_NEXT_STAGE: ${{ needs.issue-stage.outputs.next_stage }}
+          ISSUE_STAGE_LGTM: ${{ needs.issue-stage.outputs.lgtm }}
+          ISSUE_STAGE_REDISPATCH: ${{ needs.issue-stage.outputs.should_redispatch }}
+          ISSUE_STAGE_REASON: ${{ needs.issue-stage.outputs.terminal_reason }}
+          DESIGN_PREPARE_RESULT: ${{ needs.design-prepare.result }}
+          DESIGN_PREPARE_BUNDLE_REASON: ${{ needs.design-prepare.outputs.bundle_terminal_reason }}
+          FIX_DISPATCH_RESULT: ${{ needs.fix-dispatch.result }}
+          FIX_DISPATCH_BUNDLE_REASON: ${{ needs.fix-dispatch.outputs.bundle_terminal_reason }}
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          selected_result=""
+          next_stage=""
+          lgtm="false"
+          should_redispatch="false"
+          terminal_reason=""
+          bundle_reason=""
+          state_run_id="${CURRENT_RUN_ID}"
+          state_artifact_name=""
+          updated_head_sha=""
+
+          case "${INPUT_STAGE}" in
+            review)
+              selected_result="${REVIEW_STAGE_RESULT}"
+              next_stage="${REVIEW_STAGE_NEXT_STAGE:-}"
+              lgtm="${REVIEW_STAGE_LGTM:-false}"
+              should_redispatch="${REVIEW_STAGE_REDISPATCH:-false}"
+              terminal_reason="${REVIEW_STAGE_REASON:-}"
+              state_artifact_name="codex-loop-review-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+              ;;
+            design)
+              selected_result="${DESIGN_STAGE_RESULT}"
+              next_stage="${DESIGN_STAGE_NEXT_STAGE:-}"
+              lgtm="${DESIGN_STAGE_LGTM:-false}"
+              should_redispatch="${DESIGN_STAGE_REDISPATCH:-false}"
+              terminal_reason="${DESIGN_STAGE_REASON:-}"
+              # A missing/corrupt prior review bundle short-circuits design-prepare
+              # and skips design-chief; surface its canonical bundle terminal reason.
+              bundle_reason="${DESIGN_PREPARE_BUNDLE_REASON:-}"
+              state_artifact_name="codex-loop-design-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+              ;;
+            fix)
+              if [[ "${FIX_PUSH_RESULT}" == "success" ]]; then
+                selected_result="${FIX_PUSH_RESULT}"
+                next_stage="${FIX_PUSH_NEXT_STAGE:-}"
+                lgtm="${FIX_PUSH_LGTM:-false}"
+                should_redispatch="${FIX_PUSH_REDISPATCH:-false}"
+                terminal_reason="${FIX_PUSH_REASON:-}"
+                state_artifact_name="codex-loop-fix-push-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+                # fix-push only emits updated_head_sha on a remote-verified push; it is
+                # empty for pushed_unverified, so the loop never advances on a stale head.
+                updated_head_sha="${FIX_PUSH_UPDATED_HEAD_SHA:-}"
+              else
+                selected_result="${FIX_STAGE_RESULT}"
+                next_stage="${FIX_STAGE_NEXT_STAGE:-}"
+                lgtm="${FIX_STAGE_LGTM:-false}"
+                should_redispatch="${FIX_STAGE_REDISPATCH:-false}"
+                terminal_reason="${FIX_STAGE_REASON:-}"
+              fi
+              # A missing/corrupt prior design bundle short-circuits fix-dispatch and
+              # skips fix-merge-validate/fix-push; surface its canonical bundle terminal reason.
+              bundle_reason="${FIX_DISPATCH_BUNDLE_REASON:-}"
+              if [[ -z "${state_artifact_name}" ]]; then
+                state_artifact_name="codex-loop-fix-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+              fi
+              ;;
+            issue)
+              selected_result="${ISSUE_STAGE_RESULT}"
+              next_stage="${ISSUE_STAGE_NEXT_STAGE:-}"
+              lgtm="${ISSUE_STAGE_LGTM:-false}"
+              should_redispatch="${ISSUE_STAGE_REDISPATCH:-false}"
+              terminal_reason="${ISSUE_STAGE_REASON:-}"
+              state_artifact_name="codex-loop-issue-fallback-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+              ;;
+          esac
+
+          if [[ "${VALIDATE_RESULT}" != "success" ]]; then
+            terminal_reason="${VALIDATE_REASON:-validation_failed}"
+            state_artifact_name=""
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+          elif [[ "${TRUST_RESULT}" != "success" || "${TRUSTED}" != "true" ]]; then
+            terminal_reason="${TRUST_REASON:-stage_failed}"
+            state_artifact_name=""
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+          elif [[ "${SETUP_RESULT}" != "success" ]]; then
+            terminal_reason="${SETUP_REASON:-stage_failed}"
+            state_artifact_name=""
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+          elif [[ "${selected_result}" != "success" ]]; then
+            if [[ -n "${bundle_reason}" ]]; then
+              terminal_reason="${bundle_reason}"
+            else
+              terminal_reason="${terminal_reason:-stage_failed}"
+            fi
+            state_artifact_name="codex-loop-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}.json"
+            lgtm="false"
+            should_redispatch="false"
+          fi
+
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            should_redispatch="false"
+            if [[ -z "${terminal_reason}" ]]; then
+              terminal_reason="dry_run"
+            fi
+          fi
+
+          case "${terminal_reason}" in
+            ""|lgtm|dry_run|no_fix_needed|no_fix_changes|empty_patch|validation_failed|tests_failed|semantic_safety_missing|semantic_safety_rejected|semantic_safety_hash_mismatch|policy_rejected|stale_head|base_ref_mismatch|pr_closed|fork_pr|untrusted_repository_owner|untrusted_requester|missing_app_credentials|app_token_scope_invalid|push_failed|pushed_unverified|dispatch_failed|dispatch_duplicate|max_iterations|oscillation_detected|artifact_missing|artifact_schema_invalid|model_output_invalid|stage_failed|issue_created) ;;
+            *)
+              terminal_reason="model_output_invalid"
+              ;;
+          esac
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "state_run_id=${state_run_id}"
+            echo "state_artifact_name=${state_artifact_name}"
+            echo "updated_head_sha=${updated_head_sha}"
+            echo "selected_result=${selected_result}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop finalize stage"
+            echo "stage=${INPUT_STAGE}"
+            echo "selected_result=${selected_result}"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "state_run_id=${state_run_id}"
+            echo "state_artifact_name=${state_artifact_name}"
+            echo "updated_head_sha=${updated_head_sha}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Checkout trusted Codex loop core for dispatch
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' }}
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core-dispatch
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper for dispatch
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core-dispatch/setup/codex-review
+
+      - name: Build continuation dispatch context and payload
+        id: dispatch_payload
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' }}
+        shell: bash
+        env:
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
+          INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          FINAL_NEXT_STAGE: ${{ steps.finalize.outputs.next_stage }}
+          FINAL_STATE_RUN_ID: ${{ steps.finalize.outputs.state_run_id }}
+          FINAL_STATE_ARTIFACT_NAME: ${{ steps.finalize.outputs.state_artifact_name }}
+          FINAL_UPDATED_HEAD_SHA: ${{ steps.finalize.outputs.updated_head_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p codex-review-artifacts/dispatch
+          owner="${REPOSITORY%%/*}"
+          repo="${REPOSITORY#*/}"
+          dispatch_head_sha="${INPUT_HEAD_SHA}"
+          if [[ "${INPUT_STAGE}" == "fix" ]]; then
+            if [[ -z "${FINAL_UPDATED_HEAD_SHA}" ]]; then
+              echo "fix-redispatch-missing-verified-updated-head-sha" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            dispatch_head_sha="${FINAL_UPDATED_HEAD_SHA}"
+          fi
+          next_iteration=$(( INPUT_ITERATION + 1 ))
+
+          jq -n \
+            --arg owner "${owner}" \
+            --arg repo "${repo}" \
+            --arg repository "${REPOSITORY}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --arg head_sha "${dispatch_head_sha}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            '{owner: $owner, repo: $repo, repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
+            > codex-review-artifacts/dispatch/pr-context.json
+
+          jq -n \
+            --arg schema_version "codex-loop-dispatch-payload.v2" \
+            --arg next_stage "${FINAL_NEXT_STAGE}" \
+            --arg head_sha "${dispatch_head_sha}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --arg correlation_id "${INPUT_CORRELATION_ID}" \
+            --arg state_run_id "${FINAL_STATE_RUN_ID}" \
+            --arg state_artifact_name "${FINAL_STATE_ARTIFACT_NAME}" \
+            --arg requested_by "${INPUT_REQUESTED_BY}" \
+            --argjson iteration "${next_iteration}" \
+            --argjson dry_run "${INPUT_DRY_RUN}" \
+            --argjson max_iterations "${INPUT_MAX_ITERATIONS}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            '{schema_version: $schema_version, next_stage: $next_stage, stage: $next_stage, head_sha: $head_sha, base_ref: $base_ref, iteration: $iteration, correlation_id: $correlation_id, state_run_id: $state_run_id, state_artifact_name: $state_artifact_name, requested_by: $requested_by, dry_run: $dry_run, max_iterations: $max_iterations, pr_number: $pr_number}' \
+            > codex-review-artifacts/dispatch/client-payload.json
+
+          jq -n \
+            --arg event_type "codex-loop" \
+            --slurpfile client_payload codex-review-artifacts/dispatch/client-payload.json \
+            '{event_type: $event_type, client_payload: $client_payload[0]}' \
+            > codex-review-artifacts/dispatch/repository-dispatch.json
+
+          {
+            echo "## Codex loop continuation dispatch"
+            echo "event_type=codex-loop"
+            echo "next_stage=${FINAL_NEXT_STAGE}"
+            echo "head_sha=${dispatch_head_sha}"
+            echo "iteration=${next_iteration}"
+            echo "state_run_id=${FINAL_STATE_RUN_ID}"
+            echo "state_artifact_name=${FINAL_STATE_ARTIFACT_NAME}"
+            echo "dry_run=${INPUT_DRY_RUN}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Download final state bundle for dispatch guard
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.finalize.outputs.state_artifact_name }}
+          path: codex-review-artifacts/final-state
+
+      - name: Guard continuation dispatch ledger
+        id: dispatch_guard
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' }}
+        shell: bash
+        env:
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+        run: |
+          set -euo pipefail
+          codex-review loop guard-dispatch \
+            --in codex-review-artifacts/dispatch/client-payload.json \
+            --ledger codex-review-artifacts/final-state/dispatch-ledger.json \
+            --out codex-review-artifacts/dispatch/dispatch-guard.json
+          guard_ok="$(jq -er '.ok | tostring' codex-review-artifacts/dispatch/dispatch-guard.json)"
+          guard_terminal_reason="$(jq -r '.terminal_reason // ""' codex-review-artifacts/dispatch/dispatch-guard.json)"
+          {
+            echo "## Codex loop dispatch guard"
+            echo "ok=${guard_ok}"
+            if [[ -n "${guard_terminal_reason}" ]]; then
+              echo "terminal_reason=${guard_terminal_reason}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "guard_ok=${guard_ok}"
+            echo "guard_terminal_reason=${guard_terminal_reason}"
+          } >> "${GITHUB_OUTPUT}"
+          if [[ "${guard_ok}" != "true" ]]; then
+            exit 0
+          fi
+
+          cp -R codex-review-artifacts/final-state/. codex-review-artifacts/dispatch/
+          codex-review loop append-dispatch-ledger \
+            --in codex-review-artifacts/dispatch/client-payload.json \
+            --ledger codex-review-artifacts/final-state/dispatch-ledger.json \
+            --out codex-review-artifacts/dispatch/dispatch-ledger.json
+          dispatch_state_artifact_name="codex-loop-dispatch-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+          jq --arg state_artifact_name "${dispatch_state_artifact_name}" \
+            '.state_artifact_name = $state_artifact_name' \
+            codex-review-artifacts/dispatch/client-payload.json \
+            > codex-review-artifacts/dispatch/client-payload.updated.json
+          mv codex-review-artifacts/dispatch/client-payload.updated.json \
+            codex-review-artifacts/dispatch/client-payload.json
+          jq -n \
+            --arg event_type "codex-loop" \
+            --slurpfile client_payload codex-review-artifacts/dispatch/client-payload.json \
+            '{event_type: $event_type, client_payload: $client_payload[0]}' \
+            > codex-review-artifacts/dispatch/repository-dispatch.json
+
+      - name: Normalize effective finalize outputs
+        id: effective_outputs
+        if: ${{ always() }}
+        shell: bash
+        env:
+          INITIAL_NEXT_STAGE: ${{ steps.finalize.outputs.next_stage }}
+          INITIAL_LGTM: ${{ steps.finalize.outputs.lgtm }}
+          INITIAL_REDISPATCH: ${{ steps.finalize.outputs.should_redispatch }}
+          INITIAL_REASON: ${{ steps.finalize.outputs.terminal_reason }}
+          INITIAL_STATE_RUN_ID: ${{ steps.finalize.outputs.state_run_id }}
+          INITIAL_STATE_ARTIFACT_NAME: ${{ steps.finalize.outputs.state_artifact_name }}
+          INITIAL_UPDATED_HEAD_SHA: ${{ steps.finalize.outputs.updated_head_sha }}
+          GUARD_OK: ${{ steps.dispatch_guard.outputs.guard_ok }}
+          GUARD_REASON: ${{ steps.dispatch_guard.outputs.guard_terminal_reason }}
+        run: |
+          set -euo pipefail
+          next_stage="${INITIAL_NEXT_STAGE:-}"
+          lgtm="${INITIAL_LGTM:-false}"
+          should_redispatch="${INITIAL_REDISPATCH:-false}"
+          terminal_reason="${INITIAL_REASON:-}"
+          state_run_id="${INITIAL_STATE_RUN_ID:-}"
+          state_artifact_name="${INITIAL_STATE_ARTIFACT_NAME:-}"
+          updated_head_sha="${INITIAL_UPDATED_HEAD_SHA:-}"
+
+          if [[ "${GUARD_OK:-}" == "false" && -n "${GUARD_REASON:-}" ]]; then
+            next_stage=""
+            lgtm="false"
+            should_redispatch="false"
+            terminal_reason="${GUARD_REASON}"
+            updated_head_sha=""
+          fi
+
+          case "${terminal_reason}" in
+            ""|lgtm|dry_run|no_fix_needed|no_fix_changes|empty_patch|validation_failed|tests_failed|semantic_safety_missing|semantic_safety_rejected|semantic_safety_hash_mismatch|policy_rejected|stale_head|base_ref_mismatch|pr_closed|fork_pr|untrusted_repository_owner|untrusted_requester|missing_app_credentials|app_token_scope_invalid|push_failed|pushed_unverified|dispatch_failed|dispatch_duplicate|max_iterations|oscillation_detected|artifact_missing|artifact_schema_invalid|model_output_invalid|stage_failed|issue_created) ;;
+            *)
+              terminal_reason="model_output_invalid"
+              next_stage=""
+              lgtm="false"
+              should_redispatch="false"
+              ;;
+          esac
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "state_run_id=${state_run_id}"
+            echo "state_artifact_name=${state_artifact_name}"
+            echo "updated_head_sha=${updated_head_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop effective outputs"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "state_run_id=${state_run_id}"
+            echo "state_artifact_name=${state_artifact_name}"
+            echo "updated_head_sha=${updated_head_sha}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Mint GitHub App installation token for dispatch
+        id: dispatch_app_token
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && steps.dispatch_guard.outputs.guard_ok == 'true' }}
+        shell: bash
+        env:
+          CODEX_APP_ID: ${{ secrets.CODEX_GITHUB_APP_ID }}
+          CODEX_APP_PRIVATE_KEY: ${{ secrets.CODEX_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          codex-review auth app-token \
+            --mode dispatch \
+            --pr-context codex-review-artifacts/dispatch/pr-context.json \
+            --out codex-review-artifacts/dispatch/app-token.json
+
+      - name: Emit repository dispatch continuation
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && steps.dispatch_guard.outputs.guard_ok == 'true' }}
+        shell: bash
+        env:
+          DISPATCH_APP_TOKEN: ${{ steps.dispatch_app_token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: https://api.github.com
+        run: |
+          set -euo pipefail
+          curl -fsS \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_APP_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${REPOSITORY}/dispatches" \
+            --data-binary @codex-review-artifacts/dispatch/repository-dispatch.json
+
+      - name: Upload dispatch continuation artifact
+        if: ${{ steps.finalize.outputs.should_redispatch == 'true' && inputs.dry_run == false && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && steps.dispatch_guard.outputs.guard_ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-dispatch-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/dispatch
+          retention-days: 7
+
+      - name: Build terminal state and human summary
+        id: terminal_state
+        if: ${{ always() }}
+        shell: bash
+        env:
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          EFFECTIVE_NEXT_STAGE: ${{ steps.effective_outputs.outputs.next_stage }}
+          EFFECTIVE_LGTM: ${{ steps.effective_outputs.outputs.lgtm }}
+          EFFECTIVE_REDISPATCH: ${{ steps.effective_outputs.outputs.should_redispatch }}
+          EFFECTIVE_REASON: ${{ steps.effective_outputs.outputs.terminal_reason }}
+          EFFECTIVE_STATE_RUN_ID: ${{ steps.effective_outputs.outputs.state_run_id }}
+          EFFECTIVE_STATE_ARTIFACT_NAME: ${{ steps.effective_outputs.outputs.state_artifact_name }}
+          EFFECTIVE_UPDATED_HEAD_SHA: ${{ steps.effective_outputs.outputs.updated_head_sha }}
+          SELECTED_RESULT: ${{ steps.finalize.outputs.selected_result }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Terminal visibility (label/comment/issue-free): every terminal outcome
+          # gets a machine-readable codex-loop-state.json and a human-readable
+          # terminal-summary.md artifact plus a job-summary block. The canonical
+          # effective terminal_reason (Task 23 source of truth) drives everything;
+          # no secret, token, relay material, or raw model output is included.
+          mkdir -p codex-review-artifacts/terminal
+
+          terminal_artifact_name="codex-loop-terminal-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}"
+          run_url="${SERVER_URL}/${REPOSITORY}/actions/runs/${CURRENT_RUN_ID}"
+          lgtm="${EFFECTIVE_LGTM:-false}"
+          should_redispatch="${EFFECTIVE_REDISPATCH:-false}"
+
+          # Non-failure reasons keep the workflow conclusion green; an empty reason marks
+          # an LGTM terminal or an in-progress continuation. Everything else is a failure
+          # terminal that the conclusion step below surfaces as a failed run.
+          case "${EFFECTIVE_REASON}" in
+            ""|lgtm|dry_run|no_fix_needed|no_fix_changes|empty_patch|issue_created)
+              outcome="non_failure" ;;
+            *)
+              outcome="failure" ;;
+          esac
+
+          if [[ "${should_redispatch}" == "true" ]]; then
+            disposition="continuation"
+          elif [[ "${lgtm}" == "true" ]]; then
+            disposition="lgtm_terminal"
+          else
+            disposition="terminal"
+          fi
+
+          case "${EFFECTIVE_REASON}" in
+            ""|lgtm)
+              manual_action="No action required: the loop accepted the PR (LGTM) or is continuing; check should_redispatch." ;;
+            dry_run)
+              manual_action="Dry-run only: re-run with dry_run=false to enable live writes and continuation." ;;
+            no_fix_needed|no_fix_changes|empty_patch)
+              manual_action="No fix changes were produced; inspect the selected fix-state artifact if a change was expected." ;;
+            stale_head|base_ref_mismatch)
+              manual_action="PR head/base moved: re-trigger the loop against the current head_sha and base_ref." ;;
+            pr_closed)
+              manual_action="PR is closed or unavailable: reopen the PR or stop the loop for it." ;;
+            fork_pr|untrusted_repository_owner|untrusted_requester)
+              manual_action="Untrusted PR context: this loop does not write to fork or untrusted PRs; handle the PR manually." ;;
+            missing_app_credentials|app_token_scope_invalid)
+              manual_action="Fix the GitHub App credentials or permissions, then re-run the failing stage." ;;
+            max_iterations|oscillation_detected)
+              manual_action="Loop budget reached: review the loop history artifact and resolve the PR manually." ;;
+            dispatch_duplicate|dispatch_failed)
+              manual_action="Continuation dispatch was blocked or failed: inspect the dispatch-ledger artifact before re-dispatching." ;;
+            artifact_missing|artifact_schema_invalid)
+              manual_action="A required state artifact was missing or invalid: re-run the prior stage to regenerate it." ;;
+            *)
+              manual_action="Stage rejected the change: inspect the selected state artifact and the failing step, then re-run after fixing." ;;
+          esac
+
+          jq -n \
+            --arg schema_version "codex-loop-state.v1" \
+            --arg stage "${INPUT_STAGE}" \
+            --arg correlation_id "${INPUT_CORRELATION_ID}" \
+            --arg head_sha "${INPUT_HEAD_SHA}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --arg terminal_reason "${EFFECTIVE_REASON}" \
+            --arg next_stage "${EFFECTIVE_NEXT_STAGE}" \
+            --arg state_run_id "${EFFECTIVE_STATE_RUN_ID}" \
+            --arg state_artifact_name "${EFFECTIVE_STATE_ARTIFACT_NAME}" \
+            --arg updated_head_sha "${EFFECTIVE_UPDATED_HEAD_SHA}" \
+            --arg selected_result "${SELECTED_RESULT}" \
+            --arg outcome "${outcome}" \
+            --arg disposition "${disposition}" \
+            --arg terminal_artifact_name "${terminal_artifact_name}" \
+            --arg state_owner_run_id "${CURRENT_RUN_ID}" \
+            --arg manual_action "${manual_action}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            --argjson iteration "${INPUT_ITERATION}" \
+            --argjson lgtm "${lgtm}" \
+            --argjson should_redispatch "${should_redispatch}" \
+            --argjson dry_run "${INPUT_DRY_RUN}" \
+            '{schema_version: $schema_version, stage: $stage, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref, correlation_id: $correlation_id, iteration: $iteration, terminal_reason: $terminal_reason, lgtm: $lgtm, should_redispatch: $should_redispatch, next_stage: $next_stage, state_run_id: $state_run_id, state_artifact_name: $state_artifact_name, updated_head_sha: $updated_head_sha, dry_run: $dry_run, selected_result: $selected_result, outcome: $outcome, disposition: $disposition, terminal_artifact_name: $terminal_artifact_name, state_owner_run_id: $state_owner_run_id, manual_action: $manual_action}' \
+            > codex-review-artifacts/terminal/codex-loop-state.json
+
+          {
+            echo "# Codex loop terminal summary"
+            echo ""
+            echo "- terminal_reason: ${EFFECTIVE_REASON:-(none)}"
+            echo "- outcome: ${outcome}"
+            echo "- disposition: ${disposition}"
+            echo "- stage: ${INPUT_STAGE}"
+            echo "- iteration: ${INPUT_ITERATION}"
+            echo "- lgtm: ${lgtm}"
+            echo "- should_redispatch: ${should_redispatch}"
+            echo "- next_stage: ${EFFECTIVE_NEXT_STAGE:-(none)}"
+            echo "- dry_run: ${INPUT_DRY_RUN}"
+            echo "- updated_head_sha: ${EFFECTIVE_UPDATED_HEAD_SHA:-(none)}"
+            echo "- selected_result: ${SELECTED_RESULT:-(none)}"
+            echo ""
+            echo "## Next action"
+            echo ""
+            echo "${manual_action}"
+            echo ""
+            echo "## Artifacts"
+            echo ""
+            echo "- selected state artifact: ${EFFECTIVE_STATE_ARTIFACT_NAME:-(none)} (run id ${EFFECTIVE_STATE_RUN_ID:-(none)})"
+            echo "- terminal artifact: ${terminal_artifact_name} (this run id ${CURRENT_RUN_ID})"
+            echo "- run: ${run_url}"
+            echo "- lookup hint: gh run download ${EFFECTIVE_STATE_RUN_ID:-<state_run_id>} --repo ${REPOSITORY} --name ${EFFECTIVE_STATE_ARTIFACT_NAME:-<state_artifact_name>}"
+            echo ""
+            echo "## State storage"
+            echo ""
+            echo "No labels, comments, or issues are used for loop state. Terminal state lives only in this codex-loop-state.json and terminal-summary.md artifact, the job outputs, and this job summary."
+          } > codex-review-artifacts/terminal/terminal-summary.md
+
+          cat codex-review-artifacts/terminal/terminal-summary.md >> "${GITHUB_STEP_SUMMARY}"
+
+          echo "terminal_artifact_name=${terminal_artifact_name}" >> "${GITHUB_OUTPUT}"
+          echo "outcome=${outcome}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload terminal state and summary artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-loop-terminal-${{ inputs.correlation_id }}-${{ inputs.iteration }}
+          path: codex-review-artifacts/terminal
+          retention-days: 7
+
+      - name: Surface terminal conclusion
+        id: terminal_conclusion
+        if: ${{ always() }}
+        shell: bash
+        env:
+          EFFECTIVE_REASON: ${{ steps.effective_outputs.outputs.terminal_reason }}
+          EFFECTIVE_LGTM: ${{ steps.effective_outputs.outputs.lgtm }}
+          EFFECTIVE_REDISPATCH: ${{ steps.effective_outputs.outputs.should_redispatch }}
+        run: |
+          set -euo pipefail
+
+          # Single source of truth: the canonical effective terminal_reason (Task 23).
+          # A failure terminal must never be reported as a successful continuation, so it
+          # exits non-zero and the workflow conclusion becomes failure. LGTM, dry-run,
+          # expected no-fix outcomes, and an empty reason (LGTM or in-progress
+          # continuation) keep the job green. No broad continue-on-error or forced
+          # zero-exit masking is used to hide a failure terminal here.
+          case "${EFFECTIVE_REASON}" in
+            ""|lgtm|dry_run|no_fix_needed|no_fix_changes|empty_patch|issue_created)
+              {
+                echo "## Codex loop terminal conclusion"
+                echo "conclusion=success"
+                echo "terminal_reason=${EFFECTIVE_REASON:-(none)}"
+                echo "lgtm=${EFFECTIVE_LGTM:-false}"
+                echo "should_redispatch=${EFFECTIVE_REDISPATCH:-false}"
+              } >> "${GITHUB_STEP_SUMMARY}"
+              ;;
+            *)
+              {
+                echo "## Codex loop terminal conclusion"
+                echo "conclusion=failure"
+                echo "terminal_reason=${EFFECTIVE_REASON}"
+                echo "lgtm=${EFFECTIVE_LGTM:-false}"
+                echo "should_redispatch=${EFFECTIVE_REDISPATCH:-false}"
+              } >> "${GITHUB_STEP_SUMMARY}"
+              echo "codex loop terminated with failure reason: ${EFFECTIVE_REASON}" >&2
+              exit 1
+              ;;
+          esac
