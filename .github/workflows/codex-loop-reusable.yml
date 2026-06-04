@@ -34,11 +34,11 @@ on:
       state_run_id:
         description: Exact upstream workflow run id that owns the prior loop-state artifact.
         type: string
-        required: true
+        required: false
       state_artifact_name:
         description: Exact prior loop-state artifact name to download from state_run_id.
         type: string
-        required: true
+        required: false
       max_iterations:
         description: Maximum accepted loop iterations.
         type: number
@@ -137,11 +137,19 @@ jobs:
           require_non_empty iteration "${INPUT_ITERATION}"
           require_non_empty correlation_id "${INPUT_CORRELATION_ID}"
           require_non_empty requested_by "${INPUT_REQUESTED_BY}"
-          require_non_empty state_run_id "${INPUT_STATE_RUN_ID}"
-          require_non_empty state_artifact_name "${INPUT_STATE_ARTIFACT_NAME}"
           require_non_empty max_iterations "${INPUT_MAX_ITERATIONS}"
 
-          if [[ "${valid}" == "true" ]]; then
+          initial_review_bootstrap="false"
+          if [[ "${INPUT_STAGE}" == "review" && "${INPUT_ITERATION}" == "0" && -z "${INPUT_STATE_RUN_ID}" && -z "${INPUT_STATE_ARTIFACT_NAME}" ]]; then
+            initial_review_bootstrap="true"
+          fi
+
+          if [[ "${initial_review_bootstrap}" != "true" ]]; then
+            require_non_empty state_run_id "${INPUT_STATE_RUN_ID}"
+            require_non_empty state_artifact_name "${INPUT_STATE_ARTIFACT_NAME}"
+          fi
+
+          if [[ "${valid}" == "true" && "${initial_review_bootstrap}" != "true" ]]; then
             if ! [[ "${INPUT_STATE_RUN_ID}" =~ ^[0-9]+$ ]] || (( INPUT_STATE_RUN_ID <= 0 )); then
               terminal_reason="validation_failed"
               valid="false"
@@ -393,6 +401,7 @@ jobs:
 
       - name: Download prior loop state artifact
         id: download_prior_state
+        if: ${{ inputs.stage != 'review' || inputs.iteration != 0 || inputs.state_run_id != '' || inputs.state_artifact_name != '' }}
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -400,21 +409,34 @@ jobs:
           run-id: ${{ inputs.state_run_id }}
           path: codex-review-artifacts/prior-state
 
-      - name: Read prior loop state artifact
+      - name: Read or bootstrap loop state artifact
         shell: bash
         env:
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_STATE_RUN_ID: ${{ inputs.state_run_id }}
           INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
         run: |
           set -euo pipefail
-          # Best-effort prior loop-state read only; setup-relay is NOT the bundle
-          # integrity authority. The non-blocking download above keeps a missing prior
-          # stage bundle from failing setup-relay and preempting the verify-bundle gate
-          # in design-prepare/fix-dispatch, which routes it to artifact_missing.
-          # read-state tolerates an absent path and falls back to empty loop-state.
-          codex-review loop read-state \
-            --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json" \
-            --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}" \
-            --out .codex-loop-state.json
+          mkdir -p codex-review-artifacts/prior-state
+
+          if [[ "${INPUT_STAGE}" == "review" && "${INPUT_ITERATION}" == "0" && -z "${INPUT_STATE_RUN_ID}" && -z "${INPUT_STATE_ARTIFACT_NAME}" ]]; then
+            jq -n '{schema_version:"dispatch-ledger.v1", entries:[]}' \
+              > codex-review-artifacts/prior-state/dispatch-ledger.json
+            codex-review loop read-state \
+              --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json" \
+              --out .codex-loop-state.json
+          else
+            # Best-effort prior loop-state read only; setup-relay is NOT the bundle
+            # integrity authority. The non-blocking download above keeps a missing prior
+            # stage bundle from failing setup-relay and preempting the verify-bundle gate
+            # in design-prepare/fix-dispatch, which routes it to artifact_missing.
+            # read-state tolerates an absent path and falls back to empty loop-state.
+            codex-review loop read-state \
+              --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json" \
+              --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}" \
+              --out .codex-loop-state.json
+          fi
 
       - name: Upload current loop state artifact
         uses: actions/upload-artifact@v4
