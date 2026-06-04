@@ -38,9 +38,23 @@ metadata/
 mirrors/
 **/mirrors/
 
+# Local agent/runtime artifacts
+.omo/
+
+# Python cache artifacts
+__pycache__/
+**/__pycache__/
+*.pyc
+**/*.pyc
+*.pyo
+**/*.pyo
+
 # Explicit safe examples/docs whose names contain secret-like words.
 !docs/secrets.md
 !scripts/scan-secrets.sh
 !stacks/agent-stack/secrets/
 !stacks/agent-stack/secrets/cloudflared.env.example
 !**/.env.example
+
+# Planned Codex loop deliverable that contains "pat" as part of dispatch text.
+!.github/workflows/codex-loop-dispatch.yml

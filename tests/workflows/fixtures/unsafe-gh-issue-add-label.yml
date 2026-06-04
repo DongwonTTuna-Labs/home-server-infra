@@ -1,0 +1,14 @@
+name: Unsafe Issue Label
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh issue edit 123 --add-label codex-loop-active
