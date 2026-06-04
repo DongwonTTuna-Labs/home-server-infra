@@ -527,13 +527,111 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
 
-      - name: Produce deterministic axis findings
+      - name: Prepare live review axis prompt
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          REPOSITORY: ${{ github.repository }}
+          MATRIX_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+          mkdir -p "codex-review-artifacts/review/${MATRIX_AXIS}"
+          jq -n \
+            --arg repository "${REPOSITORY}" \
+            --arg head_sha "${INPUT_HEAD_SHA}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --argjson pr_number "${INPUT_PR_NUMBER}" \
+            '{repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
+            > "codex-review-artifacts/review/${MATRIX_AXIS}/pr-seed.json"
+          codex-review context pr \
+            --pr-context "codex-review-artifacts/review/${MATRIX_AXIS}/pr-seed.json" \
+            --repo-path pr-head \
+            --token "${GH_TOKEN}" \
+            --out "codex-review-artifacts/review/${MATRIX_AXIS}/pr-context.json"
+          codex-review context changed-lines \
+            --pr-context "codex-review-artifacts/review/${MATRIX_AXIS}/pr-context.json" \
+            --out "codex-review-artifacts/review/${MATRIX_AXIS}/changed-lines.json"
+          codex-review context docs \
+            --repo-path pr-head \
+            --out "codex-review-artifacts/review/${MATRIX_AXIS}/docs-context.md"
+          codex-review review build-review-prompt \
+            --axis "${MATRIX_AXIS}" \
+            --pr-context "codex-review-artifacts/review/${MATRIX_AXIS}/pr-context.json" \
+            --docs-context "codex-review-artifacts/review/${MATRIX_AXIS}/docs-context.md" \
+            --out "codex-review-artifacts/review/${MATRIX_AXIS}/prompt.md"
+
+      - name: Mint relay token for live review axis
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex review axis
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/review/${{ matrix.axis }}/prompt.md` and inspect the checked-out PR head at `pr-head`.
+            The prompt includes the PR body, changed-file patch context, changed-line map, and repository documentation context.
+            Write only schema-valid JSON for `review-axis-findings.v1` to `codex-review-artifacts/review/${{ matrix.axis }}/findings.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/review/${{ matrix.axis }}/findings.raw.json`.
+
+      - name: Validate live review axis findings
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        env:
+          MATRIX_AXIS: ${{ matrix.axis }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+            echo "live-review-axis-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          test -s "codex-review-artifacts/review/${MATRIX_AXIS}/findings.raw.json"
+          codex-review review validate \
+            --axis "${MATRIX_AXIS}" \
+            --in "codex-review-artifacts/review/${MATRIX_AXIS}/findings.raw.json" \
+            --pr-context "codex-review-artifacts/review/${MATRIX_AXIS}/pr-context.json" \
+            --changed-lines "codex-review-artifacts/review/${MATRIX_AXIS}/changed-lines.json" \
+            --repo-path pr-head \
+            --out "codex-review-artifacts/review/${MATRIX_AXIS}/findings.json"
+
+      - name: Produce deterministic dry-run axis findings
+        if: ${{ inputs.dry_run == true }}
         shell: bash
         env:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
@@ -543,14 +641,19 @@ jobs:
           set -euo pipefail
 
           mkdir -p "codex-review-artifacts/review/${MATRIX_AXIS}"
-          # Dry-run axis review: the relay token is not configured in dry-run, so the
-          # per-axis inspection model is not invoked. Emit the schema-valid empty
-          # findings fallback so the fan-in stays deterministic. The live model step
-          # that inspects PR-head data is reserved for a separate live-capable change.
           codex-review review default-result \
             --axis "${MATRIX_AXIS}" \
             --out "codex-review-artifacts/review/${MATRIX_AXIS}/findings.json"
 
+      - name: Summarize review axis result
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          MATRIX_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+          test -s "codex-review-artifacts/review/${MATRIX_AXIS}/findings.json"
           {
             echo "## Codex loop review axis ${MATRIX_AXIS}"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -648,6 +751,14 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
@@ -666,6 +777,79 @@ jobs:
           name: codex-loop-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}.json
           path: .
 
+      - name: Prepare review techlead prompt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p codex-review-artifacts/techlead
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            printf '{}' > codex-review-artifacts/techlead/pr-context.json
+            printf '{}' > codex-review-artifacts/techlead/changed-lines.json
+            printf '' > codex-review-artifacts/techlead/docs-context.md
+          else
+            jq -n \
+              --arg repository "${REPOSITORY}" \
+              --arg head_sha "${INPUT_HEAD_SHA}" \
+              --arg base_ref "${INPUT_BASE_REF}" \
+              --argjson pr_number "${INPUT_PR_NUMBER}" \
+              '{repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
+              > codex-review-artifacts/techlead/pr-seed.json
+            codex-review context pr \
+              --pr-context codex-review-artifacts/techlead/pr-seed.json \
+              --repo-path pr-head \
+              --token "${GH_TOKEN}" \
+              --out codex-review-artifacts/techlead/pr-context.json
+            codex-review context changed-lines \
+              --pr-context codex-review-artifacts/techlead/pr-context.json \
+              --out codex-review-artifacts/techlead/changed-lines.json
+            codex-review context docs \
+              --repo-path pr-head \
+              --out codex-review-artifacts/techlead/docs-context.md
+            codex-review techlead build-techlead-prompt \
+              --in codex-review-artifacts/review/combined-findings.json \
+              --pr-context codex-review-artifacts/techlead/pr-context.json \
+              --docs-context codex-review-artifacts/techlead/docs-context.md \
+              --out codex-review-artifacts/techlead/techlead.prompt.md
+          fi
+
+      - name: Mint relay token for live review techlead
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex review techlead
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/techlead/techlead.prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, combined review findings, and repository documentation context.
+            Write only schema-valid JSON for `techlead-decision.v1` to `codex-review-artifacts/techlead/techlead-decision.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/techlead/techlead-decision.raw.json`.
+
       - name: Decide, classify and route review with posting disabled
         shell: bash
         env:
@@ -674,24 +858,26 @@ jobs:
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
-
-          mkdir -p codex-review-artifacts/techlead
-          # Dry-run techlead: no relay token, so the decision model is not invoked.
-          # Derive the deterministic decision fallback from the combined findings.
-          codex-review techlead default-result \
-            --in codex-review-artifacts/review/combined-findings.json \
-            --out codex-review-artifacts/techlead/techlead-decision.json
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            codex-review techlead default-result \
+              --in codex-review-artifacts/review/combined-findings.json \
+              --out codex-review-artifacts/techlead/techlead-decision.json
+          else
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-review-techlead-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/techlead/techlead-decision.raw.json
+            codex-review techlead validate \
+              --in codex-review-artifacts/techlead/techlead-decision.raw.json \
+              --artifacts codex-review-artifacts/review/combined-findings.json \
+              --repo-path pr-head \
+              --out codex-review-artifacts/techlead/techlead-decision.json
+          fi
           codex-review techlead classify \
             --in codex-review-artifacts/techlead/techlead-decision.json \
             --artifacts codex-review-artifacts/review/combined-findings.json \
             --out codex-review-artifacts/techlead/review-publication.json
-
-          printf '{}' > codex-review-artifacts/techlead/pr-context.json
-          printf '{}' > codex-review-artifacts/techlead/changed-lines.json
-          # Posting is disabled: --dry-run never creates a PR review or comment and
-          # never consumes a write token. Review jobs are read-only by design, so the
-          # loop never posts to the PR in dry-run; routing is carried by job outputs
-          # and the review state-bundle artifact instead of labels or comments.
           codex-review techlead publish --dry-run \
             --in codex-review-artifacts/techlead/review-publication.json \
             --pr-context codex-review-artifacts/techlead/pr-context.json \
@@ -702,11 +888,9 @@ jobs:
             echo "review-posting-not-disabled" >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
-
           codex-review loop route-after-techlead \
             --in codex-review-artifacts/techlead/techlead-decision.json \
             --out codex-review-artifacts/techlead/route.json
-
           {
             echo "## Codex loop review techlead"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -858,6 +1042,14 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
@@ -909,21 +1101,20 @@ jobs:
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Build design context, inventory and clusters
-        id: prepare
+      - name: Build design context and live prompts
         if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
-          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-
           mkdir -p codex-review-artifacts/design
-          # Design consumes the prior review loop state through the explicit
-          # state_run_id/state_artifact_name transport already validated upstream.
-          # No head-SHA, latest-run, or branch discovery is used to locate it.
           codex-review loop read-state \
             --ledger codex-review-artifacts/prior-state/dispatch-ledger.json \
             --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}" \
@@ -931,34 +1122,147 @@ jobs:
           jq -n --slurpfile state codex-review-artifacts/design/prior-loop-state.json \
             '{schema_version:"dispatch-ledger.v1", entries: ($state[0].dispatch_ledger // [])}' \
             > codex-review-artifacts/design/dispatch-ledger.json
-          # Dry-run design: no relay token is minted, so the design inventory and
-          # cluster models are not invoked. Build the design context from the prior
-          # review state and emit the schema-valid deterministic inventory/cluster
-          # fallbacks. The live model inventory/clustering that inspects PR-head data
-          # is reserved for a separate live-capable change.
-          printf '{}' > codex-review-artifacts/design/pr-context.json
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            printf '{}' > codex-review-artifacts/design/pr-context.json
+            printf '' > codex-review-artifacts/design/docs-context.md
+            jq -n '{present:false, decision:"dry_run"}' > codex-review-artifacts/design/openspec-context.json
+          else
+            jq -n \
+              --arg repository "${REPOSITORY}" \
+              --arg head_sha "${INPUT_HEAD_SHA}" \
+              --arg base_ref "${INPUT_BASE_REF}" \
+              --argjson pr_number "${INPUT_PR_NUMBER}" \
+              '{repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
+              > codex-review-artifacts/design/pr-seed.json
+            codex-review context pr \
+              --pr-context codex-review-artifacts/design/pr-seed.json \
+              --repo-path pr-head \
+              --token "${GH_TOKEN}" \
+              --out codex-review-artifacts/design/pr-context.json
+            codex-review context docs \
+              --repo-path pr-head \
+              --out codex-review-artifacts/design/docs-context.md
+            codex-review context openspec \
+              --pr-context codex-review-artifacts/design/pr-context.json \
+              --repo-path pr-head \
+              --token "${GH_TOKEN}" \
+              --out codex-review-artifacts/design/openspec-context.json
+          fi
           codex-review design context \
             --in codex-review-artifacts/design/prior-loop-state.json \
             --pr-context codex-review-artifacts/design/pr-context.json \
+            --docs-context codex-review-artifacts/design/docs-context.md \
+            --openspec-context codex-review-artifacts/design/openspec-context.json \
             --out codex-review-artifacts/design/design-context.json
-          codex-review design default-inventory \
+          codex-review design build-inventory-prompt \
             --in codex-review-artifacts/design/design-context.json \
-            --out codex-review-artifacts/design/design-inventory.json
-          codex-review design default-clusters \
+            --out codex-review-artifacts/design/design-inventory.prompt.md
+
+      - name: Mint relay token for live design prepare
+        id: live_relay
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' && inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex design inventory
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' && inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/design/design-inventory.prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, prior review findings, documentation context, and OpenSpec context when referenced by the PR body.
+            Write only schema-valid JSON for `design-inventory.v1` to `codex-review-artifacts/design/design-inventory.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design/design-inventory.raw.json`.
+
+      - name: Validate design inventory and build cluster prompt
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            codex-review design default-inventory \
+              --in codex-review-artifacts/design/design-context.json \
+              --out codex-review-artifacts/design/design-inventory.json
+          else
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-design-inventory-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/design/design-inventory.raw.json
+            codex-review design normalize \
+              --in codex-review-artifacts/design/design-inventory.raw.json \
+              --pr-context codex-review-artifacts/design/design-context.json \
+              --repo-path pr-head \
+              --out codex-review-artifacts/design/design-inventory.json
+          fi
+          codex-review design build-clusters-prompt \
             --inventory codex-review-artifacts/design/design-inventory.json \
-            --out codex-review-artifacts/design/design-clusters.json
-          # prepare-analysis-matrix writes the design cluster batches plus the
-          # has_analysis_batches / analysis_matrix step outputs that drive the
-          # design-analyze fan-out matrix below.
+            --pr-context codex-review-artifacts/design/design-context.json \
+            --out codex-review-artifacts/design/design-clusters.prompt.md
+
+      - name: Run live Codex design clusters
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' && inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/design/design-clusters.prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, normalized design inventory, and repository context.
+            Write only schema-valid JSON for `design-clusters.v1` to `codex-review-artifacts/design/design-clusters.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design/design-clusters.raw.json`.
+
+      - name: Prepare design analysis matrix
+        id: prepare
+        if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            codex-review design default-clusters \
+              --inventory codex-review-artifacts/design/design-inventory.json \
+              --out codex-review-artifacts/design/design-clusters.json
+          else
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-design-clusters-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/design/design-clusters.raw.json
+            codex-review design cluster \
+              --in codex-review-artifacts/design/design-clusters.raw.json \
+              --inventory codex-review-artifacts/design/design-inventory.json \
+              --repo-path pr-head \
+              --out codex-review-artifacts/design/design-clusters.json
+          fi
           codex-review design prepare-analysis-matrix \
             --in codex-review-artifacts/design/design-clusters.json \
             --pr-context codex-review-artifacts/design/design-context.json \
             --repo-path pr-head \
             --work-dir codex-review-artifacts/design/batches \
             --out codex-review-artifacts/design/analysis-matrix.json
-
           has_analysis_batches="$(jq -er 'if (.include | length) > 0 then "true" else "false" end' codex-review-artifacts/design/analysis-matrix.json)"
-
           {
             echo "## Codex loop design prepare"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -997,6 +1301,14 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
@@ -1009,7 +1321,71 @@ jobs:
           name: codex-loop-design-prepare-${{ inputs.correlation_id }}-${{ inputs.iteration }}
           path: codex-review-artifacts/design
 
-      - name: Produce deterministic cluster analysis
+      - name: Mint relay token for live design analysis
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex design analysis
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `${{ matrix.prompt_file }}` and inspect the checked-out PR context contained in the design prepare artifact.
+            The prompt includes PR body, changed-file diff context, prior findings, design clusters, and repository context for this analysis batch.
+            Write only schema-valid JSON for `design-cluster-analysis.v1` to `${{ matrix.output_file }}`.
+            Do not post comments, push commits, access secrets, or modify files outside `${{ matrix.output_file }}`.
+
+      - name: Validate live design analysis
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        env:
+          MATRIX_BATCH_FILE: ${{ matrix.batch_file }}
+          MATRIX_OUTPUT_FILE: ${{ matrix.output_file }}
+          MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+            echo "live-design-analysis-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          test -s "${MATRIX_OUTPUT_FILE}"
+          codex-review design analyze \
+            --in "${MATRIX_OUTPUT_FILE}" \
+            --artifacts "${MATRIX_BATCH_FILE}" \
+            --repo-path pr-head \
+            --out "${MATRIX_VALIDATED_FILE}"
+
+      - name: Produce deterministic dry-run cluster analysis
+        if: ${{ inputs.dry_run == true }}
+        shell: bash
+        env:
+          MATRIX_BATCH_FILE: ${{ matrix.batch_file }}
+          MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
+        run: |
+          set -euo pipefail
+          codex-review design default-analysis \
+            --inventory "${MATRIX_BATCH_FILE}" \
+            --out "${MATRIX_VALIDATED_FILE}"
+
+      - name: Summarize design analysis
         shell: bash
         env:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
@@ -1018,16 +1394,7 @@ jobs:
           MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
         run: |
           set -euo pipefail
-
-          # Dry-run cluster analysis: the relay token is not configured in dry-run, so
-          # the per-batch cluster-analysis model is not invoked. Emit the schema-valid
-          # deterministic analysis fallback so the design fan-in stays deterministic.
-          # The live model step that inspects PR-head data is reserved for a separate
-          # live-capable change.
-          codex-review design default-analysis \
-            --inventory "${MATRIX_BATCH_FILE}" \
-            --out "${MATRIX_VALIDATED_FILE}"
-
+          test -s "${MATRIX_VALIDATED_FILE}"
           {
             echo "## Codex loop design analyze ${MATRIX_BATCH_FILE}"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -1063,6 +1430,14 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
@@ -1082,29 +1457,81 @@ jobs:
           pattern: codex-loop-design-analysis-*-${{ inputs.correlation_id }}-${{ inputs.iteration }}
           path: codex-review-artifacts/design-analysis-downloads
 
-      - name: Collect analyses and draft design plan
+      - name: Collect analyses and prepare design plan prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p codex-review-artifacts/design-analysis-downloads
+          codex-review design collect-analyses \
+            --artifacts codex-review-artifacts/design-analysis-downloads \
+            --out codex-review-artifacts/design/cluster-analysis.json
+          if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+            codex-review design build-plan-prompt \
+              --pr-context codex-review-artifacts/design/design-context.json \
+              --inventory codex-review-artifacts/design/design-clusters.json \
+              --result codex-review-artifacts/design/cluster-analysis.json \
+              --out codex-review-artifacts/design/design-plan.prompt.md
+          fi
+
+      - name: Mint relay token for live design plan
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex design plan
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/design/design-plan.prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, design clusters, cluster analyses, documentation context, and OpenSpec context.
+            Write only schema-valid JSON for `design-plan.v1` to `codex-review-artifacts/design/design-plan.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design/design-plan.raw.json`.
+
+      - name: Validate or produce design plan
         id: plan
         shell: bash
         env:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
-
-          mkdir -p codex-review-artifacts/design-analysis-downloads
-          codex-review design collect-analyses \
-            --artifacts codex-review-artifacts/design-analysis-downloads \
-            --out codex-review-artifacts/design/cluster-analysis.json
-          # Dry-run design plan: no relay token, so the design coordinator model is not
-          # invoked. Derive the deterministic design-plan fallback from the design
-          # context built off the prior review state and the cluster analyses.
-          codex-review design default-plan \
-            --pr-context codex-review-artifacts/design/design-context.json \
-            --inventory codex-review-artifacts/design/design-clusters.json \
-            --result codex-review-artifacts/design/cluster-analysis.json \
-            --out codex-review-artifacts/design/design-plan.json
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            codex-review design default-plan \
+              --pr-context codex-review-artifacts/design/design-context.json \
+              --inventory codex-review-artifacts/design/design-clusters.json \
+              --result codex-review-artifacts/design/cluster-analysis.json \
+              --out codex-review-artifacts/design/design-plan.json
+          else
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-design-plan-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/design/design-plan.raw.json
+            codex-review design validate-plan \
+              --in codex-review-artifacts/design/design-plan.raw.json \
+              --pr-context codex-review-artifacts/design/design-context.json \
+              --repo-path pr-head \
+              --out codex-review-artifacts/design/design-plan.json
+          fi
           echo "plan_ready=true" >> "${GITHUB_OUTPUT}"
-
           {
             echo "## Codex loop design plan"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -1143,6 +1570,14 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
@@ -1155,6 +1590,56 @@ jobs:
           name: codex-loop-design-plan-${{ inputs.correlation_id }}-${{ inputs.iteration }}
           path: codex-review-artifacts/design
 
+      - name: Prepare design chief prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p codex-review-artifacts/design-state-bundle
+          cp codex-review-artifacts/design/dispatch-ledger.json \
+            codex-review-artifacts/design-state-bundle/dispatch-ledger.json
+          cp codex-review-artifacts/design/design-plan.json \
+            codex-review-artifacts/design-state-bundle/design-plan.json
+          cp codex-review-artifacts/design/pr-context.json \
+            codex-review-artifacts/design-state-bundle/pr-context.json
+          if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+            codex-review design_chief build-chief-prompt \
+              --in codex-review-artifacts/design-state-bundle/design-plan.json \
+              --inventory codex-review-artifacts/design/design-context.json \
+              --pr-context codex-review-artifacts/design-state-bundle/pr-context.json \
+              --out codex-review-artifacts/design-state-bundle/chief.prompt.md
+          fi
+
+      - name: Mint relay token for live design chief
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex design chief
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/design-state-bundle/chief.prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, design plan, and repository/OpenSpec context.
+            Write only schema-valid JSON for `design-chief-decision.v1` to `codex-review-artifacts/design-state-bundle/chief-decision.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design-state-bundle/chief-decision.raw.json`.
+
       - name: Decide design chief and route with posting disabled
         shell: bash
         env:
@@ -1163,25 +1648,22 @@ jobs:
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
-
-          # Assemble the design state-bundle (design-plan + chief outputs) so the fix
-          # stage can consume it through the explicit state artifact transport.
-          mkdir -p codex-review-artifacts/design-state-bundle
-          cp codex-review-artifacts/design/dispatch-ledger.json \
-            codex-review-artifacts/design-state-bundle/dispatch-ledger.json
-          cp codex-review-artifacts/design/design-plan.json \
-            codex-review-artifacts/design-state-bundle/design-plan.json
-          # Dry-run design chief: no relay token, so the chief decision model is not
-          # invoked. Derive the deterministic decision fallback from the design plan.
-          codex-review design_chief default-result \
-            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
-            --out codex-review-artifacts/design-state-bundle/chief-decision.json
-
-          printf '{}' > codex-review-artifacts/design-state-bundle/pr-context.json
-          # Posting is disabled: --dry-run never upserts a design-summary comment and
-          # never consumes a write token. Design jobs are read-only by design, so the
-          # loop never posts to the PR in dry-run; routing is carried by job outputs and
-          # the design state-bundle artifact instead of labels or comments.
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            codex-review design_chief default-result \
+              --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
+              --out codex-review-artifacts/design-state-bundle/chief-decision.json
+          else
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-design-chief-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/design-state-bundle/chief-decision.raw.json
+            codex-review design_chief validate \
+              --in codex-review-artifacts/design-state-bundle/chief-decision.raw.json \
+              --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
+              --repo-path pr-head \
+              --out codex-review-artifacts/design-state-bundle/chief-decision.json
+          fi
           codex-review design_chief publish --dry-run \
             --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
             --in codex-review-artifacts/design-state-bundle/chief-decision.json \
@@ -1192,11 +1674,9 @@ jobs:
             echo "design-posting-not-disabled" >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
-
           codex-review design_chief route \
             --in codex-review-artifacts/design-state-bundle/chief-decision.json \
             --out codex-review-artifacts/design-state-bundle/route.json
-
           {
             echo "## Codex loop design chief"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -1343,6 +1823,14 @@ jobs:
           path: trusted-core
           persist-credentials: false
 
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
       - name: Install trusted codex-review helper
         shell: bash
         run: |
@@ -1399,6 +1887,7 @@ jobs:
         if: ${{ steps.verify_bundle.outputs.bundle_ok == 'true' }}
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_HEAD_SHA: ${{ inputs.head_sha }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
@@ -1415,8 +1904,20 @@ jobs:
             --arg base_ref "${INPUT_BASE_REF}" \
             --argjson pr_number "${INPUT_PR_NUMBER}" \
             '{repository: $repository, pr_number: $pr_number, head_sha: $head_sha, base_ref: $base_ref}' \
-            > codex-review-artifacts/fix-context/pr-context.json
-          printf '' > codex-review-artifacts/fix-context/docs-context.md
+            > codex-review-artifacts/fix-context/pr-seed.json
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            cp codex-review-artifacts/fix-context/pr-seed.json codex-review-artifacts/fix-context/pr-context.json
+            printf '' > codex-review-artifacts/fix-context/docs-context.md
+          else
+            codex-review context pr \
+              --pr-context codex-review-artifacts/fix-context/pr-seed.json \
+              --repo-path pr-head \
+              --token "${GH_TOKEN}" \
+              --out codex-review-artifacts/fix-context/pr-context.json
+            codex-review context docs \
+              --repo-path pr-head \
+              --out codex-review-artifacts/fix-context/docs-context.md
+          fi
 
           codex-review fix_dispatch plan \
             --in codex-review-artifacts/design-state-bundle/design-plan.json \
@@ -1508,20 +2009,68 @@ jobs:
           name: codex-loop-fix-dispatch-${{ inputs.correlation_id }}-${{ inputs.iteration }}
           path: codex-review-artifacts
 
-      - name: Produce deterministic fix agent result
+      - name: Mint relay token for live fix agent
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex fix agent
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `${{ matrix.prompt_file }}` and inspect the checked-out PR head at `pr-head`.
+            The prompt includes the design task, allowed files, PR body/diff context from the dispatch artifact, and repository documentation context.
+            Write only schema-valid JSON for `fix-dispatch-agent-result.v1` to `${{ matrix.output_file }}`.
+            Prefer the `edits` contract when possible; any patch output must remain compatible with `fix_dispatch validate-agent-result`, `fix_merge`, and `push` validation.
+            Do not post comments, push commits, access secrets, or modify files outside `${{ matrix.output_file }}`.
+
+      - name: Validate live fix agent result
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        env:
+          MATRIX_TASK_FILE: ${{ matrix.task_file }}
+          MATRIX_OUTPUT_FILE: ${{ matrix.output_file }}
+          MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+            echo "live-fix-agent-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          test -s "${MATRIX_OUTPUT_FILE}"
+          codex-review fix_dispatch validate-agent-result \
+            --inventory "${MATRIX_TASK_FILE}" \
+            --in "${MATRIX_OUTPUT_FILE}" \
+            --repo-path pr-head \
+            --out "${MATRIX_VALIDATED_FILE}"
+
+      - name: Produce deterministic dry-run fix agent result
+        if: ${{ inputs.dry_run == true }}
+        shell: bash
+        env:
           MATRIX_TASK_FILE: ${{ matrix.task_file }}
           MATRIX_OUTPUT_FILE: ${{ matrix.output_file }}
           MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
         run: |
           set -euo pipefail
-
-          # Dry-run fix agent: no relay token is configured, so the live agent model is
-          # not invoked. Emit and validate the schema-valid deterministic no-safe-fix
-          # fallback for each planned task while preserving the real matrix fan-out.
           codex-review fix_dispatch default-agent-result \
             --inventory "${MATRIX_TASK_FILE}" \
             --out "${MATRIX_OUTPUT_FILE}"
@@ -1531,6 +2080,16 @@ jobs:
             --repo-path pr-head \
             --out "${MATRIX_VALIDATED_FILE}"
 
+      - name: Summarize fix agent result
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          MATRIX_TASK_FILE: ${{ matrix.task_file }}
+          MATRIX_VALIDATED_FILE: ${{ matrix.validated_file }}
+        run: |
+          set -euo pipefail
+          test -s "${MATRIX_VALIDATED_FILE}"
           {
             echo "## Codex loop fix run_agents ${MATRIX_TASK_FILE}"
             echo "dry_run=${INPUT_DRY_RUN}"
@@ -1602,15 +2161,13 @@ jobs:
           name: codex-loop-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}.json
           path: .
 
-      - name: Merge, semantic-safety, validate-fix and check-loop-budget
-        id: validation_result
+      - name: Prepare fix merge model inputs
+        id: merge_prepare
         shell: bash
         env:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
         run: |
           set -euo pipefail
-
           mkdir -p codex-review-artifacts/fix-agent-downloads codex-review-artifacts/fix_merge codex-review-artifacts/push codex-review-artifacts/fix-state-bundle
           cp codex-review-artifacts/design-state-bundle/dispatch-ledger.json \
             codex-review-artifacts/fix-state-bundle/dispatch-ledger.json
@@ -1631,10 +2188,60 @@ jobs:
             --prompt-out codex-review-artifacts/fix_merge/merge-prompt.md \
             --raw-out codex-review-artifacts/fix_merge/merged-fix.raw.json \
             --out codex-review-artifacts/fix_merge/merge-route.json
-          if [[ "$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)" == "true" ]]; then
+          needs_merge_model="$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)"
+          echo "needs_merge_model=${needs_merge_model}" >> "${GITHUB_OUTPUT}"
+          if [[ "${needs_merge_model}" == "true" && "${INPUT_DRY_RUN}" == "true" ]]; then
             codex-review fix_merge default-merged-fix \
               --inventory codex-review-artifacts/fix_merge/premerge-report.json \
               --out codex-review-artifacts/fix_merge/merged-fix.raw.json
+          fi
+
+      - name: Mint relay token for live fix merge
+        id: live_relay
+        if: ${{ inputs.dry_run == false && needs.setup-relay.outputs.relay_configured == 'true' }}
+        shell: bash
+        env:
+          CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
+          CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
+        run: |
+          set -euo pipefail
+          relay_token="$(codex-review oidc relay-token \
+            --audience "${CODEX_OIDC_AUDIENCE}" \
+            --token-endpoint "${CODEX_OIDC_TOKEN_ENDPOINT}")"
+          if [[ -z "${relay_token}" ]]; then
+            echo "relay-token-empty" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "::add-mask::${relay_token}"
+          echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex fix merge
+        if: ${{ inputs.dry_run == false && steps.merge_prepare.outputs.needs_merge_model == 'true' && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/fix_merge/merge-prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, candidate fix-agent patches, premerge conflicts, and documentation context.
+            Write only schema-valid JSON for `fix-merge-merged-fix.v1` to `codex-review-artifacts/fix_merge/merged-fix.raw.json`.
+            The output must remain compatible with `fix_merge validate`, `push validate-fix`, and `push commit-push`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/fix_merge/merged-fix.raw.json`.
+
+      - name: Validate fix merge and prepare semantic safety
+        id: semantic_prepare
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)" == "true" && "${INPUT_DRY_RUN}" != "true" ]]; then
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-fix-merge-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/fix_merge/merged-fix.raw.json
           fi
           codex-review fix_merge validate \
             --inventory codex-review-artifacts/fix_merge/premerge-report.json \
@@ -1650,14 +2257,47 @@ jobs:
             --out codex-review-artifacts/fix_merge/semantic-safety-prompt.md
           patch_hash="$(jq -r '(.patch // .patch_text // "")' codex-review-artifacts/fix_merge/merged-fix.json | shasum -a 256 | cut -d ' ' -f 1)"
           status="$(jq -er '.status | strings' codex-review-artifacts/fix_merge/merged-fix.json)"
+          needs_semantic_model="true"
           if [[ "${status}" == "no_fix" || "${status}" == "blocked" || "${patch_hash}" == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]]; then
+            needs_semantic_model="false"
             jq -n --arg patch_hash "${patch_hash}" \
-              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"not_required", approved:false, patch_hash:$patch_hash, summary:"No ready patch requires semantic push approval in dry-run fix wiring.", blocking_reason:null, reviewed_criteria:[], semantic_findings:[], commit_plan:[]}' \
+              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"not_required", approved:false, patch_hash:$patch_hash, summary:"No ready patch requires semantic push approval.", blocking_reason:null, reviewed_criteria:[], semantic_findings:[], commit_plan:[]}' \
               > codex-review-artifacts/fix_merge/semantic-safety.raw.json
-          else
+          elif [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            needs_semantic_model="false"
             jq -n --arg patch_hash "${patch_hash}" \
-              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"rejected", approved:false, patch_hash:$patch_hash, summary:"Dry-run semantic safety model is deferred for Wave 3.", blocking_reason:"live semantic patch safety approval is deferred; this dry-run stage does not authorize push", reviewed_criteria:["exact patch hash computed", "push withheld"], semantic_findings:[], commit_plan:[]}' \
+              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"rejected", approved:false, patch_hash:$patch_hash, summary:"Dry-run semantic safety model is skipped.", blocking_reason:"dry_run does not authorize push", reviewed_criteria:["exact patch hash computed", "push withheld"], semantic_findings:[], commit_plan:[]}' \
               > codex-review-artifacts/fix_merge/semantic-safety.raw.json
+          fi
+          echo "needs_semantic_model=${needs_semantic_model}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run live Codex semantic safety
+        if: ${{ inputs.dry_run == false && steps.semantic_prepare.outputs.needs_semantic_model == 'true' && needs.setup-relay.outputs.relay_configured == 'true' }}
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
+          responses-api-endpoint: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          prompt: |
+            Read `codex-review-artifacts/fix_merge/semantic-safety-prompt.md` and inspect `pr-head` as needed.
+            The prompt includes PR body, changed-file diff context, the exact merged patch hash, semantic safety criteria, and repository documentation context.
+            Write only schema-valid JSON for `fix-merge-semantic-patch-safety.v1` to `codex-review-artifacts/fix_merge/semantic-safety.raw.json`.
+            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/fix_merge/semantic-safety.raw.json`.
+
+      - name: Validate fix, semantic safety and loop budget
+        id: validation_result
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
+        run: |
+          set -euo pipefail
+          if [[ "${INPUT_DRY_RUN}" != "true" && "${{ steps.semantic_prepare.outputs.needs_semantic_model }}" == "true" ]]; then
+            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
+              echo "live-semantic-safety-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+            test -s codex-review-artifacts/fix_merge/semantic-safety.raw.json
           fi
           codex-review fix_merge validate-semantic-safety \
             --in codex-review-artifacts/fix_merge/semantic-safety.raw.json \
@@ -1677,12 +2317,10 @@ jobs:
             --out codex-review-artifacts/push/validated-fix.json
           codex-review push write-validation-outputs \
             --in codex-review-artifacts/push/validated-fix.json
-
           cp codex-review-artifacts/fix_merge/merged-fix.json codex-review-artifacts/fix-state-bundle/merged-fix.json
           cp codex-review-artifacts/push/validated-fix.json codex-review-artifacts/fix-state-bundle/validated-fix.json
           cp codex-review-artifacts/fix_merge/semantic-safety.json codex-review-artifacts/fix-state-bundle/semantic-safety.json
           cp codex-review-artifacts/fix_dispatch/manifest.json codex-review-artifacts/fix-state-bundle/manifest.json
-
           {
             echo "## Codex loop fix merge_validate"
             echo "dry_run=${INPUT_DRY_RUN}"
