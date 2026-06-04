@@ -67,7 +67,8 @@ The reusable core accepts the same contract as typed `workflow_call` inputs:
 | `iteration` | number | yes | Must be within the accepted loop range. |
 | `correlation_id` | string | yes | Used to tie runs, artifacts, and dispatches together. |
 | `requested_by` | string | yes | Used for audit text and trust checks. |
-| `dry_run` | boolean | no | Defaults to `true` for the core and adapters. |
+| `dry_run` | boolean | no | Defaults to `true` for the core and adapters. A `true` value forces non-writing behavior even if live support exists. |
+| `enable_live_autofix` | boolean | no | Defaults to `false`. Live model calls, relay-token minting, GitHub App-token minting, fix pushes, and continuation dispatch require `dry_run == false && enable_live_autofix == true`. |
 | `max_iterations` | number | no | Defaults to `5`. |
 
 ## Org Consumer Adapters
@@ -109,7 +110,13 @@ jobs:
 
 The `dry_run: true` default is the safe initial path for a new consumer. Switch it only after the consumer has reviewed trust checks, runner access, app secrets, and artifact output for that repository.
 
-Trusted fix-push continuation is intentionally disabled in this implementation. If Codex returns `should_redispatch=true`, the reusable core terminates with `terminal_reason=trusted-fix-push-not-implemented` instead of sending another event. A future change may enable continuation only after it adds a concrete same-repo checkout, commit, push, and `updated_head_sha` output, then dispatches that updated SHA with the GitHub App installation token.
+Live autofix is default-off in two independent ways: `dry_run` defaults to `true`, and `enable_live_autofix` defaults to `false`. A caller enables live behavior only by passing both `dry_run: false` and `enable_live_autofix: true`. Setting `dry_run: false` alone is still non-live/default-off; model stages use deterministic no-model artifacts, relay-token steps are skipped, GitHub App-token steps are skipped, push is skipped, and continuation dispatch is skipped.
+
+Initial review bootstrap is allowed only for `stage=review`, `iteration=0`, and both `state_run_id` and `state_artifact_name` empty. That first-review path creates a run-scoped empty loop-state bundle. Every resume or non-initial stage still requires explicit state pointers.
+
+The manual debug adapter is dry-run oriented. In its current shape it requires state pointers and does not expose `enable_live_autofix`, so it cannot be used as a no-state initial-review live-enable wrapper.
+
+Trusted fix-push continuation is now implemented behind the live gates. If Codex returns `should_redispatch=true`, a push and redispatch may occur only after same-repository trust checks, non-fork/stale-head guards, semantic safety validation, `dry_run == false`, and `enable_live_autofix == true`. Without both live flags the run terminates as non-live/default-off with no push or dispatch.
 
 The dispatch payload keys are `schema_version`, `pr_number`, `head_sha`, `base_ref`, `stage`, `iteration`, `correlation_id`, `requested_by`, `state_run_id`, `state_artifact_name`, and optional `dry_run` or `max_iterations`. They are used by the default-branch adapter and by future trusted continuation support.
 
@@ -132,12 +139,14 @@ Terminal visible labels or comments can be considered later as visible-status wo
 
 ## Secrets
 
-Future write and continuation jobs require a GitHub App installation token minted from these mandatory secrets:
+The reusable accepts these GitHub App secret names only. Do not put secret values in workflow YAML, docs, evidence, logs, PR bodies, or summaries.
 
 | Secret | Required For | Notes |
 | --- | --- | --- |
-| `CODEX_GITHUB_APP_ID` | future fix push and continuation dispatch | GitHub App id for the org-internal automation app. |
-| `CODEX_GITHUB_APP_PRIVATE_KEY` | future fix push and continuation dispatch | PEM private key for the same app. |
+| `CODEX_GITHUB_APP_ID` | live fix push and live continuation dispatch | GitHub App id for the org-internal automation app. Required only when `dry_run == false && enable_live_autofix == true` reaches a write or dispatch path. |
+| `CODEX_GITHUB_APP_PRIVATE_KEY` | live fix push and live continuation dispatch | PEM private key for the same app. Required only when `dry_run == false && enable_live_autofix == true` reaches a write or dispatch path. |
+
+Consumer repositories must map their own secret names explicitly. The RS consumer will map `CODEX_APP_ID` to `CODEX_GITHUB_APP_ID` and `CODEX_APP_PRIVATE_KEY` to `CODEX_GITHUB_APP_PRIVATE_KEY` in a later adapter change; `secrets: inherit` does not rename them.
 
 PAT fallback is forbidden. Workflows must not accept, document, or branch to a PAT for write, finalize, or dispatch operations.
 
@@ -152,7 +161,7 @@ Use explicit least-privilege permissions. Never use `write-all`.
 | Dispatch adapter validation | `contents: read`, `pull-requests: read` | No `id-token` and no write permission. |
 | Core validation and trust checks | `contents: read`, `pull-requests: read` | Runs before relay setup or writes. |
 | Core relay and model run | `contents: read`, `pull-requests: read`, `id-token: write` | Needed for OIDC relay exchange. |
-| Core write and future continuation | `contents: write`, `pull-requests: write` | Reserved for future trusted fix-push support using the GitHub App installation token. Current live redispatch is disabled until that support exists. |
+| Core write and continuation | `contents: write`, `pull-requests: write` | Used only after trust guards and live gates pass, with GitHub App installation tokens. |
 
 No issue permission is included in this change. Terminal failures go to job summary and artifacts, not issue creation, PR comments, or labels.
 
@@ -162,7 +171,7 @@ The trusted boundary is the `DongwonTTuna-Labs` organization plus the GitHub App
 
 Fork PRs are not write-capable in this contract. If a fork PR reaches the loop, it must terminate before relay setup or write operations with a clear terminal reason in the job summary and artifact.
 
-Same-repo fix pushes are future work. The current reusable workflow validates trust and stage output, but if a live stage asks to redispatch it terminates with `trusted-fix-push-not-implemented` rather than reusing an unchanged PR head. A future fix-push change must keep the stale-SHA guard, push only trusted same-repo branches, emit an `updated_head_sha`, and dispatch that updated SHA with the GitHub App installation token.
+Same-repo fix pushes are live-gated. The reusable workflow validates trust and stage output, requires `dry_run == false && enable_live_autofix == true`, pushes only trusted same-repo branches, emits an `updated_head_sha`, and dispatches that updated SHA with the GitHub App installation token. Dry-run/default-off paths do not push or redispatch.
 
 ### Checkout Topology
 
@@ -177,7 +186,7 @@ The reusable core separates trusted code from untrusted PR data using four named
 
 `PR head is data only; never execute PR-head scripts, actions, package managers, or helper installation under secrets.` The `pr-head/` worktree exists so the trusted `codex-review` CLI in `trusted-core/` can read the proposed change as text. It is never a place to run the consumer's build, install, test, or lint commands while org secrets or the GitHub App token are in scope.
 
-`pr-head-write/` is a separate, fresh checkout taken only after the same-repo, fork, and stale-head guards pass. It is reserved for future trusted fix-push work, carries only the GitHub App installation token, and never reuses the `pr-head/` data worktree.
+`pr-head-write/` is a separate, fresh checkout taken only after the same-repo, fork, stale-head, semantic-safety, and live-enable guards pass. It carries only the GitHub App installation token, and never reuses the `pr-head/` data worktree.
 
 CLI SHA sourcing rule: the reusable core must source the `codex-review` CLI from the same pinned `home-server-infra` SHA as the workflow itself. The core resolves that SHA from `github.workflow_ref` (parsed) or asserts an explicit `core_sha` input in later implementation, then checks out `trusted-core/` at that exact SHA. A branch pin or any other moving ref is forbidden for production, because a moving core ref could change the trusted CLI that runs against PR data without a pinned, reviewable SHA.
 
@@ -236,7 +245,7 @@ The loop has four stages: `review`, `design`, `fix`, and `issue`.
 
 A successful terminal run happens when Codex returns a machine-readable result that the PR is ready and no further design, fix, or issue stage is required.
 
-A continuing run is future work. It may happen only after the `fix` stage pushes a trusted same-repo commit, emits `updated_head_sha`, and dispatches a new `stage=review` event with `iteration` increased by `1` and the updated `head_sha`. In the current implementation, `should_redispatch=true` is terminal with the workflow string `trusted-fix-push-not-implemented`, which aligns to canonical `push_failed` until trusted fix-push support exists.
+A continuing run may happen only after the `fix` stage pushes a trusted same-repo commit, emits `updated_head_sha`, and dispatches a new `stage=review` event with `iteration` increased by `1` and the updated `head_sha`. This path is live-gated and remains inert unless `dry_run == false && enable_live_autofix == true`.
 
 A failure terminal run happens when validation fails, max iteration is exceeded, SHA is stale, the actor isn't trusted, required GitHub App secrets are missing, the payload is malformed, Codex output is ambiguous, the PR is closed or missing, the PR comes from a fork, or a write fails.
 
@@ -288,7 +297,7 @@ Current emitter alignment note: existing workflows still emit some hyphenated or
 | `fork-pr` | `fork_pr` |
 | `untrusted-repository-owner` | `untrusted_repository_owner` |
 | `untrusted-requester` | `untrusted_requester` |
-| `trusted-fix-push-not-implemented` | keep current placeholder until trusted fix-push support; use `push_failed` only for an actual failed push or continuation |
+| `trusted-fix-push-not-implemented` | legacy placeholder; do not emit for live-capable fix-push paths |
 | `missing-*`, `invalid-*`, `validation-failed` | `validation_failed` |
 | `invalid-pr_number`, `invalid-iteration`, `invalid-max_iterations`, `invalid-stage`, `invalid-dry_run` | `validation_failed` |
 | `relay-token-empty`, `relay-setup-failed` | `missing_app_credentials` |
@@ -309,7 +318,7 @@ The workflow conclusion reflects the terminal outcome. These reasons keep the ru
 
 ## Rollout
 
-Start with a SHA-pinned org-internal consumer on one trusted repository. Use `stage=review`, `iteration=0`, and a unique `correlation_id` for the first run. Keep the first consumer in `dry_run: true` until the workflow summaries and artifacts prove the loop can read PR context, validate trust, and terminate without writes.
+Start with a SHA-pinned org-internal consumer on one trusted repository. Use `stage=review`, `iteration=0`, a unique `correlation_id`, no state pointers, `dry_run: true`, and the default `enable_live_autofix: false` for the first run. Keep the first consumer in dry-run/default-off mode until workflow summaries and artifacts prove the loop can read PR context, validate trust, bootstrap the initial review state, and terminate without writes.
 
 `repository_dispatch` only starts workflows that already exist on the repository default branch. Merge `.github/workflows/codex-loop-dispatch.yml` to the default branch before running the dispatch smoke test. A branch-only adapter won't receive `repos/:owner/:repo/dispatches` events.
 
@@ -395,7 +404,7 @@ Expected smoke result:
 1. The run event is `repository_dispatch` and the workflow is `Codex Loop Repository Dispatch`.
 2. The dispatch validation summary records `event_type=codex-loop` and `github.event.client_payload`.
 3. The reusable core receives the same `schema_version`, `pr_number`, `head_sha`, `base_ref`, `stage`, `iteration`, `correlation_id`, `requested_by`, `state_run_id`, `state_artifact_name`, `dry_run`, and `max_iterations` values.
-4. The run remains dry-run and doesn't create dirty label/comment state.
+4. The run remains dry-run/default-off and doesn't mint a relay token, call `openai/codex-action`, mint a GitHub App installation token, push, dispatch continuation, or create dirty label/comment state.
 5. Any failure is terminal in the job summary or artifacts, not represented by labels or comments.
 
 Verify the first rollout by checking the reusable workflow inputs, the dispatch adapter payload validation, the OIDC relay exchange path, the GitHub App token path for write-capable jobs, and the absence of label/comment state changes.
@@ -404,7 +413,11 @@ Expand to more repositories only after the first consumer records clean summarie
 
 ## Rollback
 
-Start with the least destructive stop: disable or remove the consumer workflow call that invokes `DongwonTTuna-Labs/home-server-infra/.github/workflows/codex-loop-reusable.yml@<sha-or-tag>`. This stops new consumer-triggered runs without deleting shared workflow source.
+Start with the least destructive stop: set `enable_live_autofix: false`, omit `enable_live_autofix`, or set `dry_run: true` in the consumer workflow call that invokes `DongwonTTuna-Labs/home-server-infra/.github/workflows/codex-loop-reusable.yml@<sha-or-tag>`. Any of those changes returns the loop to non-live/default-off behavior without deleting shared workflow source.
+
+If the shared workflow change itself is suspected, revert the HSI PR that introduced the live-capable reusable. If a consumer has already re-pinned to that HSI commit, re-pin the consumer back to the previous reviewed HSI SHA until the issue is understood.
+
+If new entries must stop entirely, disable or remove the consumer workflow call. This stops new consumer-triggered runs without deleting shared workflow source.
 
 If dispatch continuation is the failing path, disable the event adapter next. Either disable the `Codex Loop Repository Dispatch` workflow in repository settings or remove the `.github/workflows/codex-loop-dispatch.yml` trigger or adapter from the affected repository. Leave `codex-loop-reusable.yml` in place; without callers or dispatch adapters it is inert.
 
@@ -426,13 +439,18 @@ Do not clean up by adding labels or comments as internal state markers.
 
 If write behavior is suspected, rotate or suspend the GitHub App credentials before re-enabling consumers. Preserve run summaries, logs, and artifacts for diagnosis.
 
+Known residual risk: the GitHub App installation and repository access are assumed installed until a live smoke test proves token minting and repository scope in the target repository.
+
 Rollback order:
 
-1. Disable or remove the consumer workflow call first.
-2. Disable or remove the `codex-loop-dispatch.yml` trigger or adapter if dispatch can still enter the loop.
-3. Leave the reusable workflow source inert when there are no callers.
-4. Cancel active runs tied to the affected `correlation_id`.
-5. Rotate or suspend GitHub App credentials if unexpected write behavior is suspected.
+1. Set `enable_live_autofix: false`, omit it, or set `dry_run: true` in the consumer adapter.
+2. Revert the HSI live-capable PR if the shared reusable is suspect.
+3. Re-pin consumers to the previous reviewed HSI SHA if they had already adopted the live-capable SHA.
+4. Disable or remove the consumer workflow call if new entries must stop entirely.
+5. Disable or remove the `codex-loop-dispatch.yml` trigger or adapter if dispatch can still enter the loop.
+6. Leave the reusable workflow source inert when there are no callers.
+7. Cancel active runs tied to the affected `correlation_id`.
+8. Rotate or suspend GitHub App credentials if unexpected write behavior is suspected.
 
 ## Non-Goals
 
