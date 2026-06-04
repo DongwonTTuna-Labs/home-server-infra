@@ -1,0 +1,50 @@
+{
+  "$id": "https://example.invalid/codex-review/resolve-gate-thread-inventory.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "head_sha": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "forced_needs_human": {
+            "type": "boolean"
+          },
+          "root_cause_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "root_cause_summary": {
+      "type": "object"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "title": "resolve-gate-thread-inventory.v1",
+  "type": "object"
+}

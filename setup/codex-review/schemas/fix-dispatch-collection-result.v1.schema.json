@@ -1,0 +1,25 @@
+{
+  "$id": "https://example.invalid/codex-review/fix-dispatch-collection-result.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "ready_for_merge": {
+      "type": "boolean"
+    },
+    "results": {
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "status_counts": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "results"
+  ],
+  "title": "fix-dispatch-collection-result.v1",
+  "type": "object"
+}

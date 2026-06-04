@@ -1,0 +1,28 @@
+{
+  "$id": "https://example.invalid/codex-review/push-result.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "commit_sha": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pushed": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "pushed"
+  ],
+  "title": "push-result.v1",
+  "type": "object"
+}

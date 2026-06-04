@@ -1,0 +1,50 @@
+{
+  "$id": "https://example.invalid/codex-review/review-axis-findings.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "axis": {
+      "type": "string"
+    },
+    "finding_count": {
+      "type": "integer"
+    },
+    "findings": {
+      "type": "array"
+    },
+    "inspection_evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "observation": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "purpose",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "axis",
+    "findings",
+    "inspection_evidence"
+  ],
+  "title": "review-axis-findings.v1",
+  "type": "object"
+}

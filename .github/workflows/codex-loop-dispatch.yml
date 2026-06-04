@@ -7,8 +7,8 @@ on:
 permissions: {}
 
 concurrency:
-  group: codex-loop-${{ github.event.client_payload.pr_number }}-${{ github.event.client_payload.head_sha }}
-  cancel-in-progress: true
+  group: codex-loop-${{ github.event.client_payload.correlation_id }}
+  cancel-in-progress: false
 
 jobs:
   validate-payload:
@@ -27,6 +27,8 @@ jobs:
       iteration: ${{ steps.validate_payload.outputs.iteration }}
       correlation_id: ${{ steps.validate_payload.outputs.correlation_id }}
       requested_by: ${{ steps.validate_payload.outputs.requested_by }}
+      state_run_id: ${{ steps.validate_payload.outputs.state_run_id }}
+      state_artifact_name: ${{ steps.validate_payload.outputs.state_artifact_name }}
       max_iterations: ${{ steps.validate_payload.outputs.max_iterations }}
       dry_run: ${{ steps.validate_payload.outputs.dry_run }}
     steps:
@@ -41,6 +43,8 @@ jobs:
           PAYLOAD_ITERATION: ${{ github.event.client_payload.iteration }}
           PAYLOAD_CORRELATION_ID: ${{ github.event.client_payload.correlation_id }}
           PAYLOAD_REQUESTED_BY: ${{ github.event.client_payload.requested_by }}
+          PAYLOAD_STATE_RUN_ID: ${{ github.event.client_payload.state_run_id }}
+          PAYLOAD_STATE_ARTIFACT_NAME: ${{ github.event.client_payload.state_artifact_name }}
           PAYLOAD_MAX_ITERATIONS: ${{ github.event.client_payload.max_iterations }}
           PAYLOAD_DRY_RUN: ${{ github.event.client_payload.dry_run }}
         run: |
@@ -65,6 +69,8 @@ jobs:
           require_non_empty iteration "${PAYLOAD_ITERATION}"
           require_non_empty correlation_id "${PAYLOAD_CORRELATION_ID}"
           require_non_empty requested_by "${PAYLOAD_REQUESTED_BY}"
+          require_non_empty state_run_id "${PAYLOAD_STATE_RUN_ID}"
+          require_non_empty state_artifact_name "${PAYLOAD_STATE_ARTIFACT_NAME}"
 
           max_iterations="${PAYLOAD_MAX_ITERATIONS:-5}"
           dry_run="${PAYLOAD_DRY_RUN:-true}"
@@ -75,6 +81,12 @@ jobs:
               valid="false"
             elif ! [[ "${PAYLOAD_ITERATION}" =~ ^[0-9]+$ ]]; then
               terminal_reason="invalid-iteration"
+              valid="false"
+            elif ! [[ "${PAYLOAD_STATE_RUN_ID}" =~ ^[0-9]+$ ]] || (( PAYLOAD_STATE_RUN_ID <= 0 )); then
+              terminal_reason="invalid-state_run_id"
+              valid="false"
+            elif [[ "${PAYLOAD_STATE_ARTIFACT_NAME}" == */* || "${PAYLOAD_STATE_ARTIFACT_NAME}" == "." || "${PAYLOAD_STATE_ARTIFACT_NAME}" == ".." ]]; then
+              terminal_reason="invalid-state_artifact_name"
               valid="false"
             elif ! [[ "${max_iterations}" =~ ^[0-9]+$ ]]; then
               terminal_reason="invalid-max_iterations"
@@ -108,6 +120,8 @@ jobs:
             echo "event_type=codex-loop"
             echo "stage=${PAYLOAD_STAGE}"
             echo "iteration=${PAYLOAD_ITERATION}"
+            echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
+            echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
             echo "max_iterations=${max_iterations}"
             echo "dry_run=${dry_run}"
             echo "valid=${valid}"
@@ -129,6 +143,8 @@ jobs:
             echo "iteration=${PAYLOAD_ITERATION}"
             echo "correlation_id=${PAYLOAD_CORRELATION_ID}"
             echo "requested_by=${PAYLOAD_REQUESTED_BY}"
+            echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
+            echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
             echo "max_iterations=${max_iterations}"
             echo "dry_run=${dry_run}"
           } >> "${GITHUB_OUTPUT}"
@@ -151,6 +167,8 @@ jobs:
       iteration: ${{ fromJSON(needs.validate-payload.outputs.iteration) }}
       correlation_id: ${{ needs.validate-payload.outputs.correlation_id }}
       requested_by: ${{ needs.validate-payload.outputs.requested_by }}
+      state_run_id: ${{ needs.validate-payload.outputs.state_run_id }}
+      state_artifact_name: ${{ needs.validate-payload.outputs.state_artifact_name }}
       max_iterations: ${{ fromJSON(needs.validate-payload.outputs.max_iterations) }}
       dry_run: ${{ needs.validate-payload.outputs.dry_run == 'true' }}
     secrets: inherit

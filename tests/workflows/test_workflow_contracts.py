@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -168,8 +169,8 @@ def assert_reusable_inputs(workflow_text: str) -> None:
 
 
 def assert_max_iteration_guard(workflow_text: str) -> None:
-    assert "INPUT_ITERATION > INPUT_MAX_ITERATIONS" in workflow_text, (
-        "reusable workflow must reject iterations over max_iterations"
+    assert "INPUT_ITERATION >= INPUT_MAX_ITERATIONS" in workflow_text, (
+        "reusable workflow must reject iterations at or over max_iterations"
     )
     assert "max-iterations-exceeded" in workflow_text, (
         "reusable workflow must expose max-iterations-exceeded terminal reason"
@@ -355,7 +356,7 @@ def test_dispatch_adapter_maps_payload_and_reusable_permission_ceiling() -> None
 
     assert_concurrency_contract(
         workflow_text,
-        "codex-loop-${{ github.event.client_payload.pr_number }}-${{ github.event.client_payload.head_sha }}",
+        "codex-loop-${{ github.event.client_payload.correlation_id }}",
     )
     assert_dispatch_payload_mapping(workflow_text)
     assert_reusable_permission_ceiling(workflow_text)
@@ -483,3 +484,377 @@ on:
 
     with pytest.raises(AssertionError, match="concurrency"):
         assert_concurrency_contract(workflow_text, "codex-loop-${{ inputs.correlation_id }}")
+
+
+PAYLOAD_SCHEMA_PATH = REPO_ROOT / "schemas" / "codex-loop-dispatch-payload.v2.schema.json"
+TERMINAL_REASON_SCHEMA_PATH = REPO_ROOT / "schemas" / "terminal-reason.v1.json"
+REUSABLE_DOC_PATH = REPO_ROOT / "docs" / "codex-loop-reusable.md"
+
+REQUIRED_APP_SECRETS = (
+    "CODEX_GITHUB_APP_ID",
+    "CODEX_GITHUB_APP_PRIVATE_KEY",
+)
+OPTIONAL_REUSABLE_INPUTS = (
+    "max_iterations",
+    "dry_run",
+)
+INTERNAL_LABEL_TRIGGER_NAMES = (
+    "리뷰중",
+    "리뷰완료",
+    "설계완료",
+    "수정중",
+)
+LABEL_TRIGGER_PATTERNS = (
+    re.compile(r"(?ms)^\s*pull_request_target\s*:.*?\btypes\s*:\s*\[[^\]]*\blabeled\b[^\]]*\]"),
+    re.compile(r"github\.event\.label\b"),
+)
+PAT_FORBIDDEN_PATTERNS = (
+    re.compile(r"(?i)personal_access_token"),
+    re.compile(r"secrets\.[A-Za-z0-9_]*PAT[A-Za-z0-9_]*"),
+    re.compile(r"\bGH_PAT\b"),
+)
+DOC_WORKFLOW_REF_PATTERN = re.compile(r"\.ya?ml@([^\s`)]+)")
+DOC_FORBIDDEN_BRANCH_PIN_PATTERN = re.compile(
+    r"(?i)\.ya?ml@(?:main|master|develop|head|latest|work/)\S*"
+)
+REQUIRED_PAYLOAD_KEYS = (
+    "schema_version",
+    "pr_number",
+    "head_sha",
+    "base_ref",
+    "stage",
+    "iteration",
+    "correlation_id",
+    "requested_by",
+    "state_run_id",
+    "state_artifact_name",
+)
+
+
+def load_json(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _json_type_matches(value: object, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return False
+
+
+def schema_validation_errors(instance: object, schema: dict, path: str = "$") -> list[str]:
+    """Validate against the committed schema's keyword subset because jsonschema is unavailable under `uvx pytest`."""
+    errors: list[str] = []
+
+    expected_type = schema.get("type")
+    if expected_type is not None and not _json_type_matches(instance, expected_type):
+        errors.append(f"{path}: expected type {expected_type}")
+        return errors
+
+    if "const" in schema and instance != schema["const"]:
+        errors.append(f"{path}: must equal const {schema['const']!r}")
+    if "enum" in schema and instance not in schema["enum"]:
+        errors.append(f"{path}: {instance!r} not in enum")
+
+    if isinstance(instance, str):
+        pattern = schema.get("pattern")
+        if pattern is not None and re.search(pattern, instance) is None:
+            errors.append(f"{path}: does not match pattern")
+        min_length = schema.get("minLength")
+        if min_length is not None and len(instance) < min_length:
+            errors.append(f"{path}: shorter than minLength {min_length}")
+        max_length = schema.get("maxLength")
+        if max_length is not None and len(instance) > max_length:
+            errors.append(f"{path}: longer than maxLength {max_length}")
+
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        minimum = schema.get("minimum")
+        if minimum is not None and instance < minimum:
+            errors.append(f"{path}: below minimum {minimum}")
+
+    if expected_type == "object" and isinstance(instance, dict):
+        properties = schema.get("properties", {})
+        for required_key in schema.get("required", []):
+            if required_key not in instance:
+                errors.append(f"{path}.{required_key}: required property missing")
+        if schema.get("additionalProperties") is False:
+            for key in instance:
+                if key not in properties:
+                    errors.append(f"{path}.{key}: additional property not allowed")
+        for key, value in instance.items():
+            if key in properties:
+                errors.extend(schema_validation_errors(value, properties[key], f"{path}.{key}"))
+
+    return errors
+
+
+def valid_review_payload() -> dict:
+    return {
+        "schema_version": 2,
+        "pr_number": 123,
+        "head_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "base_ref": "main",
+        "stage": "review",
+        "iteration": 0,
+        "correlation_id": "codex-loop-123-a1b2c3d",
+        "requested_by": "DongwonTTuna",
+        "state_run_id": 1234567890,
+        "state_artifact_name": "codex-loop-state-codex-loop-123-a1b2c3d",
+        "dry_run": True,
+        "max_iterations": 5,
+    }
+
+
+def assert_no_label_trigger_orchestration(workflow_text: str) -> None:
+    for pattern in LABEL_TRIGGER_PATTERNS:
+        assert not pattern.search(workflow_text), (
+            "codex-loop workflows must not use label events or github.event.label as trigger logic"
+        )
+    for label_name in INTERNAL_LABEL_TRIGGER_NAMES:
+        assert label_name not in workflow_text, (
+            f"codex-loop workflows must not reference internal label {label_name} as trigger logic"
+        )
+
+
+def assert_no_pat_secret(text: str) -> None:
+    for pattern in PAT_FORBIDDEN_PATTERNS:
+        assert not pattern.search(text), (
+            "codex-loop workflows/docs must not wire a PAT or PERSONAL_ACCESS_TOKEN secret"
+        )
+
+
+def assert_docs_show_no_production_branch_pin(doc_text: str) -> None:
+    assert not DOC_FORBIDDEN_BRANCH_PIN_PATTERN.search(doc_text), (
+        "docs must not show a production branch pin example for the reusable workflow"
+    )
+    for ref in DOC_WORKFLOW_REF_PATTERN.findall(doc_text):
+        assert ref.startswith("<"), (
+            f"docs workflow ref {ref!r} must be a placeholder pin, not a concrete branch pin"
+        )
+
+
+def test_reusable_workflow_declares_workflow_call_trigger() -> None:
+    workflow_text = read_workflow(WORKFLOW_DIR / "codex-loop-reusable.yml")
+
+    assert re.search(r"(?m)^on\s*:", workflow_text), "reusable workflow must declare an on trigger block"
+    assert re.search(r"(?m)^\s{2}workflow_call\s*:", workflow_text), (
+        "reusable workflow must be callable via on.workflow_call"
+    )
+
+
+def test_reusable_workflow_declares_required_and_optional_typed_inputs() -> None:
+    workflow_text = read_workflow(WORKFLOW_DIR / "codex-loop-reusable.yml")
+
+    for input_name in DISPATCH_REQUIRED_PAYLOAD_FIELDS:
+        workflow_call_input_block(workflow_text, input_name)
+
+    for optional_input in OPTIONAL_REUSABLE_INPUTS:
+        block = workflow_call_input_block(workflow_text, optional_input)
+        assert "required: false" in block, (
+            f"{optional_input} must remain an optional workflow_call input"
+        )
+
+
+def test_reusable_workflow_declares_github_app_secrets() -> None:
+    workflow_text = read_workflow(WORKFLOW_DIR / "codex-loop-reusable.yml")
+
+    assert re.search(r"(?m)^    secrets\s*:", workflow_text), (
+        "reusable workflow must declare a workflow_call secrets block"
+    )
+    for secret_name in REQUIRED_APP_SECRETS:
+        assert re.search(rf"(?m)^      {re.escape(secret_name)}\s*:", workflow_text), (
+            f"reusable workflow must declare the {secret_name} GitHub App secret"
+        )
+
+
+def test_all_codex_loop_workflows_reject_write_all_permissions() -> None:
+    for filename in EXPECTED_WORKFLOWS:
+        workflow_text = read_workflow(WORKFLOW_DIR / filename)
+        assert_no_write_all_permissions(workflow_text)
+
+
+def test_dispatch_workflow_declares_exact_repository_dispatch_type() -> None:
+    workflow_text = read_workflow(WORKFLOW_DIR / "codex-loop-dispatch.yml")
+
+    assert re.search(r"(?m)^\s*repository_dispatch\s*:", workflow_text), (
+        "dispatch workflow must declare a repository_dispatch trigger"
+    )
+    type_lists = re.findall(r"(?m)^\s*types\s*:\s*\[([^\]]*)\]", workflow_text)
+    assert type_lists, "dispatch workflow must declare repository_dispatch event types"
+    parsed = [[item.strip() for item in entry.split(",") if item.strip()] for entry in type_lists]
+    assert ["codex-loop"] in parsed, (
+        "repository_dispatch must trigger on exactly the codex-loop event type"
+    )
+    for entry in parsed:
+        assert entry == ["codex-loop"], (
+            "repository_dispatch must not add event types beyond codex-loop"
+        )
+
+
+def test_codex_loop_workflows_have_no_label_trigger_orchestration() -> None:
+    for filename in EXPECTED_WORKFLOWS:
+        workflow_text = read_workflow(WORKFLOW_DIR / filename)
+        assert_no_label_trigger_orchestration(workflow_text)
+
+
+def test_codex_loop_workflows_and_docs_have_no_pat_secret() -> None:
+    targets = [WORKFLOW_DIR / filename for filename in EXPECTED_WORKFLOWS]
+    targets.append(REUSABLE_DOC_PATH)
+    for target in targets:
+        assert_no_pat_secret(target.read_text(encoding="utf-8"))
+
+
+def test_reusable_docs_show_no_production_branch_pin() -> None:
+    assert_docs_show_no_production_branch_pin(REUSABLE_DOC_PATH.read_text(encoding="utf-8"))
+
+
+def test_negative_sample_rejects_label_trigger_orchestration() -> None:
+    workflow_text = """
+on:
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  loop:
+    if: ${{ github.event.label.name == '리뷰중' }}
+    runs-on: ubuntu-latest
+"""
+
+    with pytest.raises(AssertionError, match="label"):
+        assert_no_label_trigger_orchestration(workflow_text)
+
+
+def test_negative_sample_rejects_pat_secret_reference() -> None:
+    workflow_text = """
+jobs:
+  loop:
+    steps:
+      - env:
+          TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: gh auth status
+"""
+
+    with pytest.raises(AssertionError, match="PAT|PERSONAL_ACCESS_TOKEN"):
+        assert_no_pat_secret(workflow_text)
+
+
+def test_negative_sample_rejects_branch_pin_doc_example() -> None:
+    doc_text = (
+        "uses: DongwonTTuna-Labs/home-server-infra"
+        "/.github/workflows/codex-loop-reusable.yml@main"
+    )
+
+    with pytest.raises(AssertionError, match="branch pin"):
+        assert_docs_show_no_production_branch_pin(doc_text)
+
+
+def test_payload_schema_v2_is_strict_state_pointer_contract() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+
+    assert schema.get("type") == "object"
+    assert schema.get("additionalProperties") is False
+    assert set(REQUIRED_PAYLOAD_KEYS) <= set(schema.get("required", [])), (
+        "payload schema v2 must require the full state-pointer key set"
+    )
+
+
+def test_payload_v2_positive_valid_review_payload_validates() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+
+    assert schema_validation_errors(valid_review_payload(), schema) == []
+
+
+def test_payload_v2_negative_invalid_stage_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    payload["stage"] = "merge"
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("stage" in error for error in errors), errors
+
+
+def test_payload_v2_negative_missing_head_sha_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    del payload["head_sha"]
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("head_sha" in error and "required" in error for error in errors), errors
+
+
+def test_payload_v2_negative_additional_freeform_key_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    payload["label"] = "리뷰중"
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("label" in error and "additional" in error for error in errors), errors
+
+
+def test_payload_v2_negative_malformed_head_sha_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    payload["head_sha"] = "not-a-valid-sha"
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("head_sha" in error for error in errors), errors
+
+
+def test_payload_v2_negative_non_integer_iteration_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    payload["iteration"] = "0"
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("iteration" in error for error in errors), errors
+
+
+def test_payload_v2_negative_missing_state_pointer_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    del payload["state_artifact_name"]
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("state_artifact_name" in error and "required" in error for error in errors), errors
+
+
+def test_payload_v2_negative_invalid_schema_version_rejected() -> None:
+    schema = load_json(PAYLOAD_SCHEMA_PATH)
+    payload = valid_review_payload()
+    payload["schema_version"] = 1
+
+    errors = schema_validation_errors(payload, schema)
+    assert any("schema_version" in error for error in errors), errors
+
+
+def test_reusable_uses_inclusive_max_iteration_guard() -> None:
+    workflow_text = read_workflow(WORKFLOW_DIR / "codex-loop-reusable.yml")
+
+    assert "INPUT_ITERATION >= INPUT_MAX_ITERATIONS" in workflow_text, (
+        "reusable workflow must use the inclusive iteration cap INPUT_ITERATION >= INPUT_MAX_ITERATIONS"
+    )
+
+
+def test_terminal_reason_schema_includes_stale_and_fork_reasons() -> None:
+    schema = load_json(TERMINAL_REASON_SCHEMA_PATH)
+    enum = set(schema.get("enum", []))
+
+    assert {"stale_head", "fork_pr", "max_iterations"} <= enum, (
+        "terminal reason schema must enumerate stale_head, fork_pr, and max_iterations"
+    )
+
+
+def test_docs_describe_stale_and_fork_terminal_paths() -> None:
+    doc_text = REUSABLE_DOC_PATH.read_text(encoding="utf-8")
+
+    for marker in ("stale-head", "fork", "state_run_id", "state_artifact_name"):
+        assert marker in doc_text, f"docs must describe the {marker} terminal/path contract"

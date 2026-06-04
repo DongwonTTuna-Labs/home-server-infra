@@ -1,0 +1,50 @@
+{
+  "$id": "https://example.invalid/codex-review/fix-merge-merged-fix.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "deletions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "old_str": {
+            "type": "string"
+          },
+          "new_str": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old_str",
+          "new_str"
+        ]
+      }
+    },
+    "expected_head_sha": {
+      "type": "string"
+    },
+    "policy_report": {
+      "type": "object"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "title": "fix-merge-merged-fix.v1",
+  "type": "object"
+}

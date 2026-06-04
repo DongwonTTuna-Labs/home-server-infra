@@ -1,0 +1,32 @@
+{
+  "$id": "https://example.invalid/codex-review/reentry-loop-state.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "commit_sha": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "loop_state": {
+      "type": "object"
+    },
+    "next_entry": {
+      "type": "string"
+    },
+    "pushed": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "pushed",
+    "next_entry"
+  ],
+  "title": "reentry-loop-state.v1",
+  "type": "object"
+}

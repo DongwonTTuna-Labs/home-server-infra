@@ -1,0 +1,55 @@
+{
+  "$id": "https://example.invalid/codex-review/resolve-gate-resolved-memory.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "head_sha": {
+      "type": ["string", "null"]
+    },
+    "pr_number": {
+      "type": ["integer", "string", "null"]
+    },
+    "count": {
+      "type": "integer"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "thread_id": {
+            "type": ["string", "null"]
+          },
+          "root_cause_key": {
+            "type": ["string", "null"]
+          },
+          "state": {
+            "type": ["string", "null"]
+          },
+          "reason": {
+            "type": ["string", "null"]
+          },
+          "path": {
+            "type": ["string", "null"]
+          },
+          "line": {
+            "type": ["integer", "null"]
+          },
+          "head_sha": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "items"
+  ],
+  "title": "resolve-gate-resolved-memory.v1",
+  "type": "object"
+}

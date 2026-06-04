@@ -11,6 +11,7 @@ id_*
 **/*secret*
 *pat*
 **/*pat*
+!schemas/*.schema.json
 auth.json
 **/auth.json
 known_hosts
@@ -58,3 +59,13 @@ __pycache__/
 
 # Planned Codex loop deliverable that contains "pat" as part of dispatch text.
 !.github/workflows/codex-loop-dispatch.yml
+
+# Relocated trusted Codex loop helper. Package file names intentionally include
+# token/secret/pat words for security tests and patch/dispatch modules.
+!setup/
+!setup/codex-review/
+!setup/codex-review/**
+setup/codex-review/**/__pycache__/
+setup/codex-review/**/*.pyc
+setup/codex-review/**/*.pyo
+setup/codex-review/src/*.egg-info/

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DongwonTTuna-Labs/home-server-infra/schemas/codex-loop-dispatch-payload.v2.schema.json",
+  "title": "Codex Loop Dispatch Payload v2",
+  "description": "Strict client_payload schema for repository_dispatch event_type codex-loop.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "pr_number",
+    "head_sha",
+    "base_ref",
+    "stage",
+    "iteration",
+    "correlation_id",
+    "requested_by",
+    "state_run_id",
+    "state_artifact_name"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Payload schema version. Must be 2 for explicit state-pointer dispatches."
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request number in the receiving repository."
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}$",
+      "description": "Expected pull request head SHA checked by stale-head guards."
+    },
+    "base_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9._/@-]+$",
+      "description": "Expected pull request base ref."
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["review", "design", "fix", "issue"],
+      "description": "Non-terminal loop stage to execute."
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Zero-based loop iteration. Continuation is allowed only while iteration is less than max_iterations."
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9._:@/-]+$",
+      "description": "Stable loop chain id used by summaries, concurrency, and artifact naming."
+    },
+    "requested_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(\\[bot\\])?$",
+      "description": "GitHub login or app slug that requested this loop step."
+    },
+    "state_run_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "GitHub Actions run id that produced the state artifact for this step."
+    },
+    "state_artifact_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9._@/-]+$",
+      "description": "Exact artifact name containing the state bundle for this step."
+    },
+    "max_iterations": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5,
+      "description": "Maximum loop iterations. A run where iteration is greater than or equal to this value must not redispatch."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, prevents live write/finalize behavior."
+    }
+  }
+}
