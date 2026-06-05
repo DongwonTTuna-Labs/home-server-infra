@@ -684,14 +684,58 @@ jobs:
               fi
               ;;
             push)
-              jq -n \
-                --arg next_stage "" \
-                --arg terminal_reason "push-stage-not-implemented" \
-                --arg updated_head_sha "${INPUT_HEAD_SHA}" \
-                --argjson lgtm false \
-                --argjson should_redispatch false \
-                '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
-                > .codex-loop-stage-result.json
+              mkdir -p codex-review-artifacts/push codex-review-artifacts/push-state-bundle
+              codex-review loop verify-bundle \
+                --kind fix \
+                --name "${INPUT_STATE_ARTIFACT_NAME}" \
+                --dir codex-review-artifacts/prior-state \
+                --out codex-review-artifacts/push/fix-state-verify.json
+              bundle_ok="$(jq -er '.ok | tostring' codex-review-artifacts/push/fix-state-verify.json)"
+              cp codex-review-artifacts/push/fix-state-verify.json codex-review-artifacts/push-state-bundle/fix-state-verify.json
+              if [[ "${bundle_ok}" != "true" ]]; then
+                terminal_reason="$(jq -r '.terminal_reason // "artifact_missing"' codex-review-artifacts/push/fix-state-verify.json)"
+                jq -n \
+                  --arg next_stage "" \
+                  --arg terminal_reason "${terminal_reason}" \
+                  --arg updated_head_sha "" \
+                  --argjson lgtm false \
+                  --argjson should_redispatch false \
+                  '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
+                  > .codex-loop-stage-result.json
+                echo "needs_push_commit=false" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              cp codex-review-artifacts/prior-state/dispatch-ledger.json codex-review-artifacts/push-state-bundle/dispatch-ledger.json
+              cp codex-review-artifacts/prior-state/merged-fix.json codex-review-artifacts/push-state-bundle/merged-fix.json
+              cp codex-review-artifacts/prior-state/validated-fix.json codex-review-artifacts/push-state-bundle/validated-fix.json
+              cp codex-review-artifacts/prior-state/semantic-safety.json codex-review-artifacts/push-state-bundle/semantic-safety.json
+              if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
+                jq -n \
+                  --arg next_stage "" \
+                  --arg terminal_reason "dry_run" \
+                  --arg updated_head_sha "" \
+                  --argjson lgtm false \
+                  --argjson should_redispatch false \
+                  '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
+                  > .codex-loop-stage-result.json
+                echo "needs_push_commit=false" >> "${GITHUB_OUTPUT}"
+              else
+                validation_ready="$(jq -er '(.validated == true and (.loop_budget_ok // true) == true) | tostring' codex-review-artifacts/prior-state/validated-fix.json)"
+                if [[ "${validation_ready}" != "true" ]]; then
+                  validation_status="$(jq -r '.status // "validation_failed"' codex-review-artifacts/prior-state/validated-fix.json)"
+                  jq -n \
+                    --arg next_stage "" \
+                    --arg terminal_reason "${validation_status}" \
+                    --arg updated_head_sha "" \
+                    --argjson lgtm false \
+                    --argjson should_redispatch false \
+                    '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
+                    > .codex-loop-stage-result.json
+                  echo "needs_push_commit=false" >> "${GITHUB_OUTPUT}"
+                else
+                  echo "needs_push_commit=true" >> "${GITHUB_OUTPUT}"
+                fi
+              fi
               ;;
           esac
 
@@ -1059,6 +1103,104 @@ jobs:
               '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
               > .codex-loop-stage-result.json
           fi
+
+      - name: Mint GitHub App installation token for push
+        id: push_app_token
+        if: ${{ inputs.stage == 'push' && inputs.dry_run == false && inputs.enable_live_autofix == true && steps.prepare_stage.outputs.needs_push_commit == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.result == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          CODEX_REVIEW_GITHUB_APP_ID: ${{ secrets.CODEX_GITHUB_APP_ID }}
+          CODEX_REVIEW_GITHUB_APP_PRIVATE_KEY: ${{ secrets.CODEX_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          codex-review auth app-token \
+            --mode push \
+            --pr-context codex-review-artifacts/common/pr-context.json \
+            --out codex-review-artifacts/push/app-token.json
+
+      - name: Commit and push validated fix
+        id: push_commit
+        if: ${{ inputs.stage == 'push' && inputs.dry_run == false && inputs.enable_live_autofix == true && steps.prepare_stage.outputs.needs_push_commit == 'true' && steps.push_app_token.outputs.token_created == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.result == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          PUSH_APP_TOKEN: ${{ steps.push_app_token.outputs.token }}
+          CODEX_REVIEW_APP_TOKEN_PERMISSIONS_JSON: ${{ steps.push_app_token.outputs.permissions_json }}
+        run: |
+          set -euo pipefail
+          codex-review push commit-push \
+            --in codex-review-artifacts/prior-state/merged-fix.json \
+            --validation codex-review-artifacts/prior-state/validated-fix.json \
+            --pr-context codex-review-artifacts/common/pr-context.json \
+            --repo-path pr-head \
+            --token "${PUSH_APP_TOKEN}" \
+            --out codex-review-artifacts/push/push-result.json
+
+      - name: Complete push stage state
+        if: ${{ inputs.stage == 'push' }}
+        shell: bash
+        env:
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
+          NEEDS_PUSH_COMMIT: ${{ steps.prepare_stage.outputs.needs_push_commit }}
+          TOKEN_CREATED: ${{ steps.push_app_token.outputs.token_created }}
+          APP_TOKEN_OUTCOME: ${{ steps.push_app_token.outcome }}
+          COMMIT_PUSH_OUTCOME: ${{ steps.push_commit.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ -s .codex-loop-stage-result.json ]]; then
+            exit 0
+          fi
+
+          push_result="codex-review-artifacts/push/push-result.json"
+          terminal_reason=""
+          next_stage=""
+          should_redispatch="false"
+          lgtm="false"
+          updated_head_sha=""
+
+          if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
+            terminal_reason="dry_run"
+          elif [[ "${NEEDS_PUSH_COMMIT}" != "true" ]]; then
+            terminal_reason="push_not_ready"
+          elif [[ "${APP_TOKEN_OUTCOME}" == "failure" || "${TOKEN_CREATED}" != "true" ]]; then
+            terminal_reason="missing_app_credentials"
+          elif [[ "${COMMIT_PUSH_OUTCOME}" == "failure" || ! -s "${push_result}" ]]; then
+            terminal_reason="push_failed"
+          else
+            pushed="$(jq -r 'if (.pushed | type) == "boolean" then .pushed else false end | tostring' "${push_result}")"
+            verified="$(jq -r 'if (.verified | type) == "boolean" then .verified else false end | tostring' "${push_result}")"
+            status="$(jq -r '.status // "push_failed"' "${push_result}")"
+            result_updated_head_sha="$(jq -r '.updated_head_sha // ""' "${push_result}")"
+            remote_head_sha="$(jq -r '.remote_head_sha // ""' "${push_result}")"
+            if [[ "${pushed}" == "true" && "${verified}" == "true" && -n "${result_updated_head_sha}" && "${remote_head_sha}" == "${result_updated_head_sha}" ]]; then
+              next_stage="review"
+              should_redispatch="true"
+              updated_head_sha="${result_updated_head_sha}"
+              cp "${push_result}" codex-review-artifacts/push-state-bundle/push-result.json
+            else
+              case "${status}" in
+                pushed_unverified) terminal_reason="pushed_unverified" ;;
+                push_failed) terminal_reason="push_failed" ;;
+                stale_head) terminal_reason="stale_head" ;;
+                no_fix|empty_patch|no_fix_changes|no_diff_repeat|no-diff-repeat) terminal_reason="no_fix_changes" ;;
+                validation_failed|tests_failed|semantic_safety_missing|semantic_safety_rejected|semantic_safety_hash_mismatch) terminal_reason="${status}" ;;
+                *) terminal_reason="push_failed" ;;
+              esac
+            fi
+          fi
+
+          jq -n \
+            --arg next_stage "${next_stage}" \
+            --arg terminal_reason "${terminal_reason}" \
+            --arg updated_head_sha "${updated_head_sha}" \
+            --argjson lgtm "${lgtm}" \
+            --argjson should_redispatch "${should_redispatch}" \
+            '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
+            > .codex-loop-stage-result.json
 
       - name: Run live Codex fix agents serially
         if: ${{ inputs.stage == 'fix' && steps.prepare_stage.outputs.needs_fix_agent_model == 'true' }}
