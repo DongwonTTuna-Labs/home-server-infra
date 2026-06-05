@@ -59,6 +59,9 @@ on:
         type: string
         required: false
     secrets:
+      CODEX_TRUSTED_CORE_READ_TOKEN:
+        description: Read-only token scoped to DongwonTTuna-Labs/home-server-infra contents for trusted core checkout only.
+        required: true
       CODEX_GITHUB_APP_ID:
         description: GitHub App id used only by non-dry-run write/finalize steps.
         required: false
@@ -340,12 +343,25 @@ jobs:
       terminal_reason: ${{ steps.relay.outputs.terminal_reason }}
       state_artifact_name: ${{ steps.state.outputs.state_artifact_name }}
     steps:
+      - name: Validate trusted core checkout token
+        shell: bash
+        env:
+          CODEX_TRUSTED_CORE_READ_TOKEN: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODEX_TRUSTED_CORE_READ_TOKEN}" ]]; then
+            echo "CODEX_TRUSTED_CORE_READ_TOKEN is required for private home-server-infra checkout" >&2
+            exit 1
+          fi
+
       - name: Checkout trusted Codex loop core
         uses: actions/checkout@v4
         with:
           repository: DongwonTTuna-Labs/home-server-infra
           ref: ${{ inputs.trusted_core_ref }}
+          token: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
           path: trusted-core
+          sparse-checkout: setup/codex-review
           persist-credentials: false
 
       - name: Checkout target base reference
@@ -478,12 +494,25 @@ jobs:
       updated_head_sha: ${{ steps.stage_outputs.outputs.updated_head_sha }}
       state_artifact_name: ${{ steps.stage_outputs.outputs.state_artifact_name }}
     steps:
+      - name: Validate trusted core checkout token
+        shell: bash
+        env:
+          CODEX_TRUSTED_CORE_READ_TOKEN: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODEX_TRUSTED_CORE_READ_TOKEN}" ]]; then
+            echo "CODEX_TRUSTED_CORE_READ_TOKEN is required for private home-server-infra checkout" >&2
+            exit 1
+          fi
+
       - name: Checkout trusted Codex loop core
         uses: actions/checkout@v4
         with:
           repository: DongwonTTuna-Labs/home-server-infra
           ref: ${{ inputs.trusted_core_ref }}
+          token: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
           path: trusted-core
+          sparse-checkout: setup/codex-review
           persist-credentials: false
 
       - name: Checkout PR head data
@@ -1711,13 +1740,27 @@ jobs:
             echo "dispatch_candidate=${dispatch_candidate}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Validate trusted core checkout token for live continuation
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        shell: bash
+        env:
+          CODEX_TRUSTED_CORE_READ_TOKEN: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODEX_TRUSTED_CORE_READ_TOKEN}" ]]; then
+            echo "CODEX_TRUSTED_CORE_READ_TOKEN is required for private home-server-infra checkout" >&2
+            exit 1
+          fi
+
       - name: Checkout trusted Codex loop core for live continuation
         if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
         uses: actions/checkout@v4
         with:
           repository: DongwonTTuna-Labs/home-server-infra
           ref: ${{ inputs.trusted_core_ref }}
+          token: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
           path: trusted-core
+          sparse-checkout: setup/codex-review
           persist-credentials: false
 
       - name: Install trusted codex-review helper for live continuation
