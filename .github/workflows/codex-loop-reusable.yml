@@ -369,6 +369,9 @@ jobs:
         env:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
+          TRUSTED: ${{ needs.trust-and-stale-guard.outputs.trusted }}
+          FORK: ${{ needs.trust-and-stale-guard.outputs.fork }}
+          STALE: ${{ needs.trust-and-stale-guard.outputs.stale }}
           CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
           CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
           CODEX_RESPONSES_ENDPOINT: https://relay-ai.dongwontuna.net/v1/responses
@@ -376,9 +379,9 @@ jobs:
           set -euo pipefail
 
           terminal_reason=""
-          if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
+          if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" || "${TRUSTED}" != "true" || "${FORK}" != "false" || "${STALE}" != "false" ]]; then
             relay_configured="false"
-            echo "live autofix disabled; skipping live codex-review oidc relay-token exchange"
+            echo "live autofix disabled or guard failed; skipping live codex-review oidc relay-token exchange"
           else
             relay_token="$(codex-review oidc relay-token               --audience "${CODEX_OIDC_AUDIENCE}"               --broker-url "${CODEX_OIDC_TOKEN_ENDPOINT}")"
             if [[ -z "${relay_token}" ]]; then
@@ -521,6 +524,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
           RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
+          AUTOFIX_MARKER_PRESENT: ${{ needs.trust-and-stale-guard.outputs.autofix_marker_present }}
         run: |
           set -euo pipefail
 
@@ -706,6 +710,18 @@ jobs:
                 exit 0
               fi
               cp codex-review-artifacts/prior-state/dispatch-ledger.json codex-review-artifacts/push-state-bundle/dispatch-ledger.json
+              if [[ "${AUTOFIX_MARKER_PRESENT}" == "true" ]]; then
+                jq -n \
+                  --arg next_stage "" \
+                  --arg terminal_reason "oscillation_detected" \
+                  --arg updated_head_sha "" \
+                  --argjson lgtm false \
+                  --argjson should_redispatch false \
+                  '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
+                  > .codex-loop-stage-result.json
+                echo "needs_push_commit=false" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
               cp codex-review-artifacts/prior-state/merged-fix.json codex-review-artifacts/push-state-bundle/merged-fix.json
               cp codex-review-artifacts/prior-state/validated-fix.json codex-review-artifacts/push-state-bundle/validated-fix.json
               cp codex-review-artifacts/prior-state/semantic-safety.json codex-review-artifacts/push-state-bundle/semantic-safety.json
@@ -750,7 +766,7 @@ jobs:
 
       - name: Mint relay token for live Codex action
         id: live_relay
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && needs.setup-relay.outputs.relay_configured == 'true' }}
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' }}
         shell: bash
         env:
           CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
@@ -768,7 +784,7 @@ jobs:
           echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
 
       - name: Run live Codex review findings
-        if: ${{ inputs.stage == 'review' && steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
+        if: ${{ inputs.stage == 'review' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -816,7 +832,7 @@ jobs:
           fi
 
       - name: Run live Codex review techlead
-        if: ${{ inputs.stage == 'review' && steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
+        if: ${{ inputs.stage == 'review' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -898,7 +914,7 @@ jobs:
           fi
 
       - name: Run live Codex design inventory
-        if: ${{ inputs.stage == 'design' && steps.prepare_stage.outputs.needs_design_inventory_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.prepare_stage.outputs.needs_design_inventory_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -940,7 +956,7 @@ jobs:
           fi
 
       - name: Run live Codex design clusters
-        if: ${{ inputs.stage == 'design' && steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -987,7 +1003,7 @@ jobs:
           fi
 
       - name: Run live Codex design plan
-        if: ${{ inputs.stage == 'design' && steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1031,7 +1047,7 @@ jobs:
           fi
 
       - name: Run live Codex design chief
-        if: ${{ inputs.stage == 'design' && steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1203,7 +1219,7 @@ jobs:
             > .codex-loop-stage-result.json
 
       - name: Run live Codex fix agents serially
-        if: ${{ inputs.stage == 'fix' && steps.prepare_stage.outputs.needs_fix_agent_model == 'true' }}
+        if: ${{ inputs.stage == 'fix' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.prepare_stage.outputs.needs_fix_agent_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1265,7 +1281,7 @@ jobs:
           fi
 
       - name: Run live Codex fix merge
-        if: ${{ inputs.stage == 'fix' && steps.fix_merge_prepare.outputs.needs_fix_merge_model == 'true' }}
+        if: ${{ inputs.stage == 'fix' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.fix_merge_prepare.outputs.needs_fix_merge_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1318,7 +1334,7 @@ jobs:
           fi
 
       - name: Run live Codex semantic safety
-        if: ${{ inputs.stage == 'fix' && steps.fix_semantic_prepare.outputs.needs_semantic_model == 'true' }}
+        if: ${{ inputs.stage == 'fix' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.fix_semantic_prepare.outputs.needs_semantic_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1439,6 +1455,7 @@ jobs:
             review) state_artifact_name="codex-loop-review-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" ;;
             design) state_artifact_name="codex-loop-design-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" ;;
             fix) state_artifact_name="codex-loop-fix-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" ;;
+            push) state_artifact_name="codex-loop-push-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}" ;;
             *) state_artifact_name="" ;;
           esac
 
@@ -1454,6 +1471,10 @@ jobs:
             fix)
               rm -rf codex-review-artifacts/stage-state
               cp -R codex-review-artifacts/fix-state-bundle codex-review-artifacts/stage-state
+              ;;
+            push)
+              rm -rf codex-review-artifacts/stage-state
+              cp -R codex-review-artifacts/push-state-bundle codex-review-artifacts/stage-state
               ;;
           esac
 
@@ -1499,17 +1520,18 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
     outputs:
-      next_stage: ${{ steps.finalize.outputs.next_stage }}
-      lgtm: ${{ steps.finalize.outputs.lgtm }}
-      should_redispatch: ${{ steps.finalize.outputs.should_redispatch }}
-      terminal_reason: ${{ steps.finalize.outputs.terminal_reason }}
-      state_run_id: ${{ steps.finalize.outputs.state_run_id }}
-      state_artifact_name: ${{ steps.finalize.outputs.state_artifact_name }}
-      updated_head_sha: ${{ steps.finalize.outputs.updated_head_sha }}
+      next_stage: ${{ steps.final_outputs.outputs.next_stage }}
+      lgtm: ${{ steps.final_outputs.outputs.lgtm }}
+      should_redispatch: ${{ steps.final_outputs.outputs.should_redispatch }}
+      terminal_reason: ${{ steps.final_outputs.outputs.terminal_reason }}
+      state_run_id: ${{ steps.final_outputs.outputs.state_run_id }}
+      state_artifact_name: ${{ steps.final_outputs.outputs.state_artifact_name }}
+      updated_head_sha: ${{ steps.final_outputs.outputs.updated_head_sha }}
     steps:
-      - name: Resolve final loop outputs
-        id: finalize
+      - name: Resolve final loop candidate
+        id: resolve
         shell: bash
         env:
           VALIDATE_RESULT: ${{ needs.validate.result }}
@@ -1517,6 +1539,9 @@ jobs:
           TRUST_RESULT: ${{ needs.trust-and-stale-guard.result }}
           TRUSTED: ${{ needs.trust-and-stale-guard.outputs.trusted }}
           TRUST_REASON: ${{ needs.trust-and-stale-guard.outputs.terminal_reason }}
+          FORK: ${{ needs.trust-and-stale-guard.outputs.fork }}
+          STALE: ${{ needs.trust-and-stale-guard.outputs.stale }}
+          AUTOFIX_MARKER_PRESENT: ${{ needs.trust-and-stale-guard.outputs.autofix_marker_present }}
           SETUP_RESULT: ${{ needs.setup-relay.result }}
           SETUP_REASON: ${{ needs.setup-relay.outputs.terminal_reason }}
           SETUP_STATE_ARTIFACT_NAME: ${{ needs.setup-relay.outputs.state_artifact_name }}
@@ -1527,8 +1552,18 @@ jobs:
           RUN_STAGE_REASON: ${{ needs.run-stage.outputs.terminal_reason }}
           RUN_STAGE_UPDATED_HEAD_SHA: ${{ needs.run-stage.outputs.updated_head_sha }}
           RUN_STAGE_STATE_ARTIFACT_NAME: ${{ needs.run-stage.outputs.state_artifact_name }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_ITERATION: ${{ inputs.iteration }}
+          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+          INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
+          INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           CURRENT_RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -1539,6 +1574,9 @@ jobs:
           state_run_id="${CURRENT_RUN_ID}"
           state_artifact_name="${RUN_STAGE_STATE_ARTIFACT_NAME:-${SETUP_STATE_ARTIFACT_NAME:-}}"
           updated_head_sha="${RUN_STAGE_UPDATED_HEAD_SHA:-}"
+          dispatch_candidate="false"
+          next_iteration="$(( INPUT_ITERATION + 1 ))"
+          next_head_sha="${INPUT_HEAD_SHA}"
 
           if [[ "${VALIDATE_RESULT}" != "success" ]]; then
             terminal_reason="${VALIDATE_REASON:-validation-failed}"
@@ -1547,7 +1585,7 @@ jobs:
             should_redispatch="false"
             state_artifact_name=""
             updated_head_sha=""
-          elif [[ "${TRUST_RESULT}" != "success" || "${TRUSTED}" != "true" ]]; then
+          elif [[ "${TRUST_RESULT}" != "success" || "${TRUSTED}" != "true" || "${FORK}" != "false" || "${STALE}" != "false" ]]; then
             terminal_reason="${TRUST_REASON:-trust-or-stale-guard-failed}"
             next_stage=""
             lgtm="false"
@@ -1568,15 +1606,221 @@ jobs:
             updated_head_sha=""
           fi
 
+          if [[ "${INPUT_STAGE}" == "push" && "${should_redispatch}" == "true" ]]; then
+            if [[ -z "${updated_head_sha}" ]]; then
+              terminal_reason="missing-updated-head-sha"
+              next_stage=""
+              should_redispatch="false"
+            else
+              next_head_sha="${updated_head_sha}"
+            fi
+          fi
+
+          if [[ "${should_redispatch}" == "true" && "${next_iteration}" -ge "${INPUT_MAX_ITERATIONS}" ]]; then
+            terminal_reason="max_iterations"
+            next_stage=""
+            should_redispatch="false"
+          fi
+
           if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
             should_redispatch="false"
             if [[ -z "${terminal_reason}" ]]; then
               terminal_reason="dry-run"
             fi
-          elif [[ "${should_redispatch}" == "true" ]]; then
+          elif [[ "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
+            should_redispatch="false"
+            if [[ -z "${terminal_reason}" ]]; then
+              terminal_reason="live-autofix-disabled"
+            fi
+          elif [[ "${AUTOFIX_MARKER_PRESENT}" == "true" && "${should_redispatch}" == "true" ]]; then
             next_stage=""
             should_redispatch="false"
-            terminal_reason="continuation-dispatch-not-implemented"
+            terminal_reason="oscillation_detected"
+          fi
+
+          if [[ "${should_redispatch}" == "true" ]]; then
+            case "${next_stage}" in
+              review|design|fix|push) ;;
+              *)
+                terminal_reason="invalid-next-stage"
+                next_stage=""
+                should_redispatch="false"
+                ;;
+            esac
+          fi
+
+          if [[ "${should_redispatch}" == "true" && -n "${state_artifact_name}" && "${INPUT_DRY_RUN}" == "false" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${TRUSTED}" == "true" && "${FORK}" == "false" && "${STALE}" == "false" ]]; then
+            dispatch_candidate="true"
+          fi
+
+          jq -n \
+            --arg repository "${REPOSITORY}" \
+            --arg pr_number "${INPUT_PR_NUMBER}" \
+            --arg head_sha "${next_head_sha}" \
+            --arg base_ref "${INPUT_BASE_REF}" \
+            --arg stage "${next_stage}" \
+            --arg iteration "${next_iteration}" \
+            --arg correlation_id "${INPUT_CORRELATION_ID}" \
+            --arg requested_by "${INPUT_REQUESTED_BY}" \
+            --arg max_iterations "${INPUT_MAX_ITERATIONS}" \
+            --arg dry_run "${INPUT_DRY_RUN}" \
+            --arg enable_live_autofix "${INPUT_ENABLE_LIVE_AUTOFIX}" \
+            --arg state_run_id "${state_run_id}" \
+            --arg state_artifact_name "${state_artifact_name}" \
+            --arg updated_head_sha "${updated_head_sha}" \
+            --arg status "emitted" \
+            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), dry_run:($dry_run == "true"), enable_live_autofix:($enable_live_autofix == "true"), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
+            > .codex-loop-dispatch-payload.json
+
+          jq -n --arg event_type "codex-loop-continuation" --slurpfile client_payload .codex-loop-dispatch-payload.json \
+            '{event_type:$event_type, client_payload:$client_payload[0]}' \
+            > .codex-loop-repository-dispatch.json
+
+          jq -n --arg repository "${REPOSITORY}" '{repository:$repository}' > .codex-loop-pr-context.json
+
+          {
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "state_run_id=${state_run_id}"
+            echo "state_artifact_name=${state_artifact_name}"
+            echo "updated_head_sha=${updated_head_sha}"
+            echo "dispatch_candidate=${dispatch_candidate}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Codex loop finalize candidate"
+            echo "stage=${INPUT_STAGE}"
+            echo "next_stage=${next_stage}"
+            echo "lgtm=${lgtm}"
+            echo "should_redispatch=${should_redispatch}"
+            echo "terminal_reason=${terminal_reason}"
+            echo "state_run_id=${state_run_id}"
+            echo "state_artifact_name=${state_artifact_name}"
+            echo "updated_head_sha=${updated_head_sha}"
+            echo "dispatch_candidate=${dispatch_candidate}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Checkout trusted Codex loop core for live continuation
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: ${{ github.workflow_sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Install trusted codex-review helper for live continuation
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+
+      - name: Download final loop state for live continuation
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.resolve.outputs.state_artifact_name }}
+          path: codex-review-artifacts/final-state
+
+      - name: Guard live continuation dispatch
+        id: guard_dispatch
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        shell: bash
+        env:
+          INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
+        run: |
+          set -euo pipefail
+          codex-review loop guard-dispatch \
+            --config trusted-core/setup/codex-review/config.yml \
+            --in .codex-loop-dispatch-payload.json \
+            --ledger codex-review-artifacts/final-state/dispatch-ledger.json \
+            --out .codex-loop-dispatch-guard.json
+          ok="$(jq -er '.ok | tostring' .codex-loop-dispatch-guard.json)"
+          terminal_reason="$(jq -r '.terminal_reason // ""' .codex-loop-dispatch-guard.json)"
+          echo "ok=${ok}" >> "${GITHUB_OUTPUT}"
+          echo "terminal_reason=${terminal_reason}" >> "${GITHUB_OUTPUT}"
+          if [[ "${ok}" != "true" ]]; then
+            exit 0
+          fi
+          codex-review loop append-dispatch-ledger \
+            --config trusted-core/setup/codex-review/config.yml \
+            --in .codex-loop-dispatch-payload.json \
+            --ledger codex-review-artifacts/final-state/dispatch-ledger.json \
+            --out codex-review-artifacts/final-state/dispatch-ledger.next.json
+          mv codex-review-artifacts/final-state/dispatch-ledger.next.json codex-review-artifacts/final-state/dispatch-ledger.json
+
+      - name: Upload guarded live continuation state
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.resolve.outputs.state_artifact_name }}
+          path: codex-review-artifacts/final-state
+          retention-days: 7
+          overwrite: true
+
+      - name: Mint GitHub App token for live continuation dispatch
+        id: continuation_app_token
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        shell: bash
+        env:
+          CODEX_REVIEW_GITHUB_APP_ID: ${{ secrets.CODEX_GITHUB_APP_ID }}
+          CODEX_REVIEW_GITHUB_APP_PRIVATE_KEY: ${{ secrets.CODEX_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          codex-review auth app-token \
+            --mode dispatch \
+            --pr-context .codex-loop-pr-context.json \
+            --out codex-review-artifacts/final-state/dispatch-app-token.json
+
+      - name: Dispatch live continuation repository_dispatch
+        id: dispatch_continuation
+        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && steps.continuation_app_token.outputs.token_created == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.continuation_app_token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${REPOSITORY}/dispatches" --input .codex-loop-repository-dispatch.json
+          echo "dispatched=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Emit final loop outputs
+        id: final_outputs
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RESOLVE_NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
+          RESOLVE_LGTM: ${{ steps.resolve.outputs.lgtm }}
+          RESOLVE_REDISPATCH: ${{ steps.resolve.outputs.should_redispatch }}
+          RESOLVE_TERMINAL_REASON: ${{ steps.resolve.outputs.terminal_reason }}
+          RESOLVE_STATE_RUN_ID: ${{ steps.resolve.outputs.state_run_id }}
+          RESOLVE_STATE_ARTIFACT_NAME: ${{ steps.resolve.outputs.state_artifact_name }}
+          RESOLVE_UPDATED_HEAD_SHA: ${{ steps.resolve.outputs.updated_head_sha }}
+          DISPATCH_CANDIDATE: ${{ steps.resolve.outputs.dispatch_candidate }}
+          GUARD_OK: ${{ steps.guard_dispatch.outputs.ok }}
+          GUARD_TERMINAL_REASON: ${{ steps.guard_dispatch.outputs.terminal_reason }}
+          DISPATCHED: ${{ steps.dispatch_continuation.outputs.dispatched }}
+        run: |
+          set -euo pipefail
+          next_stage="${RESOLVE_NEXT_STAGE:-}"
+          lgtm="${RESOLVE_LGTM:-false}"
+          should_redispatch="${RESOLVE_REDISPATCH:-false}"
+          terminal_reason="${RESOLVE_TERMINAL_REASON:-}"
+          state_run_id="${RESOLVE_STATE_RUN_ID:-}"
+          state_artifact_name="${RESOLVE_STATE_ARTIFACT_NAME:-}"
+          updated_head_sha="${RESOLVE_UPDATED_HEAD_SHA:-}"
+
+          if [[ "${DISPATCH_CANDIDATE}" == "true" && "${GUARD_OK}" != "true" ]]; then
+            next_stage=""
+            should_redispatch="false"
+            terminal_reason="${GUARD_TERMINAL_REASON:-dispatch-guard-failed}"
+          elif [[ "${DISPATCH_CANDIDATE}" == "true" && "${DISPATCHED}" != "true" ]]; then
+            next_stage=""
+            should_redispatch="false"
+            terminal_reason="dispatch-not-emitted"
           fi
 
           {
