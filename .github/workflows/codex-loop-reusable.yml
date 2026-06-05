@@ -15,6 +15,10 @@ on:
         description: Expected pull request base ref.
         type: string
         required: true
+      trusted_core_ref:
+        description: Immutable home-server-infra commit SHA for trusted helper checkout.
+        type: string
+        required: true
       stage:
         description: Loop stage; must be review, design, fix, or push.
         type: string
@@ -113,6 +117,7 @@ jobs:
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_HEAD_SHA: ${{ inputs.head_sha }}
           INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_TRUSTED_CORE_REF: ${{ inputs.trusted_core_ref }}
           INPUT_STAGE: ${{ inputs.stage }}
           INPUT_ITERATION: ${{ inputs.iteration }}
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
@@ -140,6 +145,7 @@ jobs:
           require_non_empty pr_number "${INPUT_PR_NUMBER}"
           require_non_empty head_sha "${INPUT_HEAD_SHA}"
           require_non_empty base_ref "${INPUT_BASE_REF}"
+          require_non_empty trusted_core_ref "${INPUT_TRUSTED_CORE_REF}"
           require_non_empty stage "${INPUT_STAGE}"
           require_non_empty iteration "${INPUT_ITERATION}"
           require_non_empty correlation_id "${INPUT_CORRELATION_ID}"
@@ -184,6 +190,7 @@ jobs:
           {
             echo "valid=${valid}"
             echo "terminal_reason=${terminal_reason}"
+            echo "trusted_core_ref=${INPUT_TRUSTED_CORE_REF}"
             echo "stage=${INPUT_STAGE}"
             echo "iteration=${INPUT_ITERATION}"
             echo "max_iterations=${INPUT_MAX_ITERATIONS}"
@@ -337,7 +344,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: DongwonTTuna-Labs/home-server-infra
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.trusted_core_ref }}
           path: trusted-core
           persist-credentials: false
 
@@ -475,7 +482,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: DongwonTTuna-Labs/home-server-infra
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.trusted_core_ref }}
           path: trusted-core
           persist-credentials: false
 
@@ -1555,6 +1562,7 @@ jobs:
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_HEAD_SHA: ${{ inputs.head_sha }}
           INPUT_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_TRUSTED_CORE_REF: ${{ inputs.trusted_core_ref }}
           INPUT_STAGE: ${{ inputs.stage }}
           INPUT_ITERATION: ${{ inputs.iteration }}
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
@@ -1658,6 +1666,7 @@ jobs:
             --arg pr_number "${INPUT_PR_NUMBER}" \
             --arg head_sha "${next_head_sha}" \
             --arg base_ref "${INPUT_BASE_REF}" \
+            --arg trusted_core_ref "${INPUT_TRUSTED_CORE_REF}" \
             --arg stage "${next_stage}" \
             --arg iteration "${next_iteration}" \
             --arg correlation_id "${INPUT_CORRELATION_ID}" \
@@ -1669,7 +1678,7 @@ jobs:
             --arg state_artifact_name "${state_artifact_name}" \
             --arg updated_head_sha "${updated_head_sha}" \
             --arg status "emitted" \
-            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), dry_run:($dry_run == "true"), enable_live_autofix:($enable_live_autofix == "true"), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
+            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, trusted_core_ref:$trusted_core_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), dry_run:($dry_run == "true"), enable_live_autofix:($enable_live_autofix == "true"), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
             > .codex-loop-dispatch-payload.json
 
           jq -n --arg event_type "codex-loop-continuation" --slurpfile client_payload .codex-loop-dispatch-payload.json \
@@ -1707,7 +1716,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: DongwonTTuna-Labs/home-server-infra
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.trusted_core_ref }}
           path: trusted-core
           persist-credentials: false
 
