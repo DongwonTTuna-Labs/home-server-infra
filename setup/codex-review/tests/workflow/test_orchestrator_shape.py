@@ -446,7 +446,11 @@ def test_workflow_never_executes_helper_from_pr_head_or_stale_trusted_tree():
     text = all_text()
     assert "pr-head/setup/codex-review" not in text
     assert "trusted/setup/codex-review" not in text
-    assert "trusted-core/setup/codex-review" in text
+    # The helper is installed from the SHA-pinned setup-codex-review action
+    # source, never pip-installed from a runtime-checked-out home-server-infra
+    # tree (which previously required a read token).
+    assert "trusted-core/setup/codex-review" not in text
+    assert "uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@" in text
 
 
 def test_fork_pr_is_blocked_in_trust_guard():
