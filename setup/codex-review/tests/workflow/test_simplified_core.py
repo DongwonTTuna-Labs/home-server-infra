@@ -58,6 +58,9 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
                 w = step.get("with") or {}
                 assert w.get("openai-api-key") == "${{ steps.relay_key.outputs.key }}"
                 assert w.get("responses-api-endpoint") == RELAY_ENDPOINT
+                # Container is the isolation boundary; the action's sudo-drop
+                # sandbox needs passwordless sudo the runner doesn't grant.
+                assert w.get("safety-strategy") == "unsafe"
     assert seen >= 9, f"expected >=9 model steps, saw {seen}"
 
 
