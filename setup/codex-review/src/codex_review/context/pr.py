@@ -85,10 +85,17 @@ def build_pr_context(event: dict[str, Any], pr: dict[str, Any], files: list[dict
 
 
 def include_repository_metadata(context: dict[str, Any]) -> dict[str, Any]:
+    # build_pr_context always seeds "owner" (often None when there is no GitHub
+    # event payload, e.g. the repository_dispatch loop), so setdefault would not
+    # backfill it. Fill owner/repo from the repository slug whenever they are
+    # falsy, not just missing.
     repo=context.get("repository") or context.get("base_repo_full_name")
     if repo and "/" in repo:
-        context.setdefault("owner", repo.split("/",1)[0])
-        context.setdefault("repo", repo.split("/",1)[1])
+        owner_part, repo_part = repo.split("/",1)
+        if not context.get("owner"):
+            context["owner"] = owner_part
+        if not context.get("repo"):
+            context["repo"] = repo_part
     return context
 
 
