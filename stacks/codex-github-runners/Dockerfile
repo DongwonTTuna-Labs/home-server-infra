@@ -85,8 +85,15 @@ RUN printf '%s\n' 'runner ALL=(root) NOPASSWD: /usr/bin/chmod, /usr/bin/chown' >
 
 WORKDIR ${RUNNER_HOME}
 
-RUN curl -fsSL -o actions-runner.tar.gz \
-        "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+      amd64) runner_arch="x64" ;; \
+      arm64) runner_arch="arm64" ;; \
+      *) echo "unsupported arch: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o actions-runner.tar.gz \
+        "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${runner_arch}-${RUNNER_VERSION}.tar.gz" \
     && tar -xzf actions-runner.tar.gz \
     && rm actions-runner.tar.gz \
     && ./bin/installdependencies.sh
