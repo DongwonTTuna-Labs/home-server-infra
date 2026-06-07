@@ -53,6 +53,7 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
     seen = 0
     structured = 0
     fix_agents_seen = False
+    homes = []
     for job in _doc()["jobs"].values():
         for step in job.get("steps", []) or []:
             if step.get("uses") == MODEL_ACTION:
@@ -67,6 +68,11 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
                 # use bubblewrap — run commands directly (full access).
                 assert w.get("sandbox") == "danger-full-access", step.get("name")
                 assert w.get("working-directory") == "pr-head", step.get("name")
+                # Fresh per-step Codex home (persistent runner would otherwise
+                # accumulate duplicate keys in ~/.codex/config.toml).
+                ch = w.get("codex-home", "")
+                assert ch.startswith("${{ runner.temp }}/codex-home/"), step.get("name")
+                homes.append(ch)
                 name = step.get("name", "")
                 if not name.startswith("Run live Codex"):
                     continue
@@ -83,7 +89,9 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
                     structured += 1
     assert seen >= 9, f"expected >=9 model steps, saw {seen}"
     assert structured >= 8, f"expected >=8 structured-output steps, saw {structured}"
-    assert fix_agents_seen, "fix agents step with workspace-write sandbox not found"
+    assert fix_agents_seen, "fix agents step not found"
+    # Per-step codex-home must be unique so invocations never share config.toml.
+    assert len(homes) == len(set(homes)) == seen, homes
     # Each structured step emits its OpenAI strict schema before running.
     assert text.count("schema openai-strict") >= 8
 
