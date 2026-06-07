@@ -103,6 +103,22 @@ def test_push_and_dispatch_use_the_pat_from_runner_env():
     assert 'export GH_TOKEN="${CODEX_LOOP_PAT}"' in text
 
 
+def test_cross_run_artifact_downloads_pass_github_token():
+    # download-artifact@v4 does NOT default github-token for cross-run
+    # downloads (run-id set): without it the action only searches the current
+    # run and the prior-stage state artifact is "not found". The token is the
+    # job's own GITHUB_TOKEN, which has actions: read for same-repo runs.
+    cross_run = []
+    for job in _doc()["jobs"].values():
+        for step in job.get("steps", []) or []:
+            w = step.get("with") or {}
+            if str(step.get("uses", "")).startswith("actions/download-artifact") and "run-id" in w:
+                cross_run.append((step.get("name", ""), w))
+    assert cross_run, "expected at least one cross-run artifact download"
+    for name, w in cross_run:
+        assert w.get("github-token") == "${{ github.token }}", name
+
+
 def test_continuation_dispatch_gates_only_on_dispatch_candidate():
     dispatch_ifs = [
         step.get("if", "")

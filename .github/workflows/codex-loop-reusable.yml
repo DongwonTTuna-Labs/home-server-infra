@@ -217,6 +217,7 @@ jobs:
         with:
           name: ${{ inputs.state_artifact_name }}
           run-id: ${{ inputs.state_run_id }}
+          github-token: ${{ github.token }}
           path: codex-review-artifacts/prior-state
 
       - name: Read or bootstrap loop state artifact
@@ -289,6 +290,7 @@ jobs:
         with:
           name: ${{ inputs.state_artifact_name }}
           run-id: ${{ inputs.state_run_id }}
+          github-token: ${{ github.token }}
           path: codex-review-artifacts/prior-state
 
       - name: Prepare active stage helper inputs
