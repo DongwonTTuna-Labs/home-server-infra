@@ -36,16 +36,6 @@ on:
         type: number
         required: false
         default: 5
-      dry_run:
-        description: Keep write/finalize behavior deterministic without live secrets.
-        type: boolean
-        required: false
-        default: true
-      enable_live_autofix:
-        description: Explicitly allow live model calls, writes, pushes, and continuation dispatch when dry_run is false.
-        type: boolean
-        required: false
-        default: false
       state_run_id:
         description: Exact upstream workflow run id that owns the prior loop-state artifact.
         type: string
@@ -118,8 +108,6 @@ jobs:
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
           INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
           INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           INPUT_STATE_RUN_ID: ${{ inputs.state_run_id }}
           INPUT_STATE_ARTIFACT_NAME: ${{ inputs.state_artifact_name }}
         run: |
@@ -195,8 +183,6 @@ jobs:
             echo "stage=${INPUT_STAGE}"
             echo "iteration=${INPUT_ITERATION}"
             echo "max_iterations=${INPUT_MAX_ITERATIONS}"
-            echo "dry_run=${INPUT_DRY_RUN}"
-            echo "enable_live_autofix=${INPUT_ENABLE_LIVE_AUTOFIX}"
             echo "state_run_id=${INPUT_STATE_RUN_ID}"
             echo "state_artifact_name=${INPUT_STATE_ARTIFACT_NAME}"
             echo "valid=${valid}"
@@ -223,6 +209,10 @@ jobs:
       trusted: ${{ steps.guard.outputs.trusted }}
       fork: ${{ steps.guard.outputs.fork }}
       stale: ${{ steps.guard.outputs.stale }}
+      # Single source of truth for "this PR may receive live work": trusted author,
+      # not a fork, not stale. Every live gate references this instead of
+      # re-spelling the three terms.
+      eligible: ${{ steps.guard.outputs.eligible }}
       closed: ${{ steps.guard.outputs.closed }}
       autofix_marker_present: ${{ steps.guard.outputs.autofix_marker_present }}
       terminal_reason: ${{ steps.guard.outputs.terminal_reason }}
@@ -290,10 +280,16 @@ jobs:
             terminal_reason="untrusted-requester"
           fi
 
+          eligible="false"
+          if [[ "${trusted}" == "true" && "${fork}" == "false" && "${stale}" == "false" ]]; then
+            eligible="true"
+          fi
+
           {
             echo "trusted=${trusted}"
             echo "fork=${fork}"
             echo "stale=${stale}"
+            echo "eligible=${eligible}"
             echo "closed=${closed}"
             echo "autofix_marker_present=${autofix_marker_present}"
             echo "terminal_reason=${terminal_reason}"
@@ -329,6 +325,10 @@ jobs:
       id-token: write
     outputs:
       relay_configured: ${{ steps.relay.outputs.relay_configured }}
+      # Single source of truth for "run live model work now": validated payload,
+      # eligible PR (trusted/non-fork/non-stale), and a configured relay. Every
+      # model step gates on this one output.
+      live_ready: ${{ steps.relay.outputs.live_ready }}
       responses_endpoint: ${{ steps.relay.outputs.responses_endpoint }}
       terminal_reason: ${{ steps.relay.outputs.terminal_reason }}
       state_artifact_name: ${{ steps.state.outputs.state_artifact_name }}
@@ -357,11 +357,8 @@ jobs:
         id: relay
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
-          TRUSTED: ${{ needs.trust-and-stale-guard.outputs.trusted }}
-          FORK: ${{ needs.trust-and-stale-guard.outputs.fork }}
-          STALE: ${{ needs.trust-and-stale-guard.outputs.stale }}
+          VALID: ${{ needs.validate.outputs.valid }}
+          ELIGIBLE: ${{ needs.trust-and-stale-guard.outputs.eligible }}
           CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
           CODEX_OIDC_TOKEN_ENDPOINT: https://relay-ai.dongwontuna.net/v1/oidc/token
           CODEX_RESPONSES_ENDPOINT: https://relay-ai.dongwontuna.net/v1/responses
@@ -369,9 +366,9 @@ jobs:
           set -euo pipefail
 
           terminal_reason=""
-          if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" || "${TRUSTED}" != "true" || "${FORK}" != "false" || "${STALE}" != "false" ]]; then
+          if [[ "${ELIGIBLE}" != "true" ]]; then
             relay_configured="false"
-            echo "live autofix disabled or guard failed; skipping live codex-review oidc relay-token exchange"
+            echo "PR not eligible (untrusted/fork/stale); skipping live codex-review oidc relay-token exchange"
           else
             relay_token="$(codex-review oidc relay-token               --audience "${CODEX_OIDC_AUDIENCE}"               --broker-url "${CODEX_OIDC_TOKEN_ENDPOINT}")"
             if [[ -z "${relay_token}" ]]; then
@@ -383,8 +380,14 @@ jobs:
             fi
           fi
 
+          live_ready="false"
+          if [[ "${VALID}" == "true" && "${ELIGIBLE}" == "true" && "${relay_configured}" == "true" ]]; then
+            live_ready="true"
+          fi
+
           {
             echo "relay_configured=${relay_configured}"
+            echo "live_ready=${live_ready}"
             echo "responses_endpoint=${CODEX_RESPONSES_ENDPOINT}"
             echo "terminal_reason=${terminal_reason}"
           } >> "${GITHUB_OUTPUT}"
@@ -493,8 +496,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_STAGE: ${{ inputs.stage }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           INPUT_HEAD_SHA: ${{ inputs.head_sha }}
           INPUT_BASE_REF: ${{ inputs.base_ref }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
@@ -509,12 +510,11 @@ jobs:
           set -euo pipefail
 
           mkdir -p codex-review-artifacts/common codex-review-artifacts/stage-state
+          # Always-live: run live model work whenever the relay is configured
+          # (eligible PR + secrets present). Otherwise fall back to deterministic
+          # context so the loop terminates cleanly instead of hard-failing.
           live_enabled="false"
-          if [[ "${INPUT_DRY_RUN}" != "true" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" ]]; then
-            if [[ "${RELAY_CONFIGURED}" != "true" ]]; then
-              echo "live-stage-relay-not-configured" >> "${GITHUB_STEP_SUMMARY}"
-              exit 1
-            fi
+          if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
             live_enabled="true"
           fi
 
@@ -527,11 +527,11 @@ jobs:
             '{repository:$repository, pr_number:$pr_number, head_sha:$head_sha, current_head_sha:$current_head_sha, base_ref:$base_ref}' \
             > codex-review-artifacts/common/pr-seed.json
 
-          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+          if [[ "${live_enabled}" != "true" ]]; then
             cp codex-review-artifacts/common/pr-seed.json codex-review-artifacts/common/pr-context.json
             jq -n '{schema_version:"changed-lines.v1", changed_line_map:{}}' > codex-review-artifacts/common/changed-lines.json
             printf '' > codex-review-artifacts/common/docs-context.md
-            jq -n '{present:false, decision:"dry_run", source_summary:[]}' > codex-review-artifacts/common/openspec-context.json
+            jq -n '{present:false, decision:"skipped", source_summary:[]}' > codex-review-artifacts/common/openspec-context.json
           else
             codex-review context pr \
               --pr-context codex-review-artifacts/common/pr-seed.json \
@@ -705,10 +705,12 @@ jobs:
               cp codex-review-artifacts/prior-state/merged-fix.json codex-review-artifacts/push-state-bundle/merged-fix.json
               cp codex-review-artifacts/prior-state/validated-fix.json codex-review-artifacts/push-state-bundle/validated-fix.json
               cp codex-review-artifacts/prior-state/semantic-safety.json codex-review-artifacts/push-state-bundle/semantic-safety.json
-              if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
+              validation_ready="$(jq -er '(.validated == true and (.loop_budget_ok // true) == true) | tostring' codex-review-artifacts/prior-state/validated-fix.json)"
+              if [[ "${validation_ready}" != "true" ]]; then
+                validation_status="$(jq -r '.status // "validation_failed"' codex-review-artifacts/prior-state/validated-fix.json)"
                 jq -n \
                   --arg next_stage "" \
-                  --arg terminal_reason "dry_run" \
+                  --arg terminal_reason "${validation_status}" \
                   --arg updated_head_sha "" \
                   --argjson lgtm false \
                   --argjson should_redispatch false \
@@ -716,21 +718,7 @@ jobs:
                   > .codex-loop-stage-result.json
                 echo "needs_push_commit=false" >> "${GITHUB_OUTPUT}"
               else
-                validation_ready="$(jq -er '(.validated == true and (.loop_budget_ok // true) == true) | tostring' codex-review-artifacts/prior-state/validated-fix.json)"
-                if [[ "${validation_ready}" != "true" ]]; then
-                  validation_status="$(jq -r '.status // "validation_failed"' codex-review-artifacts/prior-state/validated-fix.json)"
-                  jq -n \
-                    --arg next_stage "" \
-                    --arg terminal_reason "${validation_status}" \
-                    --arg updated_head_sha "" \
-                    --argjson lgtm false \
-                    --argjson should_redispatch false \
-                    '{next_stage:$next_stage, lgtm:$lgtm, should_redispatch:$should_redispatch, terminal_reason:$terminal_reason, updated_head_sha:$updated_head_sha}' \
-                    > .codex-loop-stage-result.json
-                  echo "needs_push_commit=false" >> "${GITHUB_OUTPUT}"
-                else
-                  echo "needs_push_commit=true" >> "${GITHUB_OUTPUT}"
-                fi
+                echo "needs_push_commit=true" >> "${GITHUB_OUTPUT}"
               fi
               ;;
           esac
@@ -738,15 +726,13 @@ jobs:
           {
             echo "## Codex loop stage prepare"
             echo "stage=${INPUT_STAGE}"
-            echo "dry_run=${INPUT_DRY_RUN}"
-            echo "enable_live_autofix=${INPUT_ENABLE_LIVE_AUTOFIX}"
             echo "responses_endpoint=${RESPONSES_ENDPOINT}"
             echo "relay_configured=${RELAY_CONFIGURED}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Mint relay token for live Codex action
         id: live_relay
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' }}
+        if: ${{ needs.setup-relay.outputs.live_ready == 'true' }}
         shell: bash
         env:
           CODEX_OIDC_AUDIENCE: https://relay-ai.dongwontuna.net/github-actions
@@ -764,7 +750,7 @@ jobs:
           echo "relay_token=${relay_token}" >> "${GITHUB_OUTPUT}"
 
       - name: Run live Codex review findings
-        if: ${{ inputs.stage == 'review' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
+        if: ${{ inputs.stage == 'review' && needs.setup-relay.outputs.live_ready == 'true' && steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -779,8 +765,6 @@ jobs:
         if: ${{ inputs.stage == 'review' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
@@ -801,7 +785,7 @@ jobs:
               --pr-context codex-review-artifacts/common/pr-context.json \
               --docs-context codex-review-artifacts/common/docs-context.md \
               --out codex-review-artifacts/review/techlead.prompt.md
-            if [[ "${INPUT_DRY_RUN}" != "true" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
+            if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_review_techlead_model=true" >> "${GITHUB_OUTPUT}"
             else
               codex-review techlead default-result \
@@ -812,7 +796,7 @@ jobs:
           fi
 
       - name: Run live Codex review techlead
-        if: ${{ inputs.stage == 'review' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
+        if: ${{ inputs.stage == 'review' && needs.setup-relay.outputs.live_ready == 'true' && steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -894,7 +878,7 @@ jobs:
           fi
 
       - name: Run live Codex design inventory
-        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.prepare_stage.outputs.needs_design_inventory_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && needs.setup-relay.outputs.live_ready == 'true' && steps.prepare_stage.outputs.needs_design_inventory_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -909,8 +893,6 @@ jobs:
         if: ${{ inputs.stage == 'design' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
@@ -925,7 +907,7 @@ jobs:
               --inventory codex-review-artifacts/design/design-inventory.json \
               --pr-context codex-review-artifacts/design/design-context.json \
               --out codex-review-artifacts/design/design-clusters.prompt.md
-            if [[ "${INPUT_DRY_RUN}" != "true" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
+            if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_design_clusters_model=true" >> "${GITHUB_OUTPUT}"
             else
               codex-review design default-clusters \
@@ -936,7 +918,7 @@ jobs:
           fi
 
       - name: Run live Codex design clusters
-        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && needs.setup-relay.outputs.live_ready == 'true' && steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -951,8 +933,6 @@ jobs:
         if: ${{ inputs.stage == 'design' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
@@ -971,7 +951,7 @@ jobs:
               --inventory codex-review-artifacts/design/design-inventory.json \
               --result codex-review-artifacts/design/design-analyses.json \
               --out codex-review-artifacts/design/design-plan.prompt.md
-            if [[ "${INPUT_DRY_RUN}" != "true" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
+            if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_design_plan_model=true" >> "${GITHUB_OUTPUT}"
             else
               codex-review design default-plan \
@@ -983,7 +963,7 @@ jobs:
           fi
 
       - name: Run live Codex design plan
-        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && needs.setup-relay.outputs.live_ready == 'true' && steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -998,8 +978,6 @@ jobs:
         if: ${{ inputs.stage == 'design' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
@@ -1016,7 +994,7 @@ jobs:
               --inventory codex-review-artifacts/design/design-inventory.json \
               --pr-context codex-review-artifacts/design/design-context.json \
               --out codex-review-artifacts/design-state-bundle/chief.prompt.md
-            if [[ "${INPUT_DRY_RUN}" != "true" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
+            if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_design_chief_model=true" >> "${GITHUB_OUTPUT}"
             else
               codex-review design_chief default-result \
@@ -1027,7 +1005,7 @@ jobs:
           fi
 
       - name: Run live Codex design chief
-        if: ${{ inputs.stage == 'design' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
+        if: ${{ inputs.stage == 'design' && needs.setup-relay.outputs.live_ready == 'true' && steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1102,7 +1080,7 @@ jobs:
 
       - name: Mint GitHub App installation token for push
         id: push_app_token
-        if: ${{ inputs.stage == 'push' && inputs.dry_run == false && inputs.enable_live_autofix == true && steps.prepare_stage.outputs.needs_push_commit == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.result == 'success' }}
+        if: ${{ inputs.stage == 'push' && steps.prepare_stage.outputs.needs_push_commit == 'true' && needs.trust-and-stale-guard.outputs.eligible == 'true' && needs.setup-relay.result == 'success' }}
         continue-on-error: true
         shell: bash
         env:
@@ -1117,7 +1095,7 @@ jobs:
 
       - name: Commit and push validated fix
         id: push_commit
-        if: ${{ inputs.stage == 'push' && inputs.dry_run == false && inputs.enable_live_autofix == true && steps.prepare_stage.outputs.needs_push_commit == 'true' && steps.push_app_token.outputs.token_created == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.result == 'success' }}
+        if: ${{ inputs.stage == 'push' && steps.prepare_stage.outputs.needs_push_commit == 'true' && steps.push_app_token.outputs.token_created == 'true' && needs.trust-and-stale-guard.outputs.eligible == 'true' && needs.setup-relay.result == 'success' }}
         continue-on-error: true
         shell: bash
         env:
@@ -1139,8 +1117,6 @@ jobs:
         env:
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
           INPUT_ITERATION: ${{ inputs.iteration }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           NEEDS_PUSH_COMMIT: ${{ steps.prepare_stage.outputs.needs_push_commit }}
           TOKEN_CREATED: ${{ steps.push_app_token.outputs.token_created }}
           APP_TOKEN_OUTCOME: ${{ steps.push_app_token.outcome }}
@@ -1158,9 +1134,7 @@ jobs:
           lgtm="false"
           updated_head_sha=""
 
-          if [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
-            terminal_reason="dry_run"
-          elif [[ "${NEEDS_PUSH_COMMIT}" != "true" ]]; then
+          if [[ "${NEEDS_PUSH_COMMIT}" != "true" ]]; then
             terminal_reason="push_not_ready"
           elif [[ "${APP_TOKEN_OUTCOME}" == "failure" || "${TOKEN_CREATED}" != "true" ]]; then
             terminal_reason="missing_app_credentials"
@@ -1199,7 +1173,7 @@ jobs:
             > .codex-loop-stage-result.json
 
       - name: Run live Codex fix agents serially
-        if: ${{ inputs.stage == 'fix' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.prepare_stage.outputs.needs_fix_agent_model == 'true' }}
+        if: ${{ inputs.stage == 'fix' && needs.setup-relay.outputs.live_ready == 'true' && steps.prepare_stage.outputs.needs_fix_agent_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1214,8 +1188,6 @@ jobs:
         if: ${{ inputs.stage == 'fix' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
@@ -1248,7 +1220,7 @@ jobs:
               --raw-out codex-review-artifacts/fix_merge/merged-fix.raw.json \
               --out codex-review-artifacts/fix_merge/merge-route.json
             needs_merge_model="$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)"
-            if [[ "${needs_merge_model}" == "true" && "${INPUT_DRY_RUN}" != "true" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
+            if [[ "${needs_merge_model}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_fix_merge_model=true" >> "${GITHUB_OUTPUT}"
             else
               echo "needs_fix_merge_model=false" >> "${GITHUB_OUTPUT}"
@@ -1261,7 +1233,7 @@ jobs:
           fi
 
       - name: Run live Codex fix merge
-        if: ${{ inputs.stage == 'fix' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.fix_merge_prepare.outputs.needs_fix_merge_model == 'true' }}
+        if: ${{ inputs.stage == 'fix' && needs.setup-relay.outputs.live_ready == 'true' && steps.fix_merge_prepare.outputs.needs_fix_merge_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1277,8 +1249,6 @@ jobs:
         if: ${{ inputs.stage == 'fix' }}
         shell: bash
         env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
         run: |
           set -euo pipefail
@@ -1304,7 +1274,7 @@ jobs:
               jq -n --arg patch_hash "${patch_hash}" \
                 '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"not_required", approved:false, patch_hash:$patch_hash, summary:"No ready patch requires semantic push approval.", blocking_reason:null, reviewed_criteria:[], semantic_findings:[], commit_plan:[]}' \
                 > codex-review-artifacts/fix_merge/semantic-safety.raw.json
-            elif [[ "${INPUT_DRY_RUN}" == "true" || "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" || "${RELAY_CONFIGURED}" != "true" ]]; then
+            elif [[ "${RELAY_CONFIGURED}" != "true" ]]; then
               needs_semantic_model="false"
               jq -n --arg patch_hash "${patch_hash}" \
                 '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"rejected", approved:false, patch_hash:$patch_hash, summary:"Semantic safety model is skipped without live autofix.", blocking_reason:"live autofix is disabled", reviewed_criteria:["exact patch hash computed", "push withheld"], semantic_findings:[], commit_plan:[]}' \
@@ -1314,7 +1284,7 @@ jobs:
           fi
 
       - name: Run live Codex semantic safety
-        if: ${{ inputs.stage == 'fix' && inputs.dry_run == false && inputs.enable_live_autofix == true && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' && needs.setup-relay.outputs.relay_configured == 'true' && steps.fix_semantic_prepare.outputs.needs_semantic_model == 'true' }}
+        if: ${{ inputs.stage == 'fix' && needs.setup-relay.outputs.live_ready == 'true' && steps.fix_semantic_prepare.outputs.needs_semantic_model == 'true' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ steps.live_relay.outputs.relay_token }}
@@ -1327,8 +1297,6 @@ jobs:
       - name: Complete fix stage state
         if: ${{ inputs.stage == 'fix' }}
         shell: bash
-        env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           if [[ ! -s .codex-loop-stage-result.json ]]; then
@@ -1369,8 +1337,6 @@ jobs:
                   terminal_reason="no_fix_needed" ;;
                 no_diff_repeat|no-diff-repeat|oscillation_detected|max_rounds_reached)
                   terminal_reason="no_fix_changes" ;;
-                dry_run)
-                  terminal_reason="dry_run" ;;
                 *)
                   terminal_reason="model_output_invalid" ;;
               esac
@@ -1390,10 +1356,8 @@ jobs:
         shell: bash
         env:
           INPUT_STAGE: ${{ inputs.stage }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
           INPUT_ITERATION: ${{ inputs.iteration }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           RELAY_CONFIGURED: ${{ needs.setup-relay.outputs.relay_configured }}
           RESPONSES_ENDPOINT: ${{ needs.setup-relay.outputs.responses_endpoint }}
         run: |
@@ -1470,8 +1434,6 @@ jobs:
           {
             echo "## Codex loop stage"
             echo "stage=${INPUT_STAGE}"
-            echo "dry_run=${INPUT_DRY_RUN}"
-            echo "enable_live_autofix=${INPUT_ENABLE_LIVE_AUTOFIX}"
             echo "responses_endpoint=${RESPONSES_ENDPOINT}"
             echo "relay_configured=${RELAY_CONFIGURED}"
             echo "next_stage=${next_stage}"
@@ -1521,6 +1483,7 @@ jobs:
           TRUST_REASON: ${{ needs.trust-and-stale-guard.outputs.terminal_reason }}
           FORK: ${{ needs.trust-and-stale-guard.outputs.fork }}
           STALE: ${{ needs.trust-and-stale-guard.outputs.stale }}
+          ELIGIBLE: ${{ needs.trust-and-stale-guard.outputs.eligible }}
           AUTOFIX_MARKER_PRESENT: ${{ needs.trust-and-stale-guard.outputs.autofix_marker_present }}
           SETUP_RESULT: ${{ needs.setup-relay.result }}
           SETUP_REASON: ${{ needs.setup-relay.outputs.terminal_reason }}
@@ -1540,8 +1503,6 @@ jobs:
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
           INPUT_REQUESTED_BY: ${{ inputs.requested_by }}
           INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          INPUT_ENABLE_LIVE_AUTOFIX: ${{ inputs.enable_live_autofix }}
           CURRENT_RUN_ID: ${{ github.run_id }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -1602,17 +1563,7 @@ jobs:
             should_redispatch="false"
           fi
 
-          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
-            should_redispatch="false"
-            if [[ -z "${terminal_reason}" ]]; then
-              terminal_reason="dry-run"
-            fi
-          elif [[ "${INPUT_ENABLE_LIVE_AUTOFIX}" != "true" ]]; then
-            should_redispatch="false"
-            if [[ -z "${terminal_reason}" ]]; then
-              terminal_reason="live-autofix-disabled"
-            fi
-          elif [[ "${AUTOFIX_MARKER_PRESENT}" == "true" && "${should_redispatch}" == "true" ]]; then
+          if [[ "${AUTOFIX_MARKER_PRESENT}" == "true" && "${should_redispatch}" == "true" ]]; then
             next_stage=""
             should_redispatch="false"
             terminal_reason="oscillation_detected"
@@ -1629,7 +1580,7 @@ jobs:
             esac
           fi
 
-          if [[ "${should_redispatch}" == "true" && -n "${state_artifact_name}" && "${INPUT_DRY_RUN}" == "false" && "${INPUT_ENABLE_LIVE_AUTOFIX}" == "true" && "${TRUSTED}" == "true" && "${FORK}" == "false" && "${STALE}" == "false" ]]; then
+          if [[ "${should_redispatch}" == "true" && -n "${state_artifact_name}" && "${ELIGIBLE}" == "true" ]]; then
             dispatch_candidate="true"
           fi
 
@@ -1643,13 +1594,11 @@ jobs:
             --arg correlation_id "${INPUT_CORRELATION_ID}" \
             --arg requested_by "${INPUT_REQUESTED_BY}" \
             --arg max_iterations "${INPUT_MAX_ITERATIONS}" \
-            --arg dry_run "${INPUT_DRY_RUN}" \
-            --arg enable_live_autofix "${INPUT_ENABLE_LIVE_AUTOFIX}" \
             --arg state_run_id "${state_run_id}" \
             --arg state_artifact_name "${state_artifact_name}" \
             --arg updated_head_sha "${updated_head_sha}" \
             --arg status "emitted" \
-            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), dry_run:($dry_run == "true"), enable_live_autofix:($enable_live_autofix == "true"), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
+            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
             > .codex-loop-dispatch-payload.json
 
           jq -n --arg event_type "codex-loop-continuation" --slurpfile client_payload .codex-loop-dispatch-payload.json \
@@ -1684,11 +1633,11 @@ jobs:
 
       - name: Setup trusted codex-review helper for live continuation
         id: setup_codex
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' }}
         uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@3b9e9f480630c4c51a6978f963e741fab9940894
 
       - name: Download final loop state for live continuation
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.resolve.outputs.state_artifact_name }}
@@ -1696,7 +1645,7 @@ jobs:
 
       - name: Guard live continuation dispatch
         id: guard_dispatch
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' }}
         shell: bash
         env:
           INPUT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
@@ -1722,7 +1671,7 @@ jobs:
           mv codex-review-artifacts/final-state/dispatch-ledger.next.json codex-review-artifacts/final-state/dispatch-ledger.json
 
       - name: Upload guarded live continuation state
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.resolve.outputs.state_artifact_name }}
@@ -1732,7 +1681,7 @@ jobs:
 
       - name: Mint GitHub App token for live continuation dispatch
         id: continuation_app_token
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' }}
         shell: bash
         env:
           CODEX_REVIEW_GITHUB_APP_ID: ${{ secrets.CODEX_GITHUB_APP_ID }}
@@ -1746,7 +1695,7 @@ jobs:
 
       - name: Dispatch live continuation repository_dispatch
         id: dispatch_continuation
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && steps.continuation_app_token.outputs.token_created == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
+        if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' && steps.guard_dispatch.outputs.ok == 'true' && steps.continuation_app_token.outputs.token_created == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ steps.continuation_app_token.outputs.token }}
