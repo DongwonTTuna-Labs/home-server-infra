@@ -67,8 +67,10 @@ design:
 
 autofix:
   enabled: true
-  # Convergence guards: stop the loop instead of ping-ponging forever.
-  max_rounds: 5            # max autofix pushes per PR before escalating to an issue
+  # The loop runs unlimited until LGTM; max_rounds is effectively disabled. The
+  # oscillation/ping-pong guards stay on so a genuine no-progress loop (the model
+  # repeating an identical no-op patch) still terminates instead of spinning.
+  max_rounds: 100000       # effectively unlimited autofix pushes (loop ends on LGTM)
   oscillation_window: 10   # how many recent pushes to remember for cycle detection
   pingpong_threshold: 2    # same finding addressed in >= N prior rounds => oscillation
   revert_threshold: 0.8    # Jaccard of added-vs-prior-removed lines => revert loop
