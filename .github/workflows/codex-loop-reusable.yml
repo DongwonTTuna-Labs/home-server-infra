@@ -525,6 +525,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/review/correctness/prompt.md` and inspect the checked-out PR head at `pr-head`.
             Write only schema-valid JSON for `review-axis-findings.v1` to `codex-review-artifacts/review/correctness/findings.raw.json`.
@@ -571,6 +574,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/review/techlead.prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `techlead-decision.v1` to `codex-review-artifacts/review/techlead-decision.raw.json`.
@@ -636,6 +642,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/design/design-inventory.prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `design-inventory.v1` to `codex-review-artifacts/design/design-inventory.raw.json`.
@@ -676,6 +685,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/design/design-clusters.prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `design-clusters.v1` to `codex-review-artifacts/design/design-clusters.raw.json`.
@@ -721,6 +733,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/design/design-plan.prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `design-plan.v1` to `codex-review-artifacts/design/design-plan.raw.json`.
@@ -763,6 +778,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/design-state-bundle/chief.prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `design-chief-decision.v1` to `codex-review-artifacts/design-state-bundle/chief-decision.raw.json`.
@@ -893,6 +911,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Inspect every `codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file and the checked-out PR head at `pr-head`.
             For each agent directory, write only schema-valid JSON for `fix-dispatch-agent-result.v1` to that directory's `result.json`.
@@ -953,6 +974,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/fix_merge/merge-prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `fix-merge-merged-fix.v1` to `codex-review-artifacts/fix_merge/merged-fix.raw.json`.
@@ -1004,6 +1028,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # Self-hosted container is the isolation boundary; skip the action's
+          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+          safety-strategy: unsafe
           prompt: |
             Read `codex-review-artifacts/fix_merge/semantic-safety-prompt.md` and inspect `pr-head` as needed.
             Write only schema-valid JSON for `fix-merge-semantic-patch-safety.v1` to `codex-review-artifacts/fix_merge/semantic-safety.raw.json`.
