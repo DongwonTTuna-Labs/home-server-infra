@@ -530,10 +530,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/review/correctness/findings.raw.json
-          output-schema-file: codex-review-artifacts/review/correctness/findings.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/review/correctness/findings.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/review/correctness/findings.strict.json
           prompt: |
-            Read `codex-review-artifacts/review/correctness/prompt.md` and inspect the checked-out PR head at `pr-head`.
+            Read `${{ github.workspace }}/codex-review-artifacts/review/correctness/prompt.md`. Your working directory is the PR head checkout under review; inspect files here and cite repo-relative paths (e.g. `src/foo.py`).
             Return the `review-axis-findings.v1` JSON result.
 
       - name: Prepare review techlead decision
@@ -581,10 +582,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/review/techlead-decision.raw.json
-          output-schema-file: codex-review-artifacts/review/techlead-decision.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/review/techlead-decision.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/review/techlead-decision.strict.json
           prompt: |
-            Read `codex-review-artifacts/review/techlead.prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/review/techlead.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             Return the `techlead-decision.v1` JSON result.
 
       - name: Complete review stage state
@@ -650,10 +652,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/design/design-inventory.raw.json
-          output-schema-file: codex-review-artifacts/design/design-inventory.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-inventory.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-inventory.strict.json
           prompt: |
-            Read `codex-review-artifacts/design/design-inventory.prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/design/design-inventory.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             Return the `design-inventory.v1` JSON result.
 
       - name: Prepare design clusters prompt
@@ -695,10 +698,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/design/design-clusters.raw.json
-          output-schema-file: codex-review-artifacts/design/design-clusters.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-clusters.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-clusters.strict.json
           prompt: |
-            Read `codex-review-artifacts/design/design-clusters.prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/design/design-clusters.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             Return the `design-clusters.v1` JSON result.
 
       - name: Prepare design plan prompt
@@ -745,10 +749,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/design/design-plan.raw.json
-          output-schema-file: codex-review-artifacts/design/design-plan.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-plan.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-plan.strict.json
           prompt: |
-            Read `codex-review-artifacts/design/design-plan.prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/design/design-plan.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             Return the `design-plan.v1` JSON result.
 
       - name: Prepare design chief prompt
@@ -792,10 +797,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/design-state-bundle/chief-decision.raw.json
-          output-schema-file: codex-review-artifacts/design-state-bundle/chief-decision.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief-decision.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief-decision.strict.json
           prompt: |
-            Read `codex-review-artifacts/design-state-bundle/chief.prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             Return the `design-chief-decision.v1` JSON result.
 
       - name: Complete design stage state
@@ -926,11 +932,12 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          working-directory: pr-head
           sandbox: workspace-write
           prompt: |
-            Inspect every `codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file and the checked-out PR head at `pr-head`.
+            Inspect every `${{ github.workspace }}/codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file. Your working directory is the PR head checkout; apply the requested edits to files here.
             For each agent directory, write only schema-valid JSON for `fix-dispatch-agent-result.v1` to that directory's `result.json`.
-            Use the requested `edits` search/replace output contract when possible. Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/fix_dispatch/agents/*/result.json`.
+            Use the requested `edits` search/replace output contract when possible. Do not post comments, push commits, access secrets, or modify files outside `${{ github.workspace }}/codex-review-artifacts/fix_dispatch/agents/*/result.json`.
 
       - name: Prepare fix merge
         id: fix_merge_prepare
@@ -991,10 +998,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/fix_merge/merged-fix.raw.json
-          output-schema-file: codex-review-artifacts/fix_merge/merged-fix.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/merged-fix.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/merged-fix.strict.json
           prompt: |
-            Read `codex-review-artifacts/fix_merge/merge-prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/fix_merge/merge-prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             The output must remain compatible with `fix_merge validate`, `push validate-fix`, and the later Task 4 push path.
             Return the `fix-merge-merged-fix.v1` JSON result.
 
@@ -1047,10 +1055,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
-          output-file: codex-review-artifacts/fix_merge/semantic-safety.raw.json
-          output-schema-file: codex-review-artifacts/fix_merge/semantic-safety.strict.json
+          working-directory: pr-head
+          output-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety.raw.json
+          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety.strict.json
           prompt: |
-            Read `codex-review-artifacts/fix_merge/semantic-safety-prompt.md` and inspect `pr-head` as needed.
+            Read `${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety-prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
             Return the `fix-merge-semantic-patch-safety.v1` JSON result.
 
       - name: Complete fix stage state
