@@ -1,3 +1,5 @@
+import pytest
+
 from codex_review.stages.push.orchestrate import commit_and_push_validated_fix, run_push_flow
 
 
@@ -339,6 +341,96 @@ diff --git a/docs/b.md b/docs/b.md
     assert result["pushed"] is True
     assert result["commit_shas"] and len(result["commit_shas"]) == 2
     assert result["commit_plan"] == commit_plan
+
+
+def _init_repo_with_base(tmp_path):
+    import subprocess
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    return repo, head
+
+
+_NEW_FILE_PATCH = (
+    "diff --git a/docs/NEW.md b/docs/NEW.md\n"
+    "new file mode 100644\n"
+    "index 0000000..1111111\n"
+    "--- /dev/null\n"
+    "+++ b/docs/NEW.md\n"
+    "@@ -0,0 +1 @@\n"
+    "+hello\n"
+)
+
+
+def _validation(patch, applied_diff_hash):
+    import hashlib
+    return {
+        "schema_version": "push-validated-fix.v1",
+        "status": "validated",
+        "validated": True,
+        "semantic_safety_approved": True,
+        "patch_hash": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+        "applied_diff_hash": applied_diff_hash,
+        "semantic_safety": {"commit_plan": [{"subject": "docs(smoke): add new marker", "body": "Add the new docs marker.", "paths": ["docs/NEW.md"]}]},
+    }
+
+
+def test_commit_push_accepts_pre_applied_patch_matching_validated_hash(tmp_path, monkeypatch):
+    # Single-run loop: the validate phase already applied the patch, leaving a
+    # dirty worktree. commit-push must NOT demand a pristine tree; it commits the
+    # already-applied, hash-verified tree.
+    import subprocess, hashlib
+    from codex_review.stages.push import orchestrate
+    from codex_review.stages.push.apply_patch import collect_applied_diff
+
+    repo, head = _init_repo_with_base(tmp_path)
+    subprocess.run(["git", "apply", "--index", "-"], input=_NEW_FILE_PATCH, text=True, cwd=repo, check=True)
+    applied_hash = hashlib.sha256(collect_applied_diff(repo).encode("utf-8")).hexdigest()
+
+    monkeypatch.setattr(orchestrate, "validate_current_head", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrate, "push_commit", lambda *a, **k: {"pushed": True, "returncode": 0, "verified": True})
+    monkeypatch.setattr(orchestrate, "verify_pushed_head", lambda *a, **k: True)
+
+    result = commit_and_push_validated_fix(
+        {"schema_version": "fix-merge-merged-fix.v1", "status": "ready_to_push", "patch": _NEW_FILE_PATCH, "expected_head_sha": head},
+        _validation(_NEW_FILE_PATCH, applied_hash),
+        {"owner": "o", "repo": "r", "pr_number": 1, "head_sha": head, "head_ref": "feature/x"},
+        {"autofix": {"allowed_prefixes": ["docs/"], "max_patch_bytes": 20000}},
+        repo,
+        token="token",
+    )
+    assert result["status"] == "pushed"
+    assert result["pushed"] is True
+
+
+def test_commit_push_rejects_pre_applied_tree_not_matching_validated_hash(tmp_path, monkeypatch):
+    # Tripwire: if the (pre-applied) worktree's diff doesn't equal the validated
+    # applied-diff hash — e.g. an unexpected extra change crept in — push refuses
+    # instead of committing whatever is there.
+    import subprocess
+    from codex_review.stages.push import orchestrate
+
+    repo, head = _init_repo_with_base(tmp_path)
+    subprocess.run(["git", "apply", "--index", "-"], input=_NEW_FILE_PATCH, text=True, cwd=repo, check=True)
+
+    monkeypatch.setattr(orchestrate, "validate_current_head", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrate, "push_commit", lambda *a, **k: {"pushed": True, "returncode": 0, "verified": True})
+
+    with pytest.raises(Exception, match="applied diff differs"):
+        commit_and_push_validated_fix(
+            {"schema_version": "fix-merge-merged-fix.v1", "status": "ready_to_push", "patch": _NEW_FILE_PATCH, "expected_head_sha": head},
+            _validation(_NEW_FILE_PATCH, "0" * 64),  # deliberately wrong validated hash
+            {"owner": "o", "repo": "r", "pr_number": 1, "head_sha": head, "head_ref": "feature/x"},
+            {"autofix": {"allowed_prefixes": ["docs/"], "max_patch_bytes": 20000}},
+            repo,
+            token="token",
+        )
 
 
 def test_commit_push_treats_successful_push_with_delayed_verification_as_pushed_unverified(tmp_path, monkeypatch):

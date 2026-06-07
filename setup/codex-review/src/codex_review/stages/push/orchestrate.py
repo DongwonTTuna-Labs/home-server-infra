@@ -346,7 +346,6 @@ def commit_and_push_validated_fix(
     _validate_local_expected_head(repo_path, pr_context, merged_fix)
 
     policy = _policy(config, merged_fix)
-    validate_worktree_clean(repo_path)
     validate_patch_policy(patch, policy, {})
 
     if dry_run:
@@ -361,12 +360,18 @@ def commit_and_push_validated_fix(
     patch_path = _write_temp_patch(patch)
     old_head = pr_context.get("head_sha") or merged_fix.get("expected_head_sha") or _current_head(repo_path)
     try:
-        try:
+        if _patch_already_applied(patch, repo_path):
+            # Single-run loop: the no-token validate phase already applied this
+            # exact patch to the shared pr-head worktree. Don't demand a pristine
+            # tree or re-apply; the applied-diff-hash check below is the real
+            # integrity gate — it proves the worktree is exactly PR head + the
+            # validated patch and rejects any extra unexpected change.
+            apply_report = {"applied": False, "already_applied": True}
+        else:
+            # Fresh tree (e.g. separate-checkout callers): the patch must land on
+            # a clean PR head, so the worktree must be pristine before we apply.
+            validate_worktree_clean(repo_path)
             apply_report = apply_merged_patch(patch_path, repo_path)
-        except ValidationError as exc:
-            if _patch_already_applied(patch, repo_path):
-                return {**_no_fix_changes_result(merged_fix, patch, old_head, f"patch is already present on the PR head: {exc}", schema_version="push-result.v1"), "validation_result": validation_result}
-            raise
         try:
             run_diff_check(repo_path)
         except ValidationError as exc:
@@ -374,6 +379,10 @@ def commit_and_push_validated_fix(
         applied_diff = collect_applied_diff(repo_path)
         applied_hash = _sha256_text(applied_diff)
         expected_applied_hash = validation_result.get("applied_diff_hash")
+        # When the patch was pre-applied we skipped the clean-worktree check, so
+        # the validated applied-diff hash is mandatory and must match exactly.
+        if apply_report.get("already_applied") and not expected_applied_hash:
+            raise ValidationError("cannot commit a pre-applied patch without a validated applied_diff_hash")
         if expected_applied_hash and expected_applied_hash != applied_hash:
             raise ValidationError("applied diff differs from no-token validation artifact")
         applied_policy_report = validate_patch_policy(applied_diff, policy, {})
