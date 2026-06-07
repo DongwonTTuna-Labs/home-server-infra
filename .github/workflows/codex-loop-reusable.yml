@@ -1389,7 +1389,7 @@ jobs:
             '{pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, state_run_id:$state_run_id, state_artifact_name:$state_artifact_name}' \
             > .codex-loop-dispatch-payload.json
 
-          jq -n --arg event_type "codex-loop-continuation" --slurpfile client_payload .codex-loop-dispatch-payload.json \
+          jq -n --arg event_type "codex-loop" --slurpfile client_payload .codex-loop-dispatch-payload.json \
             '{event_type:$event_type, client_payload:$client_payload[0]}' \
             > .codex-loop-repository-dispatch.json
 
