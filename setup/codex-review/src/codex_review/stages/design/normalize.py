@@ -4,7 +4,11 @@ from pathlib import Path
 from typing import Any
 from codex_review.core.artifacts import write_json
 from codex_review.core.errors import ValidationError
-from codex_review.model.inspection import validate_inspection_evidence
+from codex_review.model.inspection import (
+    collect_existing_evidence_paths,
+    render_evidence_citation_hint,
+    validate_inspection_evidence,
+)
 
 
 def build_normalize_prompt(design_context: dict[str, Any]) -> str:
@@ -15,6 +19,8 @@ def build_normalize_prompt(design_context: dict[str, Any]) -> str:
         "existing file in pr-head, not a directory and not a missing target path. If the issue "
         "is a missing file, cite the existing task/spec/design/proposal file that proves it is "
         "required and put the missing file path in observation. Return design-inventory.v1 JSON.\n"
+        + render_evidence_citation_hint(collect_existing_evidence_paths(design_context))
+        + "\n"
         + str(design_context)
     )
 

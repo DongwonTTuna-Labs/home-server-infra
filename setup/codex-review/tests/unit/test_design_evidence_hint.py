@@ -58,3 +58,17 @@ def test_chief_prompt_carries_plan_and_techlead_paths_and_dont_rule():
     assert "openspec/changes/foo/spec.md" in prompt
     assert "docs/CODEX_PUSH_SMOKE.spec.md" in prompt
     assert "NEVER cite" in prompt
+
+
+def test_review_axis_prompt_carries_dont_rule():
+    from codex_review.stages.review.prompt import build_axis_prompt
+    prompt = build_axis_prompt("correctness", {"changed_line_map": {}}, "", "", {})
+    assert "NEVER cite" in prompt and "WRONG:" in prompt
+
+
+def test_techlead_prompt_carries_review_paths_and_dont_rule():
+    from codex_review.stages.techlead.prompt import build_techlead_prompt
+    combined = _payload("openspec/changes/foo/tasks.md")
+    prompt = build_techlead_prompt(combined, {}, "", "", {})
+    assert "openspec/changes/foo/tasks.md" in prompt
+    assert "NEVER cite" in prompt

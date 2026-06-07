@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 from codex_review.core.artifacts import write_text
+from codex_review.model.inspection import render_evidence_citation_hint
 
 
 def include_axis_specific_focus(axis: str) -> str:
@@ -28,7 +29,11 @@ Review the PR against its title/body and any OpenSpec context in the repository 
 ## PR context
 {pr_context}
 """
-    return include_changed_line_contract(include_inspection_evidence_contract(prompt), pr_context.get("changed_line_map", {}))
+    prompt = include_changed_line_contract(include_inspection_evidence_contract(prompt), pr_context.get("changed_line_map", {}))
+    # Review is the first model step (no upstream-verified paths yet), so this
+    # just reinforces "never cite a file that does not exist" with a worked
+    # example — the recurring failure is citing the to-be-created target file.
+    return prompt + render_evidence_citation_hint([])
 
 def write_axis_prompt(axis: str, prompt: str, out_path: str | Path) -> Path:
     return write_text(out_path, prompt)

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from codex_review.core.artifacts import write_text
 from codex_review.context.budget import compact_json
+from codex_review.model.inspection import collect_existing_evidence_paths, render_evidence_citation_hint
 
 
 def include_decision_action_contract(prompt: str) -> str:
@@ -32,7 +33,10 @@ Combined findings:
 PR context:
 {pr_context_json}
 """
-    return include_inspection_evidence_contract(include_design_required_contract(include_decision_action_contract(prompt)))
+    prompt = include_inspection_evidence_contract(include_design_required_contract(include_decision_action_contract(prompt)))
+    # Reuse the review findings' already-verified existing-file paths as
+    # candidate citations and forbid citing a non-existent target file.
+    return prompt + render_evidence_citation_hint(collect_existing_evidence_paths(combined_findings, pr_context))
 
 def write_techlead_prompt(prompt: str, out_path: str | Path) -> Path:
     return write_text(out_path, prompt)

@@ -4,9 +4,9 @@ Stage07 is deliberately split into two phases:
 
 * validate/test: runs without any write token in the PR-head worktree, applies the
   patch and executes only trusted allowlisted tests with a sanitized env.
-* commit/push: runs with the GitHub App installation token, re-checks out the
-  exact PR head, reapplies the already validated patch, commits with hooks
-  disabled, and pushes. It never runs tests.
+* commit/push: runs with the loop's write PAT, re-checks out the exact PR head,
+  reapplies the already validated patch, commits with hooks disabled, and
+  pushes. It never runs tests.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from codex_review.core.errors import CodexReviewError, ValidationError
-from codex_review.github.app_token import assert_installation_token_for_repo, permissions_for_write_mode
 from codex_review.security.patch_policy import validate_patch_policy
 from .apply_patch import apply_merged_patch, collect_applied_diff, run_diff_check
 from .commit import build_commit_message, commit_plan_from_artifacts, create_commit, create_commits_from_plan, validate_commit_diff
@@ -334,8 +333,10 @@ def commit_and_push_validated_fix(
     repo = str(pr_context.get("repo"))
     pr_number = int(pr_context.get("pr_number"))
     if not token:
-        raise ValidationError("push actual push requires a GitHub App installation token")
-    assert_installation_token_for_repo(token, owner, repo, permissions_for_write_mode("push"))
+        raise ValidationError("push actual push requires a write token (CODEX_LOOP_PAT)")
+    # The loop authenticates with a classic PAT (private-repo design), not a
+    # GitHub App installation token; GitHub enforces push permission on the
+    # actual `git push`, so no installation-token preflight is performed here.
     try:
         validate_current_head(pr_context, merged_fix, token)
     except ValidationError as exc:
