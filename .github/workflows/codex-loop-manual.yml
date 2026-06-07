@@ -46,11 +46,6 @@ on:
         description: Exact prior loop-state artifact name to download from state_run_id.
         type: string
         required: true
-      max_iterations:
-        description: Maximum accepted loop iterations.
-        type: number
-        required: false
-        default: 5
 
 # payload schema: workflow_dispatch typed inputs map directly to workflow_call inputs.
 permissions: {}
@@ -58,7 +53,7 @@ permissions: {}
 jobs:
   manual-debug-adapter:
     name: Manual Debug Adapter Only
-    # These job permissions are the ceiling for the called reusable workflow. The loop runs live (model/push/dispatch) for eligible PRs; the trust/stale guard and relay/secret presence are the only gates.
+    # These job permissions are the ceiling for the called reusable workflow. The loop always runs live (model/push/dispatch) using the static relay key and loop PAT.
     permissions:
       contents: write
       pull-requests: write
@@ -74,5 +69,4 @@ jobs:
       requested_by: ${{ inputs.requested_by }}
       state_run_id: ${{ inputs.state_run_id }}
       state_artifact_name: ${{ inputs.state_artifact_name }}
-      max_iterations: ${{ inputs.max_iterations }}
     secrets: inherit

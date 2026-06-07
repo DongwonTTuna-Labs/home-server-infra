@@ -29,7 +29,6 @@ jobs:
       requested_by: ${{ steps.validate_payload.outputs.requested_by }}
       state_run_id: ${{ steps.validate_payload.outputs.state_run_id }}
       state_artifact_name: ${{ steps.validate_payload.outputs.state_artifact_name }}
-      max_iterations: ${{ steps.validate_payload.outputs.max_iterations }}
     steps:
       - name: Validate repository_dispatch client_payload
         id: validate_payload
@@ -44,7 +43,6 @@ jobs:
           PAYLOAD_REQUESTED_BY: ${{ github.event.client_payload.requested_by }}
           PAYLOAD_STATE_RUN_ID: ${{ github.event.client_payload.state_run_id }}
           PAYLOAD_STATE_ARTIFACT_NAME: ${{ github.event.client_payload.state_artifact_name }}
-          PAYLOAD_MAX_ITERATIONS: ${{ github.event.client_payload.max_iterations }}
         run: |
           set -euo pipefail
 
@@ -70,8 +68,6 @@ jobs:
           require_non_empty state_run_id "${PAYLOAD_STATE_RUN_ID}"
           require_non_empty state_artifact_name "${PAYLOAD_STATE_ARTIFACT_NAME}"
 
-          max_iterations="${PAYLOAD_MAX_ITERATIONS:-5}"
-
           if [[ "${valid}" == "true" ]]; then
             if ! [[ "${PAYLOAD_PR_NUMBER}" =~ ^[0-9]+$ ]]; then
               terminal_reason="invalid-pr_number"
@@ -84,9 +80,6 @@ jobs:
               valid="false"
             elif [[ "${PAYLOAD_STATE_ARTIFACT_NAME}" == */* || "${PAYLOAD_STATE_ARTIFACT_NAME}" == "." || "${PAYLOAD_STATE_ARTIFACT_NAME}" == ".." ]]; then
               terminal_reason="invalid-state_artifact_name"
-              valid="false"
-            elif ! [[ "${max_iterations}" =~ ^[0-9]+$ ]]; then
-              terminal_reason="invalid-max_iterations"
               valid="false"
             fi
           fi
@@ -109,7 +102,6 @@ jobs:
             echo "iteration=${PAYLOAD_ITERATION}"
             echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
             echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
-            echo "max_iterations=${max_iterations}"
             echo "valid=${valid}"
             if [[ -n "${terminal_reason}" ]]; then
               echo "terminal_reason=${terminal_reason}"
@@ -131,7 +123,6 @@ jobs:
             echo "requested_by=${PAYLOAD_REQUESTED_BY}"
             echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
             echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
-            echo "max_iterations=${max_iterations}"
           } >> "${GITHUB_OUTPUT}"
 
   codex-loop:
@@ -154,5 +145,4 @@ jobs:
       requested_by: ${{ needs.validate-payload.outputs.requested_by }}
       state_run_id: ${{ needs.validate-payload.outputs.state_run_id }}
       state_artifact_name: ${{ needs.validate-payload.outputs.state_artifact_name }}
-      max_iterations: ${{ fromJSON(needs.validate-payload.outputs.max_iterations) }}
     secrets: inherit
