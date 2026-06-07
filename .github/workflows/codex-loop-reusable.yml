@@ -351,7 +351,7 @@ jobs:
 
       - name: Setup trusted codex-review helper
         id: setup_codex
-        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@86d0df4e7caf166046fe77671471f4965d51f106
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@c41ba648571f966c3f974501f0b43a516d318ff2
 
       - name: Configure native codex-lb relay
         id: relay
@@ -471,7 +471,7 @@ jobs:
 
       - name: Setup trusted codex-review helper
         id: setup_codex
-        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@86d0df4e7caf166046fe77671471f4965d51f106
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@c41ba648571f966c3f974501f0b43a516d318ff2
 
       - name: Download setup loop state artifact
         uses: actions/download-artifact@v4
@@ -1685,7 +1685,7 @@ jobs:
       - name: Setup trusted codex-review helper for live continuation
         id: setup_codex
         if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
-        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@86d0df4e7caf166046fe77671471f4965d51f106
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@c41ba648571f966c3f974501f0b43a516d318ff2
 
       - name: Download final loop state for live continuation
         if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
