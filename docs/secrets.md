@@ -16,6 +16,5 @@ external secret store.
 
 - Codex `auth.json`, sqlite state, logs, sessions, attachments, generated images
 - `codex-lb-data` Docker volume, including dashboard auth state and encryption key
-- `github-oidc-broker-data` Docker volume, including broker replay/audit SQLite state
 - SSH private keys under `~/.ssh`
 - GitHub CLI `hosts.yml`

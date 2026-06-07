@@ -2,12 +2,9 @@ name: codex-lb
 
 services:
   codex-lb:
-    image: codex-lb:oidc-pr4-9c8e9f9
-    build:
-      context: https://github.com/DongwonTTuna-Labs/codex-lb.git#9c8e9f9fd821d224838c97586f55b1573965bfc3
-      dockerfile: Dockerfile
+    image: ghcr.io/soju06/codex-lb:latest
     container_name: codex-lb
-    pull_policy: build
+    pull_policy: always
     restart: unless-stopped
     labels:
       com.centurylinklabs.watchtower.enable: "false"
@@ -17,7 +14,6 @@ services:
       CODEX_LB_DATABASE_SQLITE_PRE_MIGRATE_BACKUP_ENABLED: "true"
       CODEX_LB_DATABASE_SQLITE_PRE_MIGRATE_BACKUP_MAX_FILES: "5"
       CODEX_LB_DASHBOARD_AUTH_MODE: standard
-      CODEX_LB_OIDC_FEDERATION_ENABLED: "true"
       CODEX_LB_LOG_FORMAT: text
     ports:
       - "127.0.0.1:2455:2455"

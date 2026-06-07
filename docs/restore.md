@@ -9,7 +9,6 @@ This repository restores configuration, not live data.
 3. Start the stack:
 
    ```sh
-   docker compose -f stacks/codex-lb/compose.yaml build codex-lb
    docker compose -f stacks/codex-lb/compose.yaml up -d
    ```
 
@@ -17,5 +16,4 @@ This repository restores configuration, not live data.
 
    ```sh
    curl -fsS https://relay-ai.dongwontuna.net/health/ready
-   curl -fsS https://relay-ai.dongwontuna.net/oidc/health
    ```

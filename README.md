@@ -5,7 +5,7 @@ Private operational configuration for DongwonTTuna's home server.
 This repository stores reproducible configuration for:
 
 - Cloudflare Tunnel entrypoint
-- codex-lb and GitHub OIDC relay broker
+- codex-lb relay
 - GitHub Codex runner pool
 - Selected SSH and Codex dotfiles
 
@@ -19,7 +19,7 @@ docs/                         Operational notes and recovery docs
 dotfiles/                     Curated non-secret client config
 scripts/                      Repository verification helpers
 stacks/agent-stack/           Cloudflare tunnel container stack
-stacks/codex-lb/              codex-lb relay and OIDC broker stack
+stacks/codex-lb/              codex-lb relay stack
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 ```
 
