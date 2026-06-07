@@ -425,10 +425,10 @@ jobs:
           mkdir -p codex-review-artifacts/prior-state
 
           if [[ -n "${INPUT_STATE_ARTIFACT_NAME}" ]]; then
-            codex-review loop read-state               --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json"               --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}"               --out .codex-loop-state.json
+            codex-review loop read-state               --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json"               --loop-state "codex-review-artifacts/prior-state/${INPUT_STATE_ARTIFACT_NAME}"               --out codex-loop-state.json
           else
             jq -n '{schema_version:"dispatch-ledger.v1", entries:[]}'               > codex-review-artifacts/prior-state/dispatch-ledger.json
-            codex-review loop read-state               --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json"               --out .codex-loop-state.json
+            codex-review loop read-state               --ledger "codex-review-artifacts/prior-state/dispatch-ledger.json"               --out codex-loop-state.json
           fi
 
           artifact_name="codex-loop-state-${INPUT_CORRELATION_ID}-${INPUT_ITERATION}.json"
@@ -438,7 +438,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.state.outputs.state_artifact_name }}
-          path: .codex-loop-state.json
+          path: codex-loop-state.json
           retention-days: 7
 
   run-stage:
@@ -878,7 +878,7 @@ jobs:
                 > codex-review-artifacts/review-state-bundle/dispatch-candidate.json
               codex-review loop append-dispatch-ledger \
                 --in codex-review-artifacts/review-state-bundle/dispatch-candidate.json \
-                --ledger .codex-loop-state.json \
+                --ledger codex-loop-state.json \
                 --out codex-review-artifacts/review-state-bundle/dispatch-ledger.json
             else
               jq -n '{schema_version:"dispatch-ledger.v1", entries:[]}' > codex-review-artifacts/review-state-bundle/dispatch-ledger.json
@@ -1347,7 +1347,7 @@ jobs:
               --in codex-review-artifacts/push/validated-fix.json \
               --result codex-review-artifacts/fix_merge/merged-fix.json \
               --design-plan codex-review-artifacts/prior-state/design-plan.json \
-              --loop-state .codex-loop-state.json \
+              --loop-state codex-loop-state.json \
               --out codex-review-artifacts/push/validated-fix.json
             cp codex-review-artifacts/fix_dispatch/manifest.json codex-review-artifacts/fix-state-bundle/manifest.json
             cp codex-review-artifacts/fix_merge/merged-fix.json codex-review-artifacts/fix-state-bundle/merged-fix.json
