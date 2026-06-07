@@ -63,6 +63,12 @@ def test_action_takes_no_write_token_app_key_or_relay_secret():
         assert forbidden not in text
 
 
-def test_action_does_not_use_setup_python():
-    # Home Server Runners ship python3; the repo never uses actions/setup-python.
-    assert "actions/setup-python" not in _text()
+def test_action_uses_pinned_setup_python():
+    # Home Server Runners ship an externally-managed system python3 (PEP 668),
+    # so the helper is installed into an isolated setup-python interpreter,
+    # pinned by SHA like every other third-party action.
+    import re
+
+    text = _text()
+    assert re.search(r"uses: actions/setup-python@[0-9a-f]{40}", text)
+    assert 'python-version: "3.11"' in text
