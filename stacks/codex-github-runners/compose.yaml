@@ -4,6 +4,10 @@ x-common-environment: &common-environment
   RUNNER_WORKDIR: /home/runner/_work
   RUNNER_TOOL_CACHE: /home/runner/_work/_tool
   RUNNER_TEMP: /home/runner/_work/_temp
+  # Codex loop credentials, consumed directly by job run: steps (no GitHub
+  # secrets). Sourced from ./.env (gitignored). See ../../.github/workflows/CODEX_LOOP.md.
+  CODEX_RELAY_API_KEY: ${CODEX_RELAY_API_KEY:?set CODEX_RELAY_API_KEY in stacks/codex-github-runners/.env}
+  CODEX_LOOP_PAT: ${CODEX_LOOP_PAT:?set CODEX_LOOP_PAT in stacks/codex-github-runners/.env}
 
 x-runner-common: &runner-common
   image: dongwontuna-labs-runner:latest
@@ -135,28 +139,6 @@ services:
       - home_server_runner_10_runner:/home/runner/actions-runner
       - home_server_runner_10_work:/home/runner/_work
 
-  home-server-runner-11:
-    <<: *runner-common
-    container_name: home-server-runner-11
-    environment:
-      <<: *common-environment
-      RUNNER_NAME: home-server-runner-11
-      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-11
-    volumes:
-      - home_server_runner_11_runner:/home/runner/actions-runner
-      - home_server_runner_11_work:/home/runner/_work
-
-  home-server-runner-12:
-    <<: *runner-common
-    container_name: home-server-runner-12
-    environment:
-      <<: *common-environment
-      RUNNER_NAME: home-server-runner-12
-      RUNNER_LABELS: dongwontuna-labs-runner,home-server-runner-12
-    volumes:
-      - home_server_runner_12_runner:/home/runner/actions-runner
-      - home_server_runner_12_work:/home/runner/_work
-
 secrets:
   github_pat:
     file: ./state/github_pat
@@ -182,7 +164,3 @@ volumes:
   home_server_runner_09_work:
   home_server_runner_10_runner:
   home_server_runner_10_work:
-  home_server_runner_11_runner:
-  home_server_runner_11_work:
-  home_server_runner_12_runner:
-  home_server_runner_12_work:
