@@ -39,7 +39,8 @@ def test_override_path_deep_merges_nested_values():
     assert "calldata" in config["autofix"]["dangerous_keywords"]
     assert config["tests"]["allowlist"]["cargo_test"] == "cargo test --workspace --all-features"
     assert config["review"]["axes"] == DEFAULT_CONFIG["review"]["axes"]
-    assert config["autofix"]["max_rounds"] == 5
+    # The consumer override does not set max_rounds, so it stays at the core value.
+    assert config["autofix"]["max_rounds"] == load_config()["autofix"]["max_rounds"]
 
 
 def test_override_mapping_takes_highest_precedence():
