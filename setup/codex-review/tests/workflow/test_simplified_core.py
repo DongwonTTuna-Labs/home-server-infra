@@ -51,6 +51,8 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
     assert "${CODEX_RELAY_API_KEY:?" in text
     assert 'echo "::add-mask::${CODEX_RELAY_API_KEY}"' in text
     seen = 0
+    structured = 0
+    fix_agents_seen = False
     for job in _doc()["jobs"].values():
         for step in job.get("steps", []) or []:
             if step.get("uses") == MODEL_ACTION:
@@ -61,7 +63,27 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
                 # Container is the isolation boundary; the action's sudo-drop
                 # sandbox needs passwordless sudo the runner doesn't grant.
                 assert w.get("safety-strategy") == "unsafe"
+                name = step.get("name", "")
+                if not name.startswith("Run live Codex"):
+                    continue
+                if "fix agents" in name:
+                    # Multi-file emitter cannot use a single output-file; it
+                    # needs a writable sandbox to drop agents/*/result.json.
+                    fix_agents_seen = True
+                    assert w.get("sandbox") == "workspace-write", name
+                else:
+                    # Single-JSON steps capture deterministic output via the
+                    # codex-action structured-output contract.
+                    assert w.get("output-file"), f"missing output-file: {name}"
+                    assert w.get("output-schema-file"), (
+                        f"missing output-schema-file: {name}"
+                    )
+                    structured += 1
     assert seen >= 9, f"expected >=9 model steps, saw {seen}"
+    assert structured >= 8, f"expected >=8 structured-output steps, saw {structured}"
+    assert fix_agents_seen, "fix agents step with workspace-write sandbox not found"
+    # Each structured step emits its OpenAI strict schema before running.
+    assert text.count("schema openai-strict") >= 8
 
 
 def test_push_and_dispatch_use_the_pat_from_runner_env():

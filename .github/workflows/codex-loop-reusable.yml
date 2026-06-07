@@ -353,6 +353,7 @@ jobs:
                 --pr-context codex-review-artifacts/common/pr-context.json \
                 --docs-context codex-review-artifacts/common/docs-context.md \
                 --out codex-review-artifacts/review/correctness/prompt.md
+              codex-review schema openai-strict --schema review-axis-findings.v1 --out codex-review-artifacts/review/correctness/findings.strict.json
               if [[ "${live_enabled}" == "true" ]]; then
                 echo "needs_review_axis_model=true" >> "${GITHUB_OUTPUT}"
               else
@@ -396,6 +397,7 @@ jobs:
               codex-review design build-inventory-prompt \
                 --in codex-review-artifacts/design/design-context.json \
                 --out codex-review-artifacts/design/design-inventory.prompt.md
+              codex-review schema openai-strict --schema design-inventory.v1 --out codex-review-artifacts/design/design-inventory.strict.json
               if [[ "${live_enabled}" == "true" ]]; then
                 echo "needs_design_inventory_model=true" >> "${GITHUB_OUTPUT}"
               else
@@ -528,10 +530,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/review/correctness/findings.raw.json
+          output-schema-file: codex-review-artifacts/review/correctness/findings.strict.json
           prompt: |
             Read `codex-review-artifacts/review/correctness/prompt.md` and inspect the checked-out PR head at `pr-head`.
-            Write only schema-valid JSON for `review-axis-findings.v1` to `codex-review-artifacts/review/correctness/findings.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/review/correctness/findings.raw.json`.
+            Return the `review-axis-findings.v1` JSON result.
 
       - name: Prepare review techlead decision
         id: review_techlead_prepare
@@ -558,6 +561,7 @@ jobs:
               --pr-context codex-review-artifacts/common/pr-context.json \
               --docs-context codex-review-artifacts/common/docs-context.md \
               --out codex-review-artifacts/review/techlead.prompt.md
+            codex-review schema openai-strict --schema techlead-decision.v1 --out codex-review-artifacts/review/techlead-decision.strict.json
             if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_review_techlead_model=true" >> "${GITHUB_OUTPUT}"
             else
@@ -577,10 +581,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/review/techlead-decision.raw.json
+          output-schema-file: codex-review-artifacts/review/techlead-decision.strict.json
           prompt: |
             Read `codex-review-artifacts/review/techlead.prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `techlead-decision.v1` to `codex-review-artifacts/review/techlead-decision.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/review/techlead-decision.raw.json`.
+            Return the `techlead-decision.v1` JSON result.
 
       - name: Complete review stage state
         if: ${{ inputs.stage == 'review' }}
@@ -645,10 +650,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/design/design-inventory.raw.json
+          output-schema-file: codex-review-artifacts/design/design-inventory.strict.json
           prompt: |
             Read `codex-review-artifacts/design/design-inventory.prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `design-inventory.v1` to `codex-review-artifacts/design/design-inventory.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design/design-inventory.raw.json`.
+            Return the `design-inventory.v1` JSON result.
 
       - name: Prepare design clusters prompt
         id: design_clusters_prepare
@@ -669,6 +675,7 @@ jobs:
               --inventory codex-review-artifacts/design/design-inventory.json \
               --pr-context codex-review-artifacts/design/design-context.json \
               --out codex-review-artifacts/design/design-clusters.prompt.md
+            codex-review schema openai-strict --schema design-clusters.v1 --out codex-review-artifacts/design/design-clusters.strict.json
             if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_design_clusters_model=true" >> "${GITHUB_OUTPUT}"
             else
@@ -688,10 +695,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/design/design-clusters.raw.json
+          output-schema-file: codex-review-artifacts/design/design-clusters.strict.json
           prompt: |
             Read `codex-review-artifacts/design/design-clusters.prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `design-clusters.v1` to `codex-review-artifacts/design/design-clusters.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design/design-clusters.raw.json`.
+            Return the `design-clusters.v1` JSON result.
 
       - name: Prepare design plan prompt
         id: design_plan_prepare
@@ -716,6 +724,7 @@ jobs:
               --inventory codex-review-artifacts/design/design-inventory.json \
               --result codex-review-artifacts/design/design-analyses.json \
               --out codex-review-artifacts/design/design-plan.prompt.md
+            codex-review schema openai-strict --schema design-plan.v1 --out codex-review-artifacts/design/design-plan.strict.json
             if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_design_plan_model=true" >> "${GITHUB_OUTPUT}"
             else
@@ -736,10 +745,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/design/design-plan.raw.json
+          output-schema-file: codex-review-artifacts/design/design-plan.strict.json
           prompt: |
             Read `codex-review-artifacts/design/design-plan.prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `design-plan.v1` to `codex-review-artifacts/design/design-plan.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design/design-plan.raw.json`.
+            Return the `design-plan.v1` JSON result.
 
       - name: Prepare design chief prompt
         id: design_chief_prepare
@@ -762,6 +772,7 @@ jobs:
               --inventory codex-review-artifacts/design/design-inventory.json \
               --pr-context codex-review-artifacts/design/design-context.json \
               --out codex-review-artifacts/design-state-bundle/chief.prompt.md
+            codex-review schema openai-strict --schema design-chief-decision.v1 --out codex-review-artifacts/design-state-bundle/chief-decision.strict.json
             if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_design_chief_model=true" >> "${GITHUB_OUTPUT}"
             else
@@ -781,10 +792,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/design-state-bundle/chief-decision.raw.json
+          output-schema-file: codex-review-artifacts/design-state-bundle/chief-decision.strict.json
           prompt: |
             Read `codex-review-artifacts/design-state-bundle/chief.prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `design-chief-decision.v1` to `codex-review-artifacts/design-state-bundle/chief-decision.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/design-state-bundle/chief-decision.raw.json`.
+            Return the `design-chief-decision.v1` JSON result.
 
       - name: Complete design stage state
         if: ${{ inputs.stage == 'design' }}
@@ -914,6 +926,7 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          sandbox: workspace-write
           prompt: |
             Inspect every `codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file and the checked-out PR head at `pr-head`.
             For each agent directory, write only schema-valid JSON for `fix-dispatch-agent-result.v1` to that directory's `result.json`.
@@ -955,6 +968,7 @@ jobs:
               --prompt-out codex-review-artifacts/fix_merge/merge-prompt.md \
               --raw-out codex-review-artifacts/fix_merge/merged-fix.raw.json \
               --out codex-review-artifacts/fix_merge/merge-route.json
+            codex-review schema openai-strict --schema fix-merge-merged-fix.v1 --out codex-review-artifacts/fix_merge/merged-fix.strict.json
             needs_merge_model="$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)"
             if [[ "${needs_merge_model}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
               echo "needs_fix_merge_model=true" >> "${GITHUB_OUTPUT}"
@@ -977,11 +991,12 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/fix_merge/merged-fix.raw.json
+          output-schema-file: codex-review-artifacts/fix_merge/merged-fix.strict.json
           prompt: |
             Read `codex-review-artifacts/fix_merge/merge-prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `fix-merge-merged-fix.v1` to `codex-review-artifacts/fix_merge/merged-fix.raw.json`.
             The output must remain compatible with `fix_merge validate`, `push validate-fix`, and the later Task 4 push path.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/fix_merge/merged-fix.raw.json`.
+            Return the `fix-merge-merged-fix.v1` JSON result.
 
       - name: Prepare fix semantic safety
         id: fix_semantic_prepare
@@ -1005,6 +1020,7 @@ jobs:
               --docs-context codex-review-artifacts/fix-context/docs-context.md \
               --repo-path pr-head \
               --out codex-review-artifacts/fix_merge/semantic-safety-prompt.md
+            codex-review schema openai-strict --schema fix-merge-semantic-patch-safety.v1 --out codex-review-artifacts/fix_merge/semantic-safety.strict.json
             patch_hash="$(jq -r '(.patch // .patch_text // "")' codex-review-artifacts/fix_merge/merged-fix.json | shasum -a 256 | cut -d ' ' -f 1)"
             status="$(jq -er '.status | strings' codex-review-artifacts/fix_merge/merged-fix.json)"
             needs_semantic_model="true"
@@ -1031,10 +1047,11 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          output-file: codex-review-artifacts/fix_merge/semantic-safety.raw.json
+          output-schema-file: codex-review-artifacts/fix_merge/semantic-safety.strict.json
           prompt: |
             Read `codex-review-artifacts/fix_merge/semantic-safety-prompt.md` and inspect `pr-head` as needed.
-            Write only schema-valid JSON for `fix-merge-semantic-patch-safety.v1` to `codex-review-artifacts/fix_merge/semantic-safety.raw.json`.
-            Do not post comments, push commits, access secrets, or modify files outside `codex-review-artifacts/fix_merge/semantic-safety.raw.json`.
+            Return the `fix-merge-semantic-patch-safety.v1` JSON result.
 
       - name: Complete fix stage state
         if: ${{ inputs.stage == 'fix' }}
