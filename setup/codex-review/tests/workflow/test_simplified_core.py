@@ -63,14 +63,16 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
                 # Container is the isolation boundary; the action's sudo-drop
                 # sandbox needs passwordless sudo the runner doesn't grant.
                 assert w.get("safety-strategy") == "unsafe"
+                # Runner container can't nest user namespaces, so codex must not
+                # use bubblewrap — run commands directly (full access).
+                assert w.get("sandbox") == "danger-full-access", step.get("name")
+                assert w.get("working-directory") == "pr-head", step.get("name")
                 name = step.get("name", "")
                 if not name.startswith("Run live Codex"):
                     continue
                 if "fix agents" in name:
-                    # Multi-file emitter cannot use a single output-file; it
-                    # needs a writable sandbox to drop agents/*/result.json.
+                    # Multi-file emitter writes agents/*/result.json itself.
                     fix_agents_seen = True
-                    assert w.get("sandbox") == "workspace-write", name
                 else:
                     # Single-JSON steps capture deterministic output via the
                     # codex-action structured-output contract.

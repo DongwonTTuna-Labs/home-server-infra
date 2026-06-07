@@ -530,6 +530,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/review/correctness/findings.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/review/correctness/findings.strict.json
@@ -582,6 +585,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/review/techlead-decision.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/review/techlead-decision.strict.json
@@ -652,6 +658,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-inventory.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-inventory.strict.json
@@ -698,6 +707,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-clusters.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-clusters.strict.json
@@ -749,6 +761,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-plan.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-plan.strict.json
@@ -797,6 +812,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief-decision.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief-decision.strict.json
@@ -932,8 +950,10 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
-          sandbox: workspace-write
           prompt: |
             Inspect every `${{ github.workspace }}/codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file. Your working directory is the PR head checkout; apply the requested edits to files here.
             For each agent directory, write only schema-valid JSON for `fix-dispatch-agent-result.v1` to that directory's `result.json`.
@@ -998,6 +1018,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/merged-fix.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/merged-fix.strict.json
@@ -1055,6 +1078,9 @@ jobs:
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
+          # No bubblewrap: the runner container is the isolation boundary and can't
+          # nest user namespaces. danger-full-access runs codex commands directly.
+          sandbox: danger-full-access
           working-directory: pr-head
           output-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety.raw.json
           output-schema-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety.strict.json
