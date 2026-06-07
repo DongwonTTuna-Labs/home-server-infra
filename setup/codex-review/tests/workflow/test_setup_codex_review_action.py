@@ -36,9 +36,14 @@ def test_action_installs_helper_from_bundled_source_not_runtime_checkout():
     # Installs the bundled package located relative to the action source.
     assert "${GITHUB_ACTION_PATH}/../../.." in text
     assert "setup/codex-review" in text
-    assert "python3 -m pip install" in text
+    assert 'venv_dir="${RUNNER_TEMP:?}/codex-review-venv"' in text
+    assert "python3 -m venv" in text
+    assert '"${venv_dir}/bin/python" -m pip install --disable-pip-version-check -e' in text
+    assert "python3 -m pip install" not in text
+    assert "--break-system-packages" not in text
     # Smoke the CLI so a broken install fails the step.
-    assert "codex-review --help" in text
+    assert '"${venv_dir}/bin/codex-review" --help' in text
+    assert 'echo "${venv_dir}/bin" >> "${GITHUB_PATH}"' in text
     # No runtime checkout of home-server-infra and no read token live here.
     assert "actions/checkout" not in text
     assert "repository: DongwonTTuna-Labs/home-server-infra" not in text
@@ -59,6 +64,7 @@ def test_action_takes_no_write_token_app_key_or_relay_secret():
         "CODEX_GITHUB_APP_PRIVATE_KEY",
         "GITHUB_TOKEN",
         "relay-token",
+        "--break-system-packages",
     ):
         assert forbidden not in text
 
