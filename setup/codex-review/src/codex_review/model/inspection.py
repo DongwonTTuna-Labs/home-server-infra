@@ -10,6 +10,55 @@ from codex_review.security.redaction import assert_no_secret_patterns
 EVIDENCE_KEYS = ("path", "purpose", "observation")
 
 
+def collect_existing_evidence_paths(*payloads: dict[str, Any]) -> list[str]:
+    """Gather unique inspection_evidence paths already produced by upstream stages.
+
+    Upstream artifacts (inventory, techlead decision, design plan) only pass
+    validation when every evidence path is an existing repo file, so their paths
+    are a safe candidate set to hand downstream models for re-citation.
+    """
+    seen: list[str] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.get("inspection_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if path and path not in seen:
+                seen.append(path)
+    return seen
+
+
+def render_evidence_citation_hint(paths: list[str]) -> str:
+    """Prompt fragment steering models to cite existing files, never a target.
+
+    The recurring failure is a model citing the file a plan proposes to create
+    (which does not exist yet) as inspection_evidence; the validator then rejects
+    it. This reminds the model to cite the existing spec/task that requires the
+    file and shows the correct vs incorrect shape.
+    """
+    lines = [
+        "\nNEVER cite an inspection_evidence.path that does not already exist in "
+        "pr-head -- especially a file your plan proposes to CREATE. Cite the "
+        "existing spec/task/design/proposal file that proves the change is "
+        "required and name the missing/target file in observation instead.",
+    ]
+    if paths:
+        joined = ", ".join(paths)
+        lines.append(
+            "Prefer citing these files that earlier stages already verified to "
+            f"exist: {joined}."
+        )
+    lines.append(
+        'Example -- CORRECT: {"path":"openspec/changes/foo/spec.md",'
+        '"observation":"requires docs/foo.md, which is absent"}; '
+        'WRONG: {"path":"docs/foo.md","observation":"file is missing"} '
+        "(docs/foo.md does not exist yet)."
+    )
+    return "\n".join(lines)
+
+
 def validate_inspection_evidence(
     payload: dict[str, Any],
     repo_path: str | Path | None,

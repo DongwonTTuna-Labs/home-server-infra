@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Any
 from codex_review.core.artifacts import write_text
 from codex_review.context.budget import compact_json
+from codex_review.model.inspection import (
+    collect_existing_evidence_paths,
+    render_evidence_citation_hint,
+)
 
 def include_approval_contract(prompt: str) -> str:
     return prompt + "\nReturn status approved_for_fix, needs_human, rejected_plan, or no_fix_needed. If the plan is OpenSpec-backed, has edit_sequence/tests, and has no execution_blockers, return approved_for_fix. Use needs_human only for secret/live credential needs, unsafe fork mutation, missing OpenSpec source, or other non-executable blockers."
@@ -22,7 +26,10 @@ def build_design_chief_prompt(design_plan: dict[str, Any], techlead_decision: di
         f"PR: {compact_json(pr_context)}\n"
         f"Policy: {compact_json(config.get('autofix', {}))}\n"
     )
-    return include_inspection_evidence_contract(include_fix_policy_requirements(include_approval_contract(prompt)))
+    prompt = include_inspection_evidence_contract(include_fix_policy_requirements(include_approval_contract(prompt)))
+    # The plan and techlead decision already passed evidence validation, so their
+    # paths are a verified existing-file set for the chief to re-cite.
+    return prompt + render_evidence_citation_hint(collect_existing_evidence_paths(design_plan, techlead_decision))
 
 def write_design_chief_prompt(prompt: str, out_path: str | Path) -> Path:
     return write_text(out_path, prompt)
