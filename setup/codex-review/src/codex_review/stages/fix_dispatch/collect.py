@@ -31,7 +31,12 @@ def collect_agent_results(manifest: dict[str, Any], result_paths: list[str | Pat
             continue
         tid=payload.get("task_id")
         if tid not in tasks:
-            raise ValidationError(f"fix result references unknown task_id: {tid}")
+            # The fix agent sometimes emits an extra result dir keyed by a
+            # finding id rather than a manifest task id. The manifest is the
+            # source of truth, so ignore results for unknown tasks instead of
+            # failing the whole loop; manifest tasks with no result are still
+            # reported as missing (no_safe_fix) below.
+            continue
         if tid in selected and selected[tid][2] != artifact_parent:
             raise ValidationError(f"duplicate fix result for task_id: {tid}")
         if tid in selected and selected[tid][1] == priority:
