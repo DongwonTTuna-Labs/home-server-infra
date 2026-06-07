@@ -14,12 +14,19 @@ def test_collect_agent_results_adds_safe_missing_defaults(tmp_path):
     assert [r["task_id"] for r in out["results"]] == ["t1", "t2"]
 
 
-def test_collect_agent_results_rejects_unknown_task(tmp_path):
+def test_collect_agent_results_ignores_unknown_task(tmp_path):
+    # The fix agent can emit an extra result dir keyed by a finding id. The
+    # manifest is the source of truth, so an unknown task_id is ignored (not a
+    # hard failure), while the real manifest task still collects normally.
     manifest = {"tasks": [{"task_id":"t1"}]}
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps({"schema_version":"fix-dispatch-agent-result.v1", "task_id":"other", "status":"no_safe_fix"}), encoding="utf-8")
-    with pytest.raises(Exception):
-        collect_agent_results(manifest, [p])
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({"schema_version":"fix-dispatch-agent-result.v1", "task_id":"t1", "status":"patched"}), encoding="utf-8")
+    extra = tmp_path / "extra.json"
+    extra.write_text(json.dumps({"schema_version":"fix-dispatch-agent-result.v1", "task_id":"correctness-001", "status":"patched"}), encoding="utf-8")
+    out = collect_agent_results(manifest, [good, extra])
+    assert [r["task_id"] for r in out["results"]] == ["t1"]
+    assert out["missing_task_ids"] == []
+    assert out["ready_for_merge"] is True
 
 
 def test_collect_agent_results_prefers_validated_result_over_raw_duplicate(tmp_path):
