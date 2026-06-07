@@ -25,7 +25,7 @@ def _authenticated_url(owner: str, repo: str, token: str) -> str:
 
 def prepare_authenticated_remote(repo_path: str | Path, owner: str, repo: str, token: str | None) -> dict[str, Any]:
     if not token:
-        raise ValidationError("actual push requires GitHub App installation token")
+        raise ValidationError("actual push requires a write token")
     proc = subprocess.run(["git", "remote", "get-url", "origin"], cwd=Path(repo_path), capture_output=True, text=True, env=sanitized_env())
     original = proc.stdout.strip() if proc.returncode == 0 else "origin"
     subprocess.run(["git", "remote", "set-url", "origin", _authenticated_url(owner, repo, token)], cwd=Path(repo_path), check=True, env=sanitized_env())

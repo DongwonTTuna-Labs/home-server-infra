@@ -29,5 +29,5 @@ def test_push_actual_push_without_token_fails(tmp_path):
     merged = {"schema_version":"fix-merge-merged-fix.v1", "status":"ready", "patch":"diff --git a/a b/a\nnew file mode 100644\nindex 0000000..7898192\n--- /dev/null\n+++ b/a\n@@ -0,0 +1 @@\n+x\n", "expected_head_sha":"h"}
     validation = {"schema_version":"push-validated-fix.v1", "status":"validated", "validated": True, "patch_hash": None, "semantic_safety_approved": True, "semantic_safety": {"status": "approved", "approved": True}}
     pr = {"head_sha":"h", "same_repo": True, "head_ref":"branch", "owner":"o", "repo":"r", "pr_number":1}
-    with pytest.raises(Exception, match="GitHub App installation token"):
+    with pytest.raises(Exception, match="write token"):
         commit_and_push_validated_fix(merged, validation, pr, {}, tmp_path, None, dry_run=False)

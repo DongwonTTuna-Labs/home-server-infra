@@ -313,7 +313,6 @@ diff --git a/docs/b.md b/docs/b.md
         {"subject": "docs(b): update loop evidence section", "body": "Update the second docs task.", "paths": ["docs/b.md"]},
     ]
 
-    monkeypatch.setattr(orchestrate, "assert_installation_token_for_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "validate_current_head", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "push_commit", lambda *args, **kwargs: {"pushed": True, "returncode": 0, "verified": True})
     monkeypatch.setattr(orchestrate, "verify_pushed_head", lambda *args, **kwargs: True)
@@ -365,7 +364,6 @@ def test_commit_push_treats_successful_push_with_delayed_verification_as_pushed_
 +new
 """
 
-    monkeypatch.setattr(orchestrate, "assert_installation_token_for_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "validate_current_head", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "push_commit", lambda *args, **kwargs: {"pushed": True, "returncode": 0, "verified": False})
     monkeypatch.setattr(orchestrate, "verify_pushed_head", lambda *args, **kwargs: False)
@@ -416,7 +414,6 @@ def test_commit_push_routes_live_head_drift_to_stale_head(tmp_path, monkeypatch)
 +new
 """
 
-    monkeypatch.setattr(orchestrate, "assert_installation_token_for_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "validate_current_head", lambda *args, **kwargs: (_ for _ in ()).throw(ValidationError("head SHA drift: expected old, current new")))
 
     result = commit_and_push_validated_fix(
@@ -470,7 +467,6 @@ def test_commit_push_exports_verified_updated_head_sha(tmp_path, monkeypatch):
         captured["remote_head_sha"] = sha
         return {"pushed": True, "returncode": 0, "verified": True, "remote_head_sha": sha, "expected_head_sha": sha}
 
-    monkeypatch.setattr(orchestrate, "assert_installation_token_for_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "validate_current_head", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "push_commit", fake_push_commit)
     monkeypatch.setattr(orchestrate, "verify_pushed_head", lambda *args, **kwargs: True)
@@ -522,7 +518,6 @@ def test_commit_push_pushed_unverified_withholds_local_commit_sha(tmp_path, monk
 +new
 """
 
-    monkeypatch.setattr(orchestrate, "assert_installation_token_for_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "validate_current_head", lambda *args, **kwargs: None)
     monkeypatch.setattr(orchestrate, "push_commit", lambda *args, **kwargs: {"pushed": True, "returncode": 0, "verified": False, "remote_head_sha": "0" * 40, "expected_head_sha": "deadbeef"})
     monkeypatch.setattr(orchestrate, "verify_pushed_head", lambda *args, **kwargs: False)
