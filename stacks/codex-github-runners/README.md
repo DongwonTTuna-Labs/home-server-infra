@@ -49,18 +49,15 @@ preserve the host file mode, so keep it readable during first-time registration.
 Once the runner volumes have `.runner` configuration, the stack can restart
 without reading the PAT.
 
-## Codex OIDC Relay Auth
+## Codex Relay Auth
 
-Codex review workflows authenticate with GitHub OIDC. Workflows grant
-`id-token: write` and exchange the GitHub OIDC token for a short-lived codex-lb
-relay key at `https://relay-ai.dongwontuna.net/v1/oidc/token`. The exchange now
-lives in the consuming repo's own helper (`codex-review oidc relay-token`); the
-relay key is passed to `openai/codex-action` as `openai-api-key` together with
+codex-lb now runs the upstream `ghcr.io/soju06/codex-lb:latest` image, which has
+no OIDC federation: the `/v1/oidc/token` exchange endpoint no longer exists.
+Codex review workflows therefore need an alternative relay credential (e.g. a
+static codex-lb API key issued from the dashboard) passed to
+`openai/codex-action` as `openai-api-key`, with
 `responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses`.
-
-Trust is decided by codex-lb's OIDC federation (provider + binding in its
-database), seeded via `stacks/codex-lb/seed-oidc-trust.py`. There is no
-long-lived relay key stored in GitHub secrets — it is minted per job.
+Reconfiguring that workflow auth is tracked separately from this stack.
 
 ## Resource Model
 

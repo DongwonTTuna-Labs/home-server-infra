@@ -8,7 +8,6 @@ required=(
   docs/secrets.md
   stacks/codex-lb/README.md
   stacks/codex-lb/compose.yaml
-  stacks/codex-lb/seed-oidc-trust.py
   stacks/codex-lb/cloudflared/codex-lb.yml
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile

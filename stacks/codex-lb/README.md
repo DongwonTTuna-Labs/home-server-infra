@@ -1,7 +1,7 @@
 # codex-lb Stack
 
-This stack owns the Codex relay, native OIDC token exchange, and Cloudflare
-route.
+This stack owns the Codex relay and its Cloudflare route. It runs the upstream
+`ghcr.io/soju06/codex-lb:latest` image.
 
 ## Tracked
 
@@ -18,7 +18,6 @@ These are required on each host but are not committed:
 ## Deploy
 
 ```sh
-docker compose -f stacks/codex-lb/compose.yaml build codex-lb
 docker compose -f stacks/codex-lb/compose.yaml up -d
 ```
 
@@ -26,5 +25,4 @@ docker compose -f stacks/codex-lb/compose.yaml up -d
 
 ```sh
 curl -fsS https://relay-ai.dongwontuna.net/health/ready
-curl -fsS https://relay-ai.dongwontuna.net/oidc/health
 ```
