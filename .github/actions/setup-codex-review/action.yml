@@ -1,0 +1,29 @@
+name: Setup Codex Review
+description: >-
+  Install the trusted codex-review helper from this pinned home-server-infra
+  action source. Callers reference this action by a 40-char commit SHA, so the
+  helper version is anchored to the action ref with no runtime checkout of
+  home-server-infra and no read token.
+
+outputs:
+  config_path:
+    description: Absolute path to the trusted-core config.yml bundled with this action source.
+    value: ${{ steps.install.outputs.config_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install codex-review helper from action source
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        # A remote composite action checks out its whole repository at the
+        # pinned ref; GITHUB_ACTION_PATH is <repo>/.github/actions/setup-codex-review,
+        # so the bundled package lives three levels up. Installing from here is
+        # what removes the runtime home-server-infra checkout and the read token.
+        repo_root="$(cd "${GITHUB_ACTION_PATH}/../../.." && pwd)"
+        pkg_dir="${repo_root}/setup/codex-review"
+        python3 -m pip install --disable-pip-version-check -e "${pkg_dir}"
+        codex-review --help >/dev/null
+        echo "config_path=${pkg_dir}/config.yml" >> "${GITHUB_OUTPUT}"
