@@ -529,6 +529,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -587,6 +590,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -663,6 +669,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -715,6 +724,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -772,6 +784,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -826,6 +841,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -967,6 +985,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -1038,6 +1059,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe
@@ -1101,6 +1125,9 @@ jobs:
         with:
           openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+          # gpt-5.5 reasoning effort (relay default is medium); use the highest
+          # tier for the agentic loop's review/design/fix decisions.
+          effort: xhigh
           # Self-hosted container is the isolation boundary; skip the action's
           # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
           safety-strategy: unsafe

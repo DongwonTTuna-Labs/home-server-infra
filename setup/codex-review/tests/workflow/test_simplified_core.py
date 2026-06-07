@@ -61,6 +61,9 @@ def test_relay_key_read_from_runner_env_and_fed_to_model():
                 w = step.get("with") or {}
                 assert w.get("openai-api-key") == "${{ steps.relay_key.outputs.key }}"
                 assert w.get("responses-api-endpoint") == RELAY_ENDPOINT
+                # gpt-5.5 defaults to medium effort; the loop runs every model
+                # step at the highest reasoning tier.
+                assert w.get("effort") == "xhigh", step.get("name")
                 # Container is the isolation boundary; the action's sudo-drop
                 # sandbox needs passwordless sudo the runner doesn't grant.
                 assert w.get("safety-strategy") == "unsafe"
