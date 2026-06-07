@@ -209,7 +209,7 @@ jobs:
 
       - name: Setup trusted codex-review helper
         id: setup_codex
-        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@3b9e9f480630c4c51a6978f963e741fab9940894
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@main
 
       - name: Download prior loop state artifact
         if: ${{ inputs.state_run_id != '' && inputs.state_artifact_name != '' }}
@@ -276,7 +276,7 @@ jobs:
 
       - name: Setup trusted codex-review helper
         id: setup_codex
-        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@3b9e9f480630c4c51a6978f963e741fab9940894
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@main
 
       - name: Download setup loop state artifact
         uses: actions/download-artifact@v4
