@@ -103,6 +103,30 @@ def test_push_and_dispatch_use_the_pat_from_runner_env():
     assert 'export GH_TOKEN="${CODEX_LOOP_PAT}"' in text
 
 
+def test_loop_scratch_lives_under_runner_temp():
+    # Self-hosted runners reuse the workspace between jobs but wipe RUNNER_TEMP
+    # per job. The stage-decision gate and the loop-state file are per-job
+    # scratch; keeping them under RUNNER_TEMP makes cross-job leakage impossible
+    # by construction. (A stale workspace-root gate previously made a later
+    # stage short-circuit and re-emit the prior decision -> design->design loop.)
+    # Mirrors the codex-home pattern already used by the model steps.
+    text = _text()
+    # The decision gate must never live at the workspace root.
+    assert ".codex-loop-stage-result.json" not in text
+    assert "${RUNNER_TEMP}/codex-loop-stage-result.json" in text
+    # The loop-state file is never read/written/uploaded from the workspace root.
+    for bare in (
+        "--out codex-loop-state.json",
+        "--loop-state codex-loop-state.json",
+        "path: codex-loop-state.json",
+    ):
+        assert bare not in text, bare
+    assert '--out "${RUNNER_TEMP}/codex-loop-state.json"' in text
+    assert "${{ runner.temp }}/codex-loop-state.json" in text
+    # The rm-based reset band-aid is replaced by the runner.temp guarantee.
+    assert "Reset stale loop workspace scratch" not in text
+
+
 def test_cross_run_artifact_downloads_pass_github_token():
     # download-artifact@v4 does NOT default github-token for cross-run
     # downloads (run-id set): without it the action only searches the current
