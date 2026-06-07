@@ -8,7 +8,7 @@ on:
         type: number
         required: true
       head_sha:
-        description: Expected pull request head SHA. Required for dry-run and live debug runs.
+        description: Expected pull request head SHA. Required for live debug runs.
         type: string
         required: true
       base_ref:
@@ -51,11 +51,6 @@ on:
         type: number
         required: false
         default: 5
-      dry_run:
-        description: Keep manual debug runs non-writing by default.
-        type: boolean
-        required: false
-        default: true
 
 # payload schema: workflow_dispatch typed inputs map directly to workflow_call inputs.
 permissions: {}
@@ -63,7 +58,7 @@ permissions: {}
 jobs:
   manual-debug-adapter:
     name: Manual Debug Adapter Only
-    # These job permissions are the ceiling for the called reusable workflow; this manual adapter remains debug-only and dry-run by default.
+    # These job permissions are the ceiling for the called reusable workflow. The loop runs live (model/push/dispatch) for eligible PRs; the trust/stale guard and relay/secret presence are the only gates.
     permissions:
       contents: write
       pull-requests: write
@@ -80,5 +75,4 @@ jobs:
       state_run_id: ${{ inputs.state_run_id }}
       state_artifact_name: ${{ inputs.state_artifact_name }}
       max_iterations: ${{ inputs.max_iterations }}
-      dry_run: ${{ inputs.dry_run }}
     secrets: inherit

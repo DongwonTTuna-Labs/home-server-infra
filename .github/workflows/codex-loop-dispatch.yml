@@ -30,7 +30,6 @@ jobs:
       state_run_id: ${{ steps.validate_payload.outputs.state_run_id }}
       state_artifact_name: ${{ steps.validate_payload.outputs.state_artifact_name }}
       max_iterations: ${{ steps.validate_payload.outputs.max_iterations }}
-      dry_run: ${{ steps.validate_payload.outputs.dry_run }}
     steps:
       - name: Validate repository_dispatch client_payload
         id: validate_payload
@@ -46,7 +45,6 @@ jobs:
           PAYLOAD_STATE_RUN_ID: ${{ github.event.client_payload.state_run_id }}
           PAYLOAD_STATE_ARTIFACT_NAME: ${{ github.event.client_payload.state_artifact_name }}
           PAYLOAD_MAX_ITERATIONS: ${{ github.event.client_payload.max_iterations }}
-          PAYLOAD_DRY_RUN: ${{ github.event.client_payload.dry_run }}
         run: |
           set -euo pipefail
 
@@ -73,7 +71,6 @@ jobs:
           require_non_empty state_artifact_name "${PAYLOAD_STATE_ARTIFACT_NAME}"
 
           max_iterations="${PAYLOAD_MAX_ITERATIONS:-5}"
-          dry_run="${PAYLOAD_DRY_RUN:-true}"
 
           if [[ "${valid}" == "true" ]]; then
             if ! [[ "${PAYLOAD_PR_NUMBER}" =~ ^[0-9]+$ ]]; then
@@ -104,16 +101,6 @@ jobs:
             esac
           fi
 
-          if [[ "${valid}" == "true" ]]; then
-            case "${dry_run}" in
-              true|false) ;;
-              *)
-                terminal_reason="invalid-dry_run"
-                valid="false"
-                ;;
-            esac
-          fi
-
           {
             echo "## Codex loop dispatch validation"
             echo "payload schema: github.event.client_payload"
@@ -123,7 +110,6 @@ jobs:
             echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
             echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
             echo "max_iterations=${max_iterations}"
-            echo "dry_run=${dry_run}"
             echo "valid=${valid}"
             if [[ -n "${terminal_reason}" ]]; then
               echo "terminal_reason=${terminal_reason}"
@@ -146,7 +132,6 @@ jobs:
             echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
             echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
             echo "max_iterations=${max_iterations}"
-            echo "dry_run=${dry_run}"
           } >> "${GITHUB_OUTPUT}"
 
   codex-loop:
@@ -170,5 +155,4 @@ jobs:
       state_run_id: ${{ needs.validate-payload.outputs.state_run_id }}
       state_artifact_name: ${{ needs.validate-payload.outputs.state_artifact_name }}
       max_iterations: ${{ fromJSON(needs.validate-payload.outputs.max_iterations) }}
-      dry_run: ${{ needs.validate-payload.outputs.dry_run == 'true' }}
     secrets: inherit

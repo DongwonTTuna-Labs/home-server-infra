@@ -378,14 +378,15 @@ def test_fix_continuation_payload_uses_verified_updated_head_sha():
     assert 'dispatch_head_sha="${FINAL_UPDATED_HEAD_SHA}"' in run
 
 
-def test_live_writes_are_gated_behind_dry_run_default():
+def test_live_writes_are_gated_behind_trust_and_relay():
+    # The dry-run flag was removed; the loop runs live for eligible PRs. Live
+    # writes are gated by the trust/stale guard and relay presence instead,
+    # surfaced as the named `eligible` / `live_ready` invariants.
     reusable = reusable_text()
-    dispatch = DISPATCH.read_text(encoding="utf-8")
-    manual = MANUAL.read_text(encoding="utf-8")
-    assert "default: true" in reusable
-    assert 'dry_run="${PAYLOAD_DRY_RUN:-true}"' in dispatch
-    assert "default: true" in manual
-    assert 'if [[ "${INPUT_DRY_RUN}" == "true" ]]' in reusable
+    assert "dry_run" not in reusable
+    assert "enable_live_autofix" not in reusable
+    assert "needs.setup-relay.outputs.live_ready == 'true'" in reusable
+    assert "needs.trust-and-stale-guard.outputs.eligible == 'true'" in reusable
 
 
 def test_helper_is_installed_from_trusted_core_with_pinned_python():
