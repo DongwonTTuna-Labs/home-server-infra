@@ -15,10 +15,6 @@ on:
         description: Expected pull request base ref.
         type: string
         required: true
-      trusted_core_ref:
-        description: Immutable home-server-infra commit SHA for trusted helper checkout.
-        type: string
-        required: true
       stage:
         description: Loop stage; must be review, design, fix, or push.
         type: string
@@ -59,9 +55,6 @@ on:
         type: string
         required: false
     secrets:
-      CODEX_TRUSTED_CORE_READ_TOKEN:
-        description: Read-only token scoped to DongwonTTuna-Labs/home-server-infra contents for trusted core checkout only.
-        required: true
       CODEX_GITHUB_APP_ID:
         description: GitHub App id used only by non-dry-run write/finalize steps.
         required: false
@@ -120,7 +113,6 @@ jobs:
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_HEAD_SHA: ${{ inputs.head_sha }}
           INPUT_BASE_REF: ${{ inputs.base_ref }}
-          INPUT_TRUSTED_CORE_REF: ${{ inputs.trusted_core_ref }}
           INPUT_STAGE: ${{ inputs.stage }}
           INPUT_ITERATION: ${{ inputs.iteration }}
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
@@ -148,7 +140,6 @@ jobs:
           require_non_empty pr_number "${INPUT_PR_NUMBER}"
           require_non_empty head_sha "${INPUT_HEAD_SHA}"
           require_non_empty base_ref "${INPUT_BASE_REF}"
-          require_non_empty trusted_core_ref "${INPUT_TRUSTED_CORE_REF}"
           require_non_empty stage "${INPUT_STAGE}"
           require_non_empty iteration "${INPUT_ITERATION}"
           require_non_empty correlation_id "${INPUT_CORRELATION_ID}"
@@ -193,7 +184,6 @@ jobs:
           {
             echo "valid=${valid}"
             echo "terminal_reason=${terminal_reason}"
-            echo "trusted_core_ref=${INPUT_TRUSTED_CORE_REF}"
             echo "stage=${INPUT_STAGE}"
             echo "iteration=${INPUT_ITERATION}"
             echo "max_iterations=${INPUT_MAX_ITERATIONS}"
@@ -343,27 +333,6 @@ jobs:
       terminal_reason: ${{ steps.relay.outputs.terminal_reason }}
       state_artifact_name: ${{ steps.state.outputs.state_artifact_name }}
     steps:
-      - name: Validate trusted core checkout token
-        shell: bash
-        env:
-          CODEX_TRUSTED_CORE_READ_TOKEN: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${CODEX_TRUSTED_CORE_READ_TOKEN}" ]]; then
-            echo "CODEX_TRUSTED_CORE_READ_TOKEN is required for private home-server-infra checkout" >&2
-            exit 1
-          fi
-
-      - name: Checkout trusted Codex loop core
-        uses: actions/checkout@v4
-        with:
-          repository: DongwonTTuna-Labs/home-server-infra
-          ref: ${{ inputs.trusted_core_ref }}
-          token: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
-          path: trusted-core
-          sparse-checkout: setup/codex-review
-          persist-credentials: false
-
       - name: Checkout target base reference
         uses: actions/checkout@v4
         with:
@@ -380,11 +349,9 @@ jobs:
           path: pr-head
           persist-credentials: false
 
-      - name: Install trusted codex-review helper
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+      - name: Setup trusted codex-review helper
+        id: setup_codex
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@86d0df4e7caf166046fe77671471f4965d51f106
 
       - name: Configure native codex-lb relay
         id: relay
@@ -494,27 +461,6 @@ jobs:
       updated_head_sha: ${{ steps.stage_outputs.outputs.updated_head_sha }}
       state_artifact_name: ${{ steps.stage_outputs.outputs.state_artifact_name }}
     steps:
-      - name: Validate trusted core checkout token
-        shell: bash
-        env:
-          CODEX_TRUSTED_CORE_READ_TOKEN: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${CODEX_TRUSTED_CORE_READ_TOKEN}" ]]; then
-            echo "CODEX_TRUSTED_CORE_READ_TOKEN is required for private home-server-infra checkout" >&2
-            exit 1
-          fi
-
-      - name: Checkout trusted Codex loop core
-        uses: actions/checkout@v4
-        with:
-          repository: DongwonTTuna-Labs/home-server-infra
-          ref: ${{ inputs.trusted_core_ref }}
-          token: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
-          path: trusted-core
-          sparse-checkout: setup/codex-review
-          persist-credentials: false
-
       - name: Checkout PR head data
         uses: actions/checkout@v4
         with:
@@ -523,11 +469,9 @@ jobs:
           path: pr-head
           persist-credentials: false
 
-      - name: Install trusted codex-review helper
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+      - name: Setup trusted codex-review helper
+        id: setup_codex
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@86d0df4e7caf166046fe77671471f4965d51f106
 
       - name: Download setup loop state artifact
         uses: actions/download-artifact@v4
@@ -1591,7 +1535,6 @@ jobs:
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_HEAD_SHA: ${{ inputs.head_sha }}
           INPUT_BASE_REF: ${{ inputs.base_ref }}
-          INPUT_TRUSTED_CORE_REF: ${{ inputs.trusted_core_ref }}
           INPUT_STAGE: ${{ inputs.stage }}
           INPUT_ITERATION: ${{ inputs.iteration }}
           INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
@@ -1695,7 +1638,6 @@ jobs:
             --arg pr_number "${INPUT_PR_NUMBER}" \
             --arg head_sha "${next_head_sha}" \
             --arg base_ref "${INPUT_BASE_REF}" \
-            --arg trusted_core_ref "${INPUT_TRUSTED_CORE_REF}" \
             --arg stage "${next_stage}" \
             --arg iteration "${next_iteration}" \
             --arg correlation_id "${INPUT_CORRELATION_ID}" \
@@ -1707,7 +1649,7 @@ jobs:
             --arg state_artifact_name "${state_artifact_name}" \
             --arg updated_head_sha "${updated_head_sha}" \
             --arg status "emitted" \
-            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, trusted_core_ref:$trusted_core_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), dry_run:($dry_run == "true"), enable_live_autofix:($enable_live_autofix == "true"), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
+            '{repository:$repository, pr_number:($pr_number|tonumber), head_sha:$head_sha, base_ref:$base_ref, stage:$stage, iteration:($iteration|tonumber), correlation_id:$correlation_id, requested_by:$requested_by, max_iterations:($max_iterations|tonumber), dry_run:($dry_run == "true"), enable_live_autofix:($enable_live_autofix == "true"), state_run_id:$state_run_id, state_artifact_name:$state_artifact_name, updated_head_sha:$updated_head_sha, status:$status}' \
             > .codex-loop-dispatch-payload.json
 
           jq -n --arg event_type "codex-loop-continuation" --slurpfile client_payload .codex-loop-dispatch-payload.json \
@@ -1740,35 +1682,10 @@ jobs:
             echo "dispatch_candidate=${dispatch_candidate}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Validate trusted core checkout token for live continuation
+      - name: Setup trusted codex-review helper for live continuation
+        id: setup_codex
         if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
-        shell: bash
-        env:
-          CODEX_TRUSTED_CORE_READ_TOKEN: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${CODEX_TRUSTED_CORE_READ_TOKEN}" ]]; then
-            echo "CODEX_TRUSTED_CORE_READ_TOKEN is required for private home-server-infra checkout" >&2
-            exit 1
-          fi
-
-      - name: Checkout trusted Codex loop core for live continuation
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
-        uses: actions/checkout@v4
-        with:
-          repository: DongwonTTuna-Labs/home-server-infra
-          ref: ${{ inputs.trusted_core_ref }}
-          token: ${{ secrets.CODEX_TRUSTED_CORE_READ_TOKEN }}
-          path: trusted-core
-          sparse-checkout: setup/codex-review
-          persist-credentials: false
-
-      - name: Install trusted codex-review helper for live continuation
-        if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m pip install --disable-pip-version-check -e trusted-core/setup/codex-review
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@86d0df4e7caf166046fe77671471f4965d51f106
 
       - name: Download final loop state for live continuation
         if: ${{ inputs.dry_run == false && inputs.enable_live_autofix == true && steps.resolve.outputs.dispatch_candidate == 'true' && needs.validate.outputs.valid == 'true' && needs.trust-and-stale-guard.outputs.trusted == 'true' && needs.trust-and-stale-guard.outputs.fork == 'false' && needs.trust-and-stale-guard.outputs.stale == 'false' }}
@@ -1786,7 +1703,7 @@ jobs:
         run: |
           set -euo pipefail
           codex-review loop guard-dispatch \
-            --config trusted-core/setup/codex-review/config.yml \
+            --config "${{ steps.setup_codex.outputs.config_path }}" \
             --in .codex-loop-dispatch-payload.json \
             --ledger codex-review-artifacts/final-state/dispatch-ledger.json \
             --out .codex-loop-dispatch-guard.json
@@ -1798,7 +1715,7 @@ jobs:
             exit 0
           fi
           codex-review loop append-dispatch-ledger \
-            --config trusted-core/setup/codex-review/config.yml \
+            --config "${{ steps.setup_codex.outputs.config_path }}" \
             --in .codex-loop-dispatch-payload.json \
             --ledger codex-review-artifacts/final-state/dispatch-ledger.json \
             --out codex-review-artifacts/final-state/dispatch-ledger.next.json
