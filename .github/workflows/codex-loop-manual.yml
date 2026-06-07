@@ -69,4 +69,3 @@ jobs:
       requested_by: ${{ inputs.requested_by }}
       state_run_id: ${{ inputs.state_run_id }}
       state_artifact_name: ${{ inputs.state_artifact_name }}
-    secrets: inherit

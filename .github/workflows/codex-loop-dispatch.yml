@@ -145,4 +145,3 @@ jobs:
       requested_by: ${{ needs.validate-payload.outputs.requested_by }}
       state_run_id: ${{ needs.validate-payload.outputs.state_run_id }}
       state_artifact_name: ${{ needs.validate-payload.outputs.state_artifact_name }}
-    secrets: inherit

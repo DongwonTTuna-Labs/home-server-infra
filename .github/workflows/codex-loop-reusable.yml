@@ -39,13 +39,8 @@ on:
         description: Exact prior loop-state artifact name to download from state_run_id.
         type: string
         required: false
-    secrets:
-      CODEX_RELAY_API_KEY:
-        description: Static relay API key used to authenticate model (codex-action) calls.
-        required: true
-      CODEX_LOOP_PAT:
-        description: Permanent PAT used for push and continuation repository_dispatch.
-        required: true
+    # No secrets: credentials (CODEX_RELAY_API_KEY, CODEX_LOOP_PAT) are provided as
+    # environment variables on the self-hosted org runners. See CODEX_LOOP.md.
     outputs:
       next_stage:
         description: Next loop stage requested by the core.
@@ -515,11 +510,20 @@ jobs:
             echo "stage=${INPUT_STAGE}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Read relay API key from runner environment
+        id: relay_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CODEX_RELAY_API_KEY:?CODEX_RELAY_API_KEY not set on runner}"
+          echo "::add-mask::${CODEX_RELAY_API_KEY}"
+          echo "key=${CODEX_RELAY_API_KEY}" >> "${GITHUB_OUTPUT}"
+
       - name: Run live Codex review findings
         if: ${{ inputs.stage == 'review' && steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/review/correctness/prompt.md` and inspect the checked-out PR head at `pr-head`.
@@ -565,7 +569,7 @@ jobs:
         if: ${{ inputs.stage == 'review' && steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/review/techlead.prompt.md` and inspect `pr-head` as needed.
@@ -630,7 +634,7 @@ jobs:
         if: ${{ inputs.stage == 'design' && steps.prepare_stage.outputs.needs_design_inventory_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/design/design-inventory.prompt.md` and inspect `pr-head` as needed.
@@ -670,7 +674,7 @@ jobs:
         if: ${{ inputs.stage == 'design' && steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/design/design-clusters.prompt.md` and inspect `pr-head` as needed.
@@ -715,7 +719,7 @@ jobs:
         if: ${{ inputs.stage == 'design' && steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/design/design-plan.prompt.md` and inspect `pr-head` as needed.
@@ -757,7 +761,7 @@ jobs:
         if: ${{ inputs.stage == 'design' && steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/design-state-bundle/chief.prompt.md` and inspect `pr-head` as needed.
@@ -815,16 +819,15 @@ jobs:
         if: ${{ inputs.stage == 'push' && steps.prepare_stage.outputs.needs_push_commit == 'true' && needs.setup-state.result == 'success' }}
         continue-on-error: true
         shell: bash
-        env:
-          PUSH_TOKEN: ${{ secrets.CODEX_LOOP_PAT }}
         run: |
           set -euo pipefail
+          : "${CODEX_LOOP_PAT:?CODEX_LOOP_PAT not set on runner}"
           codex-review push commit-push \
             --in codex-review-artifacts/prior-state/merged-fix.json \
             --validation codex-review-artifacts/prior-state/validated-fix.json \
             --pr-context codex-review-artifacts/common/pr-context.json \
             --repo-path pr-head \
-            --token "${PUSH_TOKEN}" \
+            --token "${CODEX_LOOP_PAT}" \
             --out codex-review-artifacts/push/push-result.json
 
       - name: Complete push stage state
@@ -888,7 +891,7 @@ jobs:
         if: ${{ inputs.stage == 'fix' && steps.prepare_stage.outputs.needs_fix_agent_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Inspect every `codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file and the checked-out PR head at `pr-head`.
@@ -948,7 +951,7 @@ jobs:
         if: ${{ inputs.stage == 'fix' && steps.fix_merge_prepare.outputs.needs_fix_merge_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/fix_merge/merge-prompt.md` and inspect `pr-head` as needed.
@@ -999,7 +1002,7 @@ jobs:
         if: ${{ inputs.stage == 'fix' && steps.fix_semantic_prepare.outputs.needs_semantic_model == 'true' }}
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.CODEX_RELAY_API_KEY }}
+          openai-api-key: ${{ steps.relay_key.outputs.key }}
           responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
           prompt: |
             Read `codex-review-artifacts/fix_merge/semantic-safety-prompt.md` and inspect `pr-head` as needed.
@@ -1313,10 +1316,11 @@ jobs:
         if: ${{ steps.resolve.outputs.dispatch_candidate == 'true' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.CODEX_LOOP_PAT }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          : "${CODEX_LOOP_PAT:?CODEX_LOOP_PAT not set on runner}"
+          export GH_TOKEN="${CODEX_LOOP_PAT}"
           gh api --method POST "repos/${REPOSITORY}/dispatches" --input .codex-loop-repository-dispatch.json
           echo "dispatched=true" >> "${GITHUB_OUTPUT}"
 

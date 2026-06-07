@@ -27,10 +27,11 @@ def test_four_job_pipeline_in_order():
     assert jobs == ["validate", "setup-state", "run-stage", "finalize"], jobs
 
 
-def test_secrets_are_static_key_and_pat_only():
+def test_no_workflow_call_secrets_and_no_secret_refs():
+    # Credentials come from runner env vars, not GitHub secrets.
     on = _doc().get("on", _doc().get(True))
-    secrets = on["workflow_call"]["secrets"]
-    assert set(secrets) == {"CODEX_RELAY_API_KEY", "CODEX_LOOP_PAT"}, sorted(secrets)
+    assert "secrets" not in on["workflow_call"], "core must declare no workflow_call secrets"
+    assert "${{ secrets." not in _text(), "no secrets.* references allowed"
 
 
 def test_no_deleted_machinery_remains():
@@ -44,22 +45,27 @@ def test_no_deleted_machinery_remains():
         assert token not in text, f"deleted machinery still present: {token}"
 
 
-def test_model_steps_use_static_relay_key_and_endpoint():
+def test_relay_key_read_from_runner_env_and_fed_to_model():
+    text = _text()
+    # A capture step reads the runner env var (fail-fast) and exposes it.
+    assert "${CODEX_RELAY_API_KEY:?" in text
+    assert 'echo "::add-mask::${CODEX_RELAY_API_KEY}"' in text
     seen = 0
     for job in _doc()["jobs"].values():
         for step in job.get("steps", []) or []:
             if step.get("uses") == MODEL_ACTION:
                 seen += 1
                 w = step.get("with") or {}
-                assert w.get("openai-api-key") == "${{ secrets.CODEX_RELAY_API_KEY }}"
+                assert w.get("openai-api-key") == "${{ steps.relay_key.outputs.key }}"
                 assert w.get("responses-api-endpoint") == RELAY_ENDPOINT
     assert seen >= 9, f"expected >=9 model steps, saw {seen}"
 
 
-def test_push_and_dispatch_use_the_pat():
+def test_push_and_dispatch_use_the_pat_from_runner_env():
     text = _text()
-    assert "PUSH_TOKEN: ${{ secrets.CODEX_LOOP_PAT }}" in text
-    assert "GH_TOKEN: ${{ secrets.CODEX_LOOP_PAT }}" in text
+    assert "${CODEX_LOOP_PAT:?" in text
+    assert '--token "${CODEX_LOOP_PAT}"' in text
+    assert 'export GH_TOKEN="${CODEX_LOOP_PAT}"' in text
 
 
 def test_continuation_dispatch_gates_only_on_dispatch_candidate():

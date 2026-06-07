@@ -14,16 +14,18 @@ uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/codex-loop-reusable.
 So changes to the core take effect for all consumers on merge to `main` — no
 per-consumer SHA re-pin.
 
-## Required secrets
+## Required runner environment variables (no GitHub secrets)
 
-Both must exist in every repo that runs the loop (consumers and this repo, since
-the internal `codex-loop-manual.yml` / `codex-loop-dispatch.yml` use
-`secrets: inherit`):
+Credentials are **environment variables on the self-hosted org runners**
+(`stacks/codex-github-runners/`), not GitHub Actions secrets. The reusable core
+declares no `secrets:`; consumer adapters map none. Every runner must export:
 
-| Secret | Purpose |
+| Env var | Purpose |
 | --- | --- |
-| `CODEX_RELAY_API_KEY` | Static key passed to `openai/codex-action` (`openai-api-key`). Talks to the relay at `https://relay-ai.dongwontuna.net/v1/responses`. Replaces the old OIDC relay-token exchange. |
-| `CODEX_LOOP_PAT` | Permanent classic PAT (repo scope) used for `push commit-push` and the continuation `repository_dispatch`. A PAT (not `GITHUB_TOKEN`) is required so the dispatch re-triggers the workflow. Replaces the old GitHub App. |
+| `CODEX_RELAY_API_KEY` | Static codex-lb dashboard key. A `run:` step reads it from the runner env, masks it, and feeds it to `openai/codex-action` as `openai-api-key` (relay endpoint `https://relay-ai.dongwontuna.net/v1/responses`). Replaces the old OIDC relay-token exchange. |
+| `CODEX_LOOP_PAT` | Permanent classic PAT (repo scope), read directly in the push / continuation-dispatch `run:` steps. A PAT (not `GITHUB_TOKEN`) is required so `repository_dispatch` re-triggers the workflow. Replaces the old GitHub App. |
+
+A job that lands on a runner missing either var fails fast (`:?` guard).
 
 ## Behavior
 
