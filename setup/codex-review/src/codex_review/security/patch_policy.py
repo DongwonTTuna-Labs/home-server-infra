@@ -24,6 +24,7 @@ from typing import Any
 
 from codex_review.core.errors import PolicyViolation
 from codex_review.core.paths import safe_relative_path
+from codex_review.memory.paths import is_memory_path
 from .redaction import scan_patch_for_secrets
 
 DIFF_PATH_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
@@ -69,6 +70,8 @@ def assert_allowed_paths(touched_files: list[str], policy: dict[str, Any]) -> No
     forbidden = set(policy.get("forbidden_files") or [])
     forbidden_prefixes = policy.get("forbidden_prefixes") or []
     for path in touched_files:
+        if is_memory_path(path):
+            raise PolicyViolation(f"patch touches review memory path outside autofix target scope: {path}")
         if path in forbidden or _matches_any(path, forbidden_prefixes):
             raise PolicyViolation(f"patch touches forbidden path: {path}")
         if allowed or allowed_prefixes:

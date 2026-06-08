@@ -1,0 +1,241 @@
+name: Run Codex Review Phase
+description: >-
+  Trusted composite for the review and techlead step bundle in the Codex loop.
+  The caller keeps the surrounding DAG, gates, checkouts, and token capture.
+
+inputs:
+  workspace:
+    description: Absolute workflow workspace path containing PR checkout and artifacts.
+    required: true
+  repo-path:
+    description: Repository checkout path to inspect as PR-head data.
+    required: true
+  common-artifact-dir:
+    description: Directory containing common context artifacts.
+    required: true
+  review-artifact-dir:
+    description: Directory where review artifacts are written.
+    required: true
+  review-state-bundle-dir:
+    description: Directory where review state bundle artifacts are written.
+    required: true
+  memory-context:
+    description: Path to the common memory context markdown artifact.
+    required: true
+  relay-api-key:
+    description: Relay or OpenAI-compatible API key captured and masked by the caller.
+    required: true
+  codex-home-root:
+    description: Root directory for per-model Codex home directories.
+    required: true
+
+outputs:
+  next_stage:
+    description: Next sequential stage selected by review routing.
+    value: ${{ steps.review_complete.outputs.next_stage }}
+  lgtm:
+    description: Whether review reached an LGTM terminal state.
+    value: ${{ steps.review_complete.outputs.lgtm }}
+  terminal_reason:
+    description: Review terminal reason, empty when handing off to design.
+    value: ${{ steps.review_complete.outputs.terminal_reason }}
+  techlead_decision_path:
+    description: Path to the validated techlead decision artifact.
+    value: ${{ steps.review_complete.outputs.techlead_decision_path }}
+  review_publication_path:
+    description: Path to the techlead review publication artifact.
+    value: ${{ steps.review_complete.outputs.review_publication_path }}
+  combined_findings_path:
+    description: Path to the combined review findings artifact in the review state bundle.
+    value: ${{ steps.review_complete.outputs.combined_findings_path }}
+  route_path:
+    description: Path to the review route artifact.
+    value: ${{ steps.review_complete.outputs.route_path }}
+  publish_report_path:
+    description: Path to the dry-run review publish report artifact.
+    value: ${{ steps.review_complete.outputs.publish_report_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare review prompt
+      id: prepare_stage
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        COMMON_ARTIFACT_DIR: ${{ inputs.common-artifact-dir }}
+        MEMORY_CONTEXT: ${{ inputs.memory-context }}
+        REVIEW_ARTIFACT_DIR: ${{ inputs.review-artifact-dir }}
+        REVIEW_STATE_BUNDLE_DIR: ${{ inputs.review-state-bundle-dir }}
+      run: |
+        set -euo pipefail
+
+        # Always-live: the loop always runs live model work using the static
+        # relay key; there is no relay probe to gate this on.
+        live_enabled="true"
+
+        # Review is the first sequential stage and always runs.
+        mkdir -p "${REVIEW_ARTIFACT_DIR}/correctness" "${REVIEW_STATE_BUNDLE_DIR}"
+        codex-review review build-review-prompt \
+          --axis correctness \
+          --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+          --docs-context "${COMMON_ARTIFACT_DIR}/docs-context.md" \
+          --memory-context "${MEMORY_CONTEXT}" \
+          --out "${REVIEW_ARTIFACT_DIR}/correctness/prompt.md"
+        codex-review schema openai-strict --schema review-axis-findings.v1 --out "${REVIEW_ARTIFACT_DIR}/correctness/findings.strict.json"
+        if [[ "${live_enabled}" == "true" ]]; then
+          echo "needs_review_axis_model=true" >> "${GITHUB_OUTPUT}"
+        else
+          codex-review review default-result \
+            --axis correctness \
+            --out "${REVIEW_ARTIFACT_DIR}/correctness/findings.raw.json"
+          echo "needs_review_axis_model=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+        {
+          echo "## Codex loop stage prepare"
+          echo "review prompt and common context prepared"
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Run live Codex review findings
+      if: ${{ steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ inputs.relay-api-key }}
+        responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+        # gpt-5.5 reasoning effort (relay default is medium); use the highest
+        # tier for the agentic loop's review/design/fix decisions.
+        effort: xhigh
+        # Self-hosted container is the isolation boundary; skip the action's
+        # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+        safety-strategy: unsafe
+        # No bubblewrap: the runner container is the isolation boundary and can't
+        # nest user namespaces. danger-full-access runs codex commands directly.
+        sandbox: danger-full-access
+        # Fresh per-step Codex home so the action's proxy config is written once
+        # into a clean dir (persistent runner would otherwise accumulate config.toml).
+        codex-home: ${{ inputs.codex-home-root }}/review-findings
+        working-directory: pr-head
+        output-file: ${{ inputs.workspace }}/${{ inputs.review-artifact-dir }}/correctness/findings.raw.json
+        output-schema-file: ${{ inputs.workspace }}/${{ inputs.review-artifact-dir }}/correctness/findings.strict.json
+        prompt: |
+          Read `${{ inputs.workspace }}/${{ inputs.review-artifact-dir }}/correctness/prompt.md`. Your working directory is the PR head checkout under review; inspect files here and cite repo-relative paths (e.g. `src/foo.py`).
+          Return the `review-axis-findings.v1` JSON result.
+
+    - name: Prepare review techlead decision
+      id: review_techlead_prepare
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        COMMON_ARTIFACT_DIR: ${{ inputs.common-artifact-dir }}
+        MEMORY_CONTEXT: ${{ inputs.memory-context }}
+        RELAY_CONFIGURED: "true"
+        REPO_PATH: ${{ inputs.repo-path }}
+        REVIEW_ARTIFACT_DIR: ${{ inputs.review-artifact-dir }}
+      run: |
+        set -euo pipefail
+        test -s "${REVIEW_ARTIFACT_DIR}/correctness/findings.raw.json"
+        codex-review review validate \
+          --axis correctness \
+          --in "${REVIEW_ARTIFACT_DIR}/correctness/findings.raw.json" \
+          --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+          --changed-lines "${COMMON_ARTIFACT_DIR}/changed-lines.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${REVIEW_ARTIFACT_DIR}/correctness/findings.validated.json"
+        codex-review review combine \
+          --artifacts "${REVIEW_ARTIFACT_DIR}" \
+          --out "${REVIEW_ARTIFACT_DIR}/combined-findings.json"
+        codex-review techlead build-techlead-prompt \
+          --in "${REVIEW_ARTIFACT_DIR}/combined-findings.json" \
+          --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+          --docs-context "${COMMON_ARTIFACT_DIR}/docs-context.md" \
+          --memory-context "${MEMORY_CONTEXT}" \
+          --out "${REVIEW_ARTIFACT_DIR}/techlead.prompt.md"
+        codex-review schema openai-strict --schema techlead-decision.v1 --out "${REVIEW_ARTIFACT_DIR}/techlead-decision.strict.json"
+        if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
+          echo "needs_review_techlead_model=true" >> "${GITHUB_OUTPUT}"
+        else
+          codex-review techlead default-result \
+            --in "${REVIEW_ARTIFACT_DIR}/combined-findings.json" \
+            --out "${REVIEW_ARTIFACT_DIR}/techlead-decision.raw.json"
+          echo "needs_review_techlead_model=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Run live Codex review techlead
+      if: ${{ steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ inputs.relay-api-key }}
+        responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+        # gpt-5.5 reasoning effort (relay default is medium); use the highest
+        # tier for the agentic loop's review/design/fix decisions.
+        effort: xhigh
+        # Self-hosted container is the isolation boundary; skip the action's
+        # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+        safety-strategy: unsafe
+        # No bubblewrap: the runner container is the isolation boundary and can't
+        # nest user namespaces. danger-full-access runs codex commands directly.
+        sandbox: danger-full-access
+        # Fresh per-step Codex home so the action's proxy config is written once
+        # into a clean dir (persistent runner would otherwise accumulate config.toml).
+        codex-home: ${{ inputs.codex-home-root }}/review-techlead
+        working-directory: pr-head
+        output-file: ${{ inputs.workspace }}/${{ inputs.review-artifact-dir }}/techlead-decision.raw.json
+        output-schema-file: ${{ inputs.workspace }}/${{ inputs.review-artifact-dir }}/techlead-decision.strict.json
+        prompt: |
+          Read `${{ inputs.workspace }}/${{ inputs.review-artifact-dir }}/techlead.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
+          Return the `techlead-decision.v1` JSON result.
+
+    - name: Complete review stage state
+      id: review_complete
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        COMMON_ARTIFACT_DIR: ${{ inputs.common-artifact-dir }}
+        REPO_PATH: ${{ inputs.repo-path }}
+        REVIEW_ARTIFACT_DIR: ${{ inputs.review-artifact-dir }}
+        REVIEW_STATE_BUNDLE_DIR: ${{ inputs.review-state-bundle-dir }}
+      run: |
+        set -euo pipefail
+        test -s "${REVIEW_ARTIFACT_DIR}/techlead-decision.raw.json"
+        codex-review techlead validate \
+          --in "${REVIEW_ARTIFACT_DIR}/techlead-decision.raw.json" \
+          --artifacts "${REVIEW_ARTIFACT_DIR}/combined-findings.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${REVIEW_STATE_BUNDLE_DIR}/techlead-decision.json"
+        codex-review techlead classify \
+          --in "${REVIEW_STATE_BUNDLE_DIR}/techlead-decision.json" \
+          --artifacts "${REVIEW_ARTIFACT_DIR}/combined-findings.json" \
+          --out "${REVIEW_STATE_BUNDLE_DIR}/review-publication.json"
+        codex-review techlead publish --dry-run \
+          --in "${REVIEW_STATE_BUNDLE_DIR}/review-publication.json" \
+          --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+          --changed-lines "${COMMON_ARTIFACT_DIR}/changed-lines.json" \
+          --out "${REVIEW_STATE_BUNDLE_DIR}/publish-report.json"
+        codex-review loop route-after-techlead \
+          --in "${REVIEW_STATE_BUNDLE_DIR}/techlead-decision.json" \
+          --out "${REVIEW_STATE_BUNDLE_DIR}/route.json"
+        route="$(jq -er '.route' "${REVIEW_STATE_BUNDLE_DIR}/route.json")"
+        case "${route}" in
+          run_design)
+            next_stage="design"; lgtm="false"; terminal_reason="" ;;
+          stop_lgtm)
+            next_stage=""; lgtm="true"; terminal_reason="" ;;
+          stop_after_publish)
+            next_stage=""; lgtm="false"; terminal_reason="review_findings_published" ;;
+          stop_needs_human)
+            next_stage=""; lgtm="false"; terminal_reason="review_needs_human" ;;
+          *)
+            next_stage=""; lgtm="false"; terminal_reason="model_output_invalid" ;;
+        esac
+        cp "${REVIEW_ARTIFACT_DIR}/combined-findings.json" "${REVIEW_STATE_BUNDLE_DIR}/combined-findings.json"
+        {
+          echo "next_stage=${next_stage}"
+          echo "lgtm=${lgtm}"
+          echo "terminal_reason=${terminal_reason}"
+          echo "techlead_decision_path=${REVIEW_STATE_BUNDLE_DIR}/techlead-decision.json"
+          echo "review_publication_path=${REVIEW_STATE_BUNDLE_DIR}/review-publication.json"
+          echo "combined_findings_path=${REVIEW_STATE_BUNDLE_DIR}/combined-findings.json"
+          echo "route_path=${REVIEW_STATE_BUNDLE_DIR}/route.json"
+          echo "publish_report_path=${REVIEW_STATE_BUNDLE_DIR}/publish-report.json"
+        } >> "${GITHUB_OUTPUT}"

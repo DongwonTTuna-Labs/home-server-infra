@@ -11,6 +11,7 @@ from typing import Any
 from codex_review.core.errors import GitHubError
 from codex_review.github.client import github_api_url, rest_request
 from codex_review.github.pull_requests import get_pull_request, list_pull_request_files
+from codex_review.memory.paths import is_memory_path
 
 CHANGE_DOC_NAMES = ("proposal.md", "design.md", "tasks.md")
 CONFIG_PATHS = (".openspec.yaml", "openspec/config.yaml")
@@ -218,6 +219,8 @@ def _sources_from_changed_files(pr_context: dict[str, Any]) -> list[dict[str, An
     sources: list[dict[str, Any]] = []
     for item in pr_context.get("changed_files_summary", []) or []:
         path = _normalize_path(str(item.get("filename") or ""))
+        if is_memory_path(path):
+            continue
         if _is_openspec_path(path):
             sources.append({"type": "path", "path": path})
     return sources
@@ -242,6 +245,8 @@ def _sources_from_github_pr(source: dict[str, Any], token: str | None) -> list[d
     head_sha = ((pr.get("head") or {}).get("sha") if isinstance(pr, dict) else None) or source.get("ref")
     for file_info in files:
         path = _normalize_path(str(file_info.get("filename") or ""))
+        if is_memory_path(path):
+            continue
         if _is_openspec_path(path):
             nested.append({"type": "github_file", "owner": owner, "repo": repo, "ref": head_sha, "path": path})
     return nested

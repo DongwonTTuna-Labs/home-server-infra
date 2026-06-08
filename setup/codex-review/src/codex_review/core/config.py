@@ -30,6 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "total_patch_tokens": 24000,
         "findings_tokens": 12000,
         "openspec_tokens": 8000,
+        "memory_tokens": 6000,
     },
     "lifecycle": {
         "max_threads_per_triage": 16,
@@ -38,6 +39,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "terminal_states": ["resolved_by_code", "defer_to_issue", "duplicate_of_issue", "false_positive", "stale_obsolete"],
         "non_terminal_states": ["fix_now", "current_head_keep_open", "needs_human", "blocked_by_conflict"],
     },
+    "memory": {
+        "enabled": True,
+        "root": ".omo/review-memory",
+        "notepad_files": ["learnings.md", "decisions.md", "issues.md", "problems.md"],
+        "ledger_file": "ledger.json",
+        "max_entries": 200,
+        "per_file_char_budget": 6000,
+        "total_char_budget": 24000,
+        "compaction_keep_recent_rounds": 3,
+        "provenance_required_for_suppression": True,
+        "hmac_env": "CODEX_MEMORY_HMAC_KEY",
+    },
     "design": {"require_design_chief": True, "max_clusters": 12, "max_cluster_analysis_batch_size": 4},
     "autofix": {
         "enabled": False,
@@ -45,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "oscillation_window": 10,
         "pingpong_threshold": 2,
         "revert_threshold": 0.8,
+        "memory_write_prefix": ".omo/review-memory/",
         "allowed_prefixes": ["src/", "tests/", "docs/"],
         "forbidden_prefixes": [".git/", ".github/workflows/", "setup/codex-review/prompts/", "setup/codex-review/schemas/"],
         "forbidden_files": [],
@@ -148,7 +162,7 @@ def get_context_budget(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_config(config: dict[str, Any]) -> None:
-    for section in ["trusted", "review", "lifecycle", "design", "autofix", "loop", "tests"]:
+    for section in ["trusted", "review", "lifecycle", "memory", "design", "autofix", "loop", "tests"]:
         if section not in config or not isinstance(config[section], dict):
             raise ValidationError(f"config section {section!r} is required")
     axes = config["review"].get("axes")
@@ -167,10 +181,50 @@ def validate_config(config: dict[str, Any]) -> None:
     for prefix in auto.get("allowed_prefixes", []):
         if prefix in forbidden_prefixes:
             raise ValidationError(f"prefix cannot be both allowed and forbidden: {prefix}")
-    ctx = config.get("context")
+    ctx = config["context"] if "context" in config else None
     if ctx is not None:
         if not isinstance(ctx, dict):
             raise ValidationError("config section 'context' must be a mapping")
-        for ctx_key in ["model_token_budget", "diff_summary_tokens", "per_file_patch_tokens", "total_patch_tokens", "findings_tokens", "openspec_tokens"]:
+        for ctx_key in [
+            "model_token_budget",
+            "diff_summary_tokens",
+            "per_file_patch_tokens",
+            "total_patch_tokens",
+            "findings_tokens",
+            "openspec_tokens",
+            "memory_tokens",
+        ]:
             if ctx_key in ctx and int(ctx[ctx_key]) < 0:
                 raise ValidationError(f"context.{ctx_key} must be non-negative")
+    memory = config["memory"]
+    required_memory_keys = [
+        "enabled",
+        "root",
+        "notepad_files",
+        "ledger_file",
+        "max_entries",
+        "per_file_char_budget",
+        "total_char_budget",
+        "compaction_keep_recent_rounds",
+        "provenance_required_for_suppression",
+        "hmac_env",
+    ]
+    for memory_key in required_memory_keys:
+        if memory_key not in memory:
+            raise ValidationError(f"memory.{memory_key} is required")
+    if not isinstance(memory["enabled"], bool):
+        raise ValidationError("memory.enabled must be a boolean")
+    if not isinstance(memory["provenance_required_for_suppression"], bool):
+        raise ValidationError("memory.provenance_required_for_suppression must be a boolean")
+    for str_key in ["root", "ledger_file", "hmac_env"]:
+        if not isinstance(memory[str_key], str) or not memory[str_key]:
+            raise ValidationError(f"memory.{str_key} must be a non-empty string")
+    if not isinstance(memory["notepad_files"], list) or not all(isinstance(item, str) and item for item in memory["notepad_files"]):
+        raise ValidationError("memory.notepad_files must be a list of non-empty strings")
+    for positive_key in ["max_entries", "per_file_char_budget", "total_char_budget"]:
+        if int(memory[positive_key]) <= 0:
+            raise ValidationError(f"memory.{positive_key} must be positive")
+    if int(memory["compaction_keep_recent_rounds"]) < 0:
+        raise ValidationError("memory.compaction_keep_recent_rounds must be non-negative")
+    if int(memory["total_char_budget"]) > int(config["lifecycle"].get("char_budget", 0)):
+        raise ValidationError("memory.total_char_budget must not exceed lifecycle.char_budget")

@@ -25,8 +25,9 @@ def handle_reentry(args: argparse.Namespace, config: dict[str, Any]) -> tuple[An
         from codex_review.stages.reentry.record import build_reentry_record, persist_reentry_loop_state
         push_result = _maybe_json(args.in_path, {})
         loop_state = _json_or_default(args.loop_state, {}) or _maybe_json(args.inventory, {})
+        pr_context = _maybe_json(args.pr_context, {})
         record = build_reentry_record(push_result, loop_state, {"push_result": push_result})
-        record = persist_reentry_loop_state(record, _maybe_json(args.pr_context, {}), args.token)
+        record = persist_reentry_loop_state(record, pr_context, args.token, args.repo_path, config)
         return record, "reentry-loop-state.v1"
     if cmd == "validate":
         from codex_review.stages.reentry.validate import validate_reentry_record

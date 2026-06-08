@@ -11,6 +11,7 @@ from typing import Any
 from codex_review.context.diff import parse_unified_diff
 from codex_review.core.artifacts import write_json
 from codex_review.core.errors import ValidationError
+from codex_review.memory.paths import is_memory_path
 
 _WS = re.compile(r"\s+")
 
@@ -278,6 +279,58 @@ def _line_fingerprint(text: str) -> str:
     return hashlib.sha256(_normalize_line(text).encode("utf-8")).hexdigest()[:16]
 
 
+def _strip_diff_prefix(path: str) -> str:
+    return path[2:] if path.startswith(("a/", "b/")) else path
+
+
+def _diff_file_paths(file: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for key in ("new_path", "old_path", "path", "filename"):
+        path = file.get(key)
+        if path and path != "/dev/null":
+            paths.append(str(path))
+    return paths
+
+
+def _is_memory_diff_file(file: dict[str, Any]) -> bool:
+    return any(is_memory_path(path) for path in _diff_file_paths(file))
+
+
+def _is_memory_diff_header(line: str) -> bool:
+    if not line.startswith("diff --git "):
+        return False
+    parts = line.split()
+    if len(parts) < 4:
+        return False
+    return any(is_memory_path(_strip_diff_prefix(path)) for path in (parts[2], parts[3]))
+
+
+def patch_text_without_memory_files(patch_text: str) -> str:
+    text = patch_text or ""
+    if "diff --git " not in text:
+        return text
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            sections.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append(current)
+
+    kept: list[str] = []
+    skipped_memory = False
+    for section in sections:
+        header = next((line for line in section if line.startswith("diff --git ")), "")
+        if header and _is_memory_diff_header(header):
+            skipped_memory = True
+            continue
+        kept.extend(section)
+    return "".join(kept) if skipped_memory else text
+
+
 def fingerprint_patch(patch_text: str) -> dict[str, Any]:
     """Whitespace-normalized fingerprints of a patch's changed lines + touched paths.
 
@@ -289,6 +342,8 @@ def fingerprint_patch(patch_text: str) -> dict[str, Any]:
     removed: set[str] = set()
     touched: set[str] = set()
     for f in files:
+        if _is_memory_diff_file(f):
+            continue
         path = f.get("new_path") or f.get("old_path")
         if path and path != "/dev/null":
             touched.add(str(path))
@@ -317,16 +372,16 @@ def normalized_finding_keys_from_plan(design_plan: dict[str, Any] | None) -> lis
 
 
 def build_push_entry(round_no: int, push_result: dict[str, Any], patch_text: str, design_plan: dict[str, Any] | None) -> dict[str, Any]:
-    # Empty patch_sha256 stays falsy so a missing/empty patch can never be mistaken for
-    # an "identical patch repeated" match (sha256("") is otherwise a constant).
-    patch_sha256 = hashlib.sha256(patch_text.encode("utf-8")).hexdigest() if patch_text else ""
+    code_patch_text = patch_text_without_memory_files(patch_text)
+    patch_sha256 = hashlib.sha256(code_patch_text.encode("utf-8")).hexdigest() if code_patch_text else ""
+    patch_fingerprint = fingerprint_patch(patch_text)
     return {
         "round": int(round_no),
         "commit_sha": push_result.get("commit_sha"),
         "head_sha": push_result.get("head_sha") or push_result.get("old_head"),
         "patch_sha256": patch_sha256,
-        "normalized_finding_keys": normalized_finding_keys_from_plan(design_plan),
-        **fingerprint_patch(patch_text),
+        "normalized_finding_keys": normalized_finding_keys_from_plan(design_plan) if code_patch_text else [],
+        **patch_fingerprint,
     }
 
 

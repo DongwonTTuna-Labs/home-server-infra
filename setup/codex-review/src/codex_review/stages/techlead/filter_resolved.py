@@ -7,7 +7,14 @@ silent drop).
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
+
+from codex_review.memory.resolved import (
+    exact_finding_fingerprint,
+    resolve_gate_resolved_memory_as_ledger,
+    resolved_findings_for_suppression,
+)
+from codex_review.memory.types import SCHEMA_VERSION as REVIEW_MEMORY_SCHEMA_VERSION
 
 # Default safe-first policy: states whose resolution means "do not raise again"
 # regardless of subsequent code change. resolved_by_code is handled separately
@@ -33,7 +40,13 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-def _decide(finding: dict[str, Any], mem: dict[str, Any], changed_line_map: dict[str, Any] | None, suppress_states: set[str], recheck_changed: bool) -> tuple[bool, str | None]:
+def _decide(
+    finding: dict[str, Any],
+    mem: dict[str, Any],
+    changed_line_map: dict[str, Any] | None,
+    suppress_states: set[str],
+    recheck_changed: bool,
+) -> tuple[bool, str | None]:
     """Return (suppress, state). suppress=False means keep (possibly annotated)."""
     state = mem.get("state")
     if state in suppress_states:
@@ -52,6 +65,87 @@ def _decide(finding: dict[str, Any], mem: dict[str, Any], changed_line_map: dict
     return False, state
 
 
+def _is_review_memory_ledger(resolved_memory: Any) -> bool:
+    return (
+        isinstance(resolved_memory, Mapping)
+        and resolved_memory.get("schema_version") == REVIEW_MEMORY_SCHEMA_VERSION
+        and isinstance(resolved_memory.get("entries"), list)
+    )
+
+
+def _legacy_items(resolved_memory: dict[str, Any] | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if _is_review_memory_ledger(resolved_memory):
+        return []
+    raw_items = resolved_memory.get("items", []) if isinstance(resolved_memory, dict) else (resolved_memory or [])
+    if not isinstance(raw_items, list):
+        return []
+    return [dict(item) for item in raw_items if isinstance(item, Mapping)]
+
+
+def _trusted_suppression_entries(
+    resolved_memory: dict[str, Any] | list[dict[str, Any]] | None,
+    suppress_states: set[str],
+) -> list[dict[str, Any]]:
+    if _is_review_memory_ledger(resolved_memory):
+        return resolved_findings_for_suppression(resolved_memory)
+    if isinstance(resolved_memory, dict) and "items" in resolved_memory:
+        ledger = resolve_gate_resolved_memory_as_ledger(resolved_memory, suppress_states=suppress_states)
+        return resolved_findings_for_suppression(ledger)
+    if isinstance(resolved_memory, list):
+        ledger = resolve_gate_resolved_memory_as_ledger(resolved_memory, suppress_states=suppress_states)
+        return resolved_findings_for_suppression(ledger)
+    return []
+
+
+def _resolved_entry_as_memory(entry: Mapping[str, Any]) -> dict[str, Any]:
+    body = entry.get("body") if isinstance(entry.get("body"), dict) else {}
+    return {
+        "state": body.get("state"),
+        "reason": body.get("reason"),
+        "thread_id": body.get("thread_id"),
+        "path": body.get("path"),
+        "line": body.get("line"),
+        "finding_fingerprint": entry.get("finding_fingerprint"),
+    }
+
+
+def _index_trusted_entries(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_fingerprint: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        fingerprint = exact_finding_fingerprint(entry)
+        if fingerprint:
+            by_fingerprint.setdefault(fingerprint, entry)
+    return by_fingerprint
+
+
+def _index_legacy_items(items: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    by_loc: dict[tuple[str, int], dict[str, Any]] = {}
+    for resolved_item in items:
+        if resolved_item.get("root_cause_key"):
+            by_key.setdefault(str(resolved_item["root_cause_key"]), resolved_item)
+        line = _as_int(resolved_item.get("line"))
+        if resolved_item.get("path") and line is not None:
+            by_loc.setdefault((str(resolved_item["path"]), line), resolved_item)
+    return by_key, by_loc
+
+
+def _suppressed_finding(finding: dict[str, Any], resolved_item: dict[str, Any], state: str | None) -> dict[str, Any]:
+    return {
+        **finding,
+        "previously_resolved_as": state,
+        "resolution_reason": resolved_item.get("reason"),
+        "resolved_thread_id": resolved_item.get("thread_id"),
+    }
+
+
+def _annotated_finding(finding: dict[str, Any], resolved_item: dict[str, Any], state: str | None) -> dict[str, Any]:
+    annotated = dict(finding)
+    annotated["previously_resolved_as"] = state
+    annotated["resolution_reason"] = resolved_item.get("reason")
+    return annotated
+
+
 def filter_findings_against_resolved(
     combined: dict[str, Any],
     resolved_memory: dict[str, Any] | list[dict[str, Any]] | None,
@@ -62,37 +156,40 @@ def filter_findings_against_resolved(
     suppress_states = set(review.get("suppress_resolved_states") or _DEFAULT_SUPPRESS_STATES)
     recheck_changed = bool(review.get("resolved_by_code_recheck_changed", True))
 
-    items = resolved_memory.get("items", []) if isinstance(resolved_memory, dict) else (resolved_memory or [])
-    by_key: dict[str, dict[str, Any]] = {}
-    by_loc: dict[tuple[str, int], dict[str, Any]] = {}
-    for m in items:
-        if m.get("root_cause_key"):
-            by_key.setdefault(str(m["root_cause_key"]), m)
-        line = _as_int(m.get("line"))
-        if m.get("path") and line is not None:
-            by_loc.setdefault((str(m["path"]), line), m)
+    trusted_by_fingerprint = _index_trusted_entries(_trusted_suppression_entries(resolved_memory, suppress_states))
+    by_key, by_loc = _index_legacy_items(_legacy_items(resolved_memory))
 
     kept: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
     annotated: list[str] = []
-    for f in combined.get("findings", []) or []:
-        line = _as_int(f.get("line"))
-        mem = by_key.get(str(f.get("root_cause_key")))
-        if mem is None and f.get("file") and line is not None:
-            mem = by_loc.get((str(f.get("file")), line))
-        if mem is None:
-            kept.append(f)
+    for finding in combined.get("findings", []) or []:
+        fingerprint = exact_finding_fingerprint(finding)
+        trusted_entry = trusted_by_fingerprint.get(fingerprint) if fingerprint else None
+        if trusted_entry is not None:
+            resolved_item = _resolved_entry_as_memory(trusted_entry)
+            suppress, state = _decide(finding, resolved_item, changed_line_map, suppress_states, recheck_changed)
+            if suppress:
+                suppressed.append(_suppressed_finding(finding, resolved_item, state))
+            else:
+                kept.append(_annotated_finding(finding, resolved_item, state))
+                if finding.get("finding_id"):
+                    annotated.append(finding["finding_id"])
             continue
-        suppress, state = _decide(f, mem, changed_line_map, suppress_states, recheck_changed)
+
+        line = _as_int(finding.get("line"))
+        resolved_item = by_key.get(str(finding.get("root_cause_key"))) if finding.get("root_cause_key") else None
+        if resolved_item is None and finding.get("file") and line is not None:
+            resolved_item = by_loc.get((str(finding.get("file")), line))
+        if resolved_item is None:
+            kept.append(finding)
+            continue
+        suppress, state = _decide(finding, resolved_item, changed_line_map, suppress_states, recheck_changed)
         if suppress:
-            suppressed.append({**f, "previously_resolved_as": state, "resolution_reason": mem.get("reason"), "resolved_thread_id": mem.get("thread_id")})
+            suppressed.append(_suppressed_finding(finding, resolved_item, state))
         else:
-            nf = dict(f)
-            nf["previously_resolved_as"] = state
-            nf["resolution_reason"] = mem.get("reason")
-            kept.append(nf)
-            if f.get("finding_id"):
-                annotated.append(f["finding_id"])
+            kept.append(_annotated_finding(finding, resolved_item, state))
+            if finding.get("finding_id"):
+                annotated.append(finding["finding_id"])
 
     out = dict(combined)
     out["findings"] = kept

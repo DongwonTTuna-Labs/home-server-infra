@@ -1,0 +1,361 @@
+name: Run Codex Design Phase
+description: >-
+  Trusted composite for the design inventory, clustering, plan, and design chief
+  step bundle in the Codex loop. The caller keeps the surrounding DAG, gates,
+  checkouts, and token capture.
+
+inputs:
+  workspace:
+    description: Absolute workflow workspace path containing PR checkout and artifacts.
+    required: true
+  repo-path:
+    description: Repository checkout path to inspect as PR-head data.
+    required: true
+  common-artifact-dir:
+    description: Directory containing common context artifacts.
+    required: true
+  review-state-bundle-dir:
+    description: Directory containing review state bundle artifacts.
+    required: true
+  design-artifact-dir:
+    description: Directory where design artifacts are written.
+    required: true
+  design-state-bundle-dir:
+    description: Directory where design state bundle artifacts are written.
+    required: true
+  memory-context:
+    description: Path to the common memory context markdown artifact.
+    required: true
+  relay-api-key:
+    description: Relay or OpenAI-compatible API key captured and masked by the caller.
+    required: true
+  codex-home-root:
+    description: Root directory for per-model Codex home directories.
+    required: true
+
+outputs:
+  next_stage:
+    description: Next sequential stage selected by design chief routing.
+    value: ${{ steps.design_complete.outputs.next_stage }}
+  lgtm:
+    description: Whether design reached an LGTM terminal state.
+    value: ${{ steps.design_complete.outputs.lgtm }}
+  terminal_reason:
+    description: Design terminal reason, empty when handing off to fix.
+    value: ${{ steps.design_complete.outputs.terminal_reason }}
+  design_context_path:
+    description: Path to the design context copied into the design state bundle.
+    value: ${{ steps.design_complete.outputs.design_context_path }}
+  design_inventory_path:
+    description: Path to the validated design inventory artifact.
+    value: ${{ steps.design_complete.outputs.design_inventory_path }}
+  design_clusters_path:
+    description: Path to the validated design clusters artifact.
+    value: ${{ steps.design_complete.outputs.design_clusters_path }}
+  design_analyses_path:
+    description: Path to the collected design analyses artifact.
+    value: ${{ steps.design_complete.outputs.design_analyses_path }}
+  design_plan_path:
+    description: Path to the validated design plan artifact.
+    value: ${{ steps.design_complete.outputs.design_plan_path }}
+  chief_decision_path:
+    description: Path to the validated design chief decision artifact.
+    value: ${{ steps.design_complete.outputs.chief_decision_path }}
+  route_path:
+    description: Path to the design chief route artifact.
+    value: ${{ steps.design_complete.outputs.route_path }}
+  publish_report_path:
+    description: Path to the dry-run design chief publish report artifact.
+    value: ${{ steps.design_complete.outputs.publish_report_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare design inventory
+      id: design_inventory_prepare
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        COMMON_ARTIFACT_DIR: ${{ inputs.common-artifact-dir }}
+        DESIGN_ARTIFACT_DIR: ${{ inputs.design-artifact-dir }}
+        DESIGN_STATE_BUNDLE_DIR: ${{ inputs.design-state-bundle-dir }}
+        MEMORY_CONTEXT: ${{ inputs.memory-context }}
+        RELAY_CONFIGURED: "true"
+        REVIEW_STATE_BUNDLE_DIR: ${{ inputs.review-state-bundle-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${DESIGN_ARTIFACT_DIR}" "${DESIGN_STATE_BUNDLE_DIR}"
+        codex-review design context \
+          --in "${REVIEW_STATE_BUNDLE_DIR}/techlead-decision.json" \
+          --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+          --review-context "${COMMON_ARTIFACT_DIR}/docs-context.md" \
+          --docs-context "${COMMON_ARTIFACT_DIR}/docs-context.md" \
+          --openspec-context "${COMMON_ARTIFACT_DIR}/openspec-context.json" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-context.json"
+        codex-review design build-inventory-prompt \
+          --in "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+          --memory-context "${MEMORY_CONTEXT}" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-inventory.prompt.md"
+        codex-review schema openai-strict --schema design-inventory.v1 --out "${DESIGN_ARTIFACT_DIR}/design-inventory.strict.json"
+        if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
+          echo "needs_design_inventory_model=true" >> "${GITHUB_OUTPUT}"
+        else
+          codex-review design default-inventory \
+            --in "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+            --out "${DESIGN_ARTIFACT_DIR}/design-inventory.raw.json"
+          echo "needs_design_inventory_model=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Run live Codex design inventory
+      if: ${{ steps.design_inventory_prepare.outputs.needs_design_inventory_model == 'true' }}
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ inputs.relay-api-key }}
+        responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+        # gpt-5.5 reasoning effort (relay default is medium); use the highest
+        # tier for the agentic loop's review/design/fix decisions.
+        effort: xhigh
+        # Self-hosted container is the isolation boundary; skip the action's
+        # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+        safety-strategy: unsafe
+        # No bubblewrap: the runner container is the isolation boundary and can't
+        # nest user namespaces. danger-full-access runs codex commands directly.
+        sandbox: danger-full-access
+        # Fresh per-step Codex home so the action's proxy config is written once
+        # into a clean dir (persistent runner would otherwise accumulate config.toml).
+        codex-home: ${{ inputs.codex-home-root }}/design-inventory
+        working-directory: pr-head
+        output-file: ${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-inventory.raw.json
+        output-schema-file: ${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-inventory.strict.json
+        prompt: |
+          Read `${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-inventory.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
+          Return the `design-inventory.v1` JSON result.
+
+    - name: Prepare design clusters prompt
+      id: design_clusters_prepare
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        DESIGN_ARTIFACT_DIR: ${{ inputs.design-artifact-dir }}
+        MEMORY_CONTEXT: ${{ inputs.memory-context }}
+        RELAY_CONFIGURED: "true"
+        REPO_PATH: ${{ inputs.repo-path }}
+      run: |
+        set -euo pipefail
+        test -s "${DESIGN_ARTIFACT_DIR}/design-inventory.raw.json"
+        codex-review design normalize \
+          --in "${DESIGN_ARTIFACT_DIR}/design-inventory.raw.json" \
+          --pr-context "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-inventory.json"
+        codex-review design build-clusters-prompt \
+          --inventory "${DESIGN_ARTIFACT_DIR}/design-inventory.json" \
+          --pr-context "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+          --memory-context "${MEMORY_CONTEXT}" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-clusters.prompt.md"
+        codex-review schema openai-strict --schema design-clusters.v1 --out "${DESIGN_ARTIFACT_DIR}/design-clusters.strict.json"
+        if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
+          echo "needs_design_clusters_model=true" >> "${GITHUB_OUTPUT}"
+        else
+          codex-review design default-clusters \
+            --inventory "${DESIGN_ARTIFACT_DIR}/design-inventory.json" \
+            --out "${DESIGN_ARTIFACT_DIR}/design-clusters.raw.json"
+          echo "needs_design_clusters_model=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Run live Codex design clusters
+      if: ${{ steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ inputs.relay-api-key }}
+        responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+        # gpt-5.5 reasoning effort (relay default is medium); use the highest
+        # tier for the agentic loop's review/design/fix decisions.
+        effort: xhigh
+        # Self-hosted container is the isolation boundary; skip the action's
+        # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+        safety-strategy: unsafe
+        # No bubblewrap: the runner container is the isolation boundary and can't
+        # nest user namespaces. danger-full-access runs codex commands directly.
+        sandbox: danger-full-access
+        # Fresh per-step Codex home so the action's proxy config is written once
+        # into a clean dir (persistent runner would otherwise accumulate config.toml).
+        codex-home: ${{ inputs.codex-home-root }}/design-clusters
+        working-directory: pr-head
+        output-file: ${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-clusters.raw.json
+        output-schema-file: ${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-clusters.strict.json
+        prompt: |
+          Read `${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-clusters.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
+          Return the `design-clusters.v1` JSON result.
+
+    - name: Prepare design plan prompt
+      id: design_plan_prepare
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        DESIGN_ARTIFACT_DIR: ${{ inputs.design-artifact-dir }}
+        MEMORY_CONTEXT: ${{ inputs.memory-context }}
+        RELAY_CONFIGURED: "true"
+        REPO_PATH: ${{ inputs.repo-path }}
+      run: |
+        set -euo pipefail
+        test -s "${DESIGN_ARTIFACT_DIR}/design-clusters.raw.json"
+        codex-review design cluster \
+          --in "${DESIGN_ARTIFACT_DIR}/design-clusters.raw.json" \
+          --inventory "${DESIGN_ARTIFACT_DIR}/design-inventory.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-clusters.json"
+        codex-review design collect-analyses \
+          --artifacts "${DESIGN_ARTIFACT_DIR}/design-clusters.json" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-analyses.json"
+        codex-review design build-plan-prompt \
+          --pr-context "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+          --inventory "${DESIGN_ARTIFACT_DIR}/design-inventory.json" \
+          --result "${DESIGN_ARTIFACT_DIR}/design-analyses.json" \
+          --memory-context "${MEMORY_CONTEXT}" \
+          --out "${DESIGN_ARTIFACT_DIR}/design-plan.prompt.md"
+        codex-review schema openai-strict --schema design-plan.v1 --out "${DESIGN_ARTIFACT_DIR}/design-plan.strict.json"
+        if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
+          echo "needs_design_plan_model=true" >> "${GITHUB_OUTPUT}"
+        else
+          codex-review design default-plan \
+            --pr-context "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+            --inventory "${DESIGN_ARTIFACT_DIR}/design-inventory.json" \
+            --out "${DESIGN_ARTIFACT_DIR}/design-plan.raw.json"
+          echo "needs_design_plan_model=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Run live Codex design plan
+      if: ${{ steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ inputs.relay-api-key }}
+        responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+        # gpt-5.5 reasoning effort (relay default is medium); use the highest
+        # tier for the agentic loop's review/design/fix decisions.
+        effort: xhigh
+        # Self-hosted container is the isolation boundary; skip the action's
+        # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+        safety-strategy: unsafe
+        # No bubblewrap: the runner container is the isolation boundary and can't
+        # nest user namespaces. danger-full-access runs codex commands directly.
+        sandbox: danger-full-access
+        # Fresh per-step Codex home so the action's proxy config is written once
+        # into a clean dir (persistent runner would otherwise accumulate config.toml).
+        codex-home: ${{ inputs.codex-home-root }}/design-plan
+        working-directory: pr-head
+        output-file: ${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-plan.raw.json
+        output-schema-file: ${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-plan.strict.json
+        prompt: |
+          Read `${{ inputs.workspace }}/${{ inputs.design-artifact-dir }}/design-plan.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
+          Return the `design-plan.v1` JSON result.
+
+    - name: Prepare design chief prompt
+      id: design_chief_prepare
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        DESIGN_ARTIFACT_DIR: ${{ inputs.design-artifact-dir }}
+        DESIGN_STATE_BUNDLE_DIR: ${{ inputs.design-state-bundle-dir }}
+        MEMORY_CONTEXT: ${{ inputs.memory-context }}
+        RELAY_CONFIGURED: "true"
+        REPO_PATH: ${{ inputs.repo-path }}
+      run: |
+        set -euo pipefail
+        test -s "${DESIGN_ARTIFACT_DIR}/design-plan.raw.json"
+        codex-review design validate-plan \
+          --in "${DESIGN_ARTIFACT_DIR}/design-plan.raw.json" \
+          --pr-context "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${DESIGN_STATE_BUNDLE_DIR}/design-plan.json"
+        cp "${DESIGN_ARTIFACT_DIR}/design-context.json" "${DESIGN_STATE_BUNDLE_DIR}/design-context.json"
+        codex-review design_chief build-chief-prompt \
+          --in "${DESIGN_STATE_BUNDLE_DIR}/design-plan.json" \
+          --inventory "${DESIGN_ARTIFACT_DIR}/design-inventory.json" \
+          --pr-context "${DESIGN_ARTIFACT_DIR}/design-context.json" \
+          --memory-context "${MEMORY_CONTEXT}" \
+          --out "${DESIGN_STATE_BUNDLE_DIR}/chief.prompt.md"
+        codex-review schema openai-strict --schema design-chief-decision.v1 --out "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.strict.json"
+        if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
+          echo "needs_design_chief_model=true" >> "${GITHUB_OUTPUT}"
+        else
+          codex-review design_chief default-result \
+            --design-plan "${DESIGN_STATE_BUNDLE_DIR}/design-plan.json" \
+            --out "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.raw.json"
+          echo "needs_design_chief_model=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Run live Codex design chief
+      if: ${{ steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ inputs.relay-api-key }}
+        responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
+        # gpt-5.5 reasoning effort (relay default is medium); use the highest
+        # tier for the agentic loop's review/design/fix decisions.
+        effort: xhigh
+        # Self-hosted container is the isolation boundary; skip the action's
+        # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
+        safety-strategy: unsafe
+        # No bubblewrap: the runner container is the isolation boundary and can't
+        # nest user namespaces. danger-full-access runs codex commands directly.
+        sandbox: danger-full-access
+        # Fresh per-step Codex home so the action's proxy config is written once
+        # into a clean dir (persistent runner would otherwise accumulate config.toml).
+        codex-home: ${{ inputs.codex-home-root }}/design-chief
+        working-directory: pr-head
+        output-file: ${{ inputs.workspace }}/${{ inputs.design-state-bundle-dir }}/chief-decision.raw.json
+        output-schema-file: ${{ inputs.workspace }}/${{ inputs.design-state-bundle-dir }}/chief-decision.strict.json
+        prompt: |
+          Read `${{ inputs.workspace }}/${{ inputs.design-state-bundle-dir }}/chief.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
+          Return the `design-chief-decision.v1` JSON result.
+
+    - name: Complete design stage state
+      id: design_complete
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        COMMON_ARTIFACT_DIR: ${{ inputs.common-artifact-dir }}
+        DESIGN_ARTIFACT_DIR: ${{ inputs.design-artifact-dir }}
+        DESIGN_STATE_BUNDLE_DIR: ${{ inputs.design-state-bundle-dir }}
+        REPO_PATH: ${{ inputs.repo-path }}
+      run: |
+        set -euo pipefail
+        test -s "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.raw.json"
+        codex-review design_chief validate \
+          --in "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.raw.json" \
+          --design-plan "${DESIGN_STATE_BUNDLE_DIR}/design-plan.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.json"
+        codex-review design_chief publish --dry-run \
+          --design-plan "${DESIGN_STATE_BUNDLE_DIR}/design-plan.json" \
+          --in "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.json" \
+          --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+          --out "${DESIGN_STATE_BUNDLE_DIR}/publish-report.json"
+        codex-review design_chief route \
+          --in "${DESIGN_STATE_BUNDLE_DIR}/chief-decision.json" \
+          --out "${DESIGN_STATE_BUNDLE_DIR}/route.json"
+        route="$(jq -er '.route' "${DESIGN_STATE_BUNDLE_DIR}/route.json")"
+        case "${route}" in
+          run_fix_dispatch)
+            next_stage="fix"; lgtm="false"; terminal_reason="" ;;
+          stop_needs_human)
+            next_stage=""; lgtm="false"; terminal_reason="policy_rejected" ;;
+          stop_noop)
+            next_stage=""; lgtm="false"; terminal_reason="no_fix_needed" ;;
+          *)
+            next_stage=""; lgtm="false"; terminal_reason="model_output_invalid" ;;
+        esac
+        {
+          echo "next_stage=${next_stage}"
+          echo "lgtm=${lgtm}"
+          echo "terminal_reason=${terminal_reason}"
+          echo "design_context_path=${DESIGN_STATE_BUNDLE_DIR}/design-context.json"
+          echo "design_inventory_path=${DESIGN_ARTIFACT_DIR}/design-inventory.json"
+          echo "design_clusters_path=${DESIGN_ARTIFACT_DIR}/design-clusters.json"
+          echo "design_analyses_path=${DESIGN_ARTIFACT_DIR}/design-analyses.json"
+          echo "design_plan_path=${DESIGN_STATE_BUNDLE_DIR}/design-plan.json"
+          echo "chief_decision_path=${DESIGN_STATE_BUNDLE_DIR}/chief-decision.json"
+          echo "route_path=${DESIGN_STATE_BUNDLE_DIR}/route.json"
+          echo "publish_report_path=${DESIGN_STATE_BUNDLE_DIR}/publish-report.json"
+        } >> "${GITHUB_OUTPUT}"

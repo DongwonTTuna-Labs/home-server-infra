@@ -15,16 +15,6 @@ on:
         description: Expected pull request base ref.
         type: string
         required: true
-      stage:
-        description: Loop stage to debug.
-        type: choice
-        required: true
-        default: review
-        options:
-          - review
-          - design
-          - fix
-          - issue
       iteration:
         description: Zero-based loop iteration.
         type: number
@@ -36,14 +26,6 @@ on:
         required: true
       requested_by:
         description: GitHub actor or app slug requesting this debug run.
-        type: string
-        required: true
-      state_run_id:
-        description: Exact upstream workflow run id that owns the prior loop-state artifact.
-        type: string
-        required: true
-      state_artifact_name:
-        description: Exact prior loop-state artifact name to download from state_run_id.
         type: string
         required: true
 
@@ -63,9 +45,6 @@ jobs:
       pr_number: ${{ inputs.pr_number }}
       head_sha: ${{ inputs.head_sha }}
       base_ref: ${{ inputs.base_ref }}
-      stage: ${{ inputs.stage }}
       iteration: ${{ inputs.iteration }}
       correlation_id: ${{ inputs.correlation_id }}
       requested_by: ${{ inputs.requested_by }}
-      state_run_id: ${{ inputs.state_run_id }}
-      state_artifact_name: ${{ inputs.state_artifact_name }}

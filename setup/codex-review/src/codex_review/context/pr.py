@@ -8,6 +8,60 @@ from codex_review.core.artifacts import write_json
 from codex_review.context.diff import build_changed_line_map, serialize_changed_line_map
 from codex_review.context.diff import hunk_headers, summarize_diff
 from codex_review.context.budget import estimate_tokens, tokens_to_chars
+from codex_review.memory.paths import is_memory_path
+
+
+def _changed_file_path(file_info: dict[str, Any]) -> str:
+    return str(file_info.get("filename") or file_info.get("path") or file_info.get("new_path") or "")
+
+
+def _review_code_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [file_info for file_info in files or [] if not is_memory_path(_changed_file_path(file_info))]
+
+
+def _strip_diff_prefix(path: str) -> str:
+    return path[2:] if path.startswith(("a/", "b/")) else path
+
+
+def _diff_section_path(lines: list[str]) -> str:
+    for line in lines:
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                return _strip_diff_prefix(parts[3])
+        if line.startswith("+++ "):
+            path = line[4:].strip()
+            if path != "/dev/null":
+                return _strip_diff_prefix(path)
+    return ""
+
+
+def _split_diff_sections(diff_text: str) -> list[list[str]]:
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for line in (diff_text or "").splitlines():
+        if line.startswith("diff --git "):
+            if current:
+                sections.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        sections.append(current)
+    return sections
+
+
+def _review_diff_text(files: list[dict[str, Any]], original_files: list[dict[str, Any]], diff_text: str) -> str:
+    if len(files) == len(original_files or []):
+        return diff_text
+    patch_text = "\n".join(str(file_info.get("patch") or "") for file_info in files if file_info.get("patch"))
+    sections = _split_diff_sections(diff_text)
+    if not sections:
+        return patch_text
+    allowed_paths = {_changed_file_path(file_info) for file_info in files}
+    filtered = ["\n".join(section) for section in sections if _diff_section_path(section) in allowed_paths]
+    return "\n".join(filtered) if filtered else patch_text
+
 
 # Defaults mirror config["context"]; kept here so build_pr_context stays usable
 # without a fully-populated config (e.g. local dry-runs and unit tests).
@@ -50,9 +104,10 @@ def build_pr_context(event: dict[str, Any], pr: dict[str, Any], files: list[dict
     head=pr.get("head", {}) or {}; base=pr.get("base", {}) or {}
     ctx_budget = (config or {}).get("context", {}) or {}
     diff_summary_chars = tokens_to_chars(int(ctx_budget.get("diff_summary_tokens", _DEFAULT_DIFF_SUMMARY_TOKENS)))
-    diff_text = diff or ""
+    code_files = _review_code_files(files)
+    diff_text = _review_diff_text(code_files, files, diff or "")
     budgeted_files, patch_stats = _budget_changed_file_patches(
-        files,
+        code_files,
         int(ctx_budget.get("per_file_patch_tokens", _DEFAULT_PER_FILE_PATCH_TOKENS)),
         int(ctx_budget.get("total_patch_tokens", _DEFAULT_TOTAL_PATCH_TOKENS)),
     )
@@ -74,7 +129,7 @@ def build_pr_context(event: dict[str, Any], pr: dict[str, Any], files: list[dict
         # changed_line_map is derived from the FULL diff before patch budgeting so
         # inline-comment validation keeps the complete set of changed right-side lines.
         "changed_files": budgeted_files,
-        "changed_line_map": serialize_changed_line_map(build_changed_line_map(files)),
+        "changed_line_map": serialize_changed_line_map(build_changed_line_map(code_files)),
         "diff_summary": summarize_diff(diff_text, diff_summary_chars),
         "diff_truncated": len(diff_text) > diff_summary_chars,
         "patches_truncated": patch_stats["patches_truncated"],
@@ -102,6 +157,8 @@ def include_repository_metadata(context: dict[str, Any]) -> dict[str, Any]:
 def include_changed_files_summary(context: dict[str, Any]) -> dict[str, Any]:
     summary=[]
     for f in context.get("changed_files", []) or []:
+        if is_memory_path(_changed_file_path(f)):
+            continue
         summary.append({"filename": f.get("filename") or f.get("path"), "status": f.get("status"), "additions": f.get("additions", 0), "deletions": f.get("deletions", 0)})
     context["changed_files_summary"] = summary
     return context

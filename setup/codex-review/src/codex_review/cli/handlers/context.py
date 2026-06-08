@@ -17,6 +17,11 @@ from codex_review.cli._helpers import (
     _json_or_default, _maybe_json, _maybe_text, _model_or_fallback,
     _preferred_artifact_paths, _repo_parts_from_context, _safe_path_component,
 )
+from codex_review.memory.paths import is_memory_path
+
+
+def _filter_changed_line_map(changed: dict[str, Any]) -> dict[str, Any]:
+    return {str(path): lines for path, lines in changed.items() if not is_memory_path(str(path))}
 
 
 def _signal_context_truncation(context: dict[str, Any]) -> None:
@@ -77,6 +82,8 @@ def handle_context(args: argparse.Namespace, config: dict[str, Any]) -> tuple[An
         if not payload and args.pr_context:
             payload = _json_or_default(args.pr_context, {})
         changed = payload.get("changed_line_map") if isinstance(payload, dict) and payload.get("changed_line_map") else build_changed_line_map(payload)
+        if isinstance(changed, dict):
+            changed = _filter_changed_line_map(changed)
         return {"schema_version": "changed-lines.v1", "changed_line_map": serialize_changed_line_map(changed)}, None
     if cmd == "docs":
         from codex_review.context.docs import find_repository_docs, read_docs_with_budget, render_docs_context
@@ -104,6 +111,10 @@ def handle_context(args: argparse.Namespace, config: dict[str, Any]) -> tuple[An
         for key, value in outputs.items():
             write_output(key, value)
         return {"outputs": outputs}, None
+    if cmd == "memory":
+        from codex_review.memory.context import build_memory_context_markdown
+        pr = _json_or_default(args.pr_context or args.in_path, {})
+        return build_memory_context_markdown(pr, args.repo_path, config), None
     if cmd == "review":
         from codex_review.context.threads import build_review_context_markdown
         pr = _json_or_default(args.pr_context, {})

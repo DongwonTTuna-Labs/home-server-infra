@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from codex_review.memory.paths import is_memory_path
+
 HUNK_RE = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -68,7 +70,10 @@ def extract_changed_right_lines(diff: list[dict[str, Any]] | str) -> dict[str, s
         path = file.get("new_path") or file.get("path") or file.get("filename")
         if not path or path == "/dev/null":
             continue
-        lines: set[int] = result.setdefault(str(path), set())
+        path = str(path)
+        if is_memory_path(path):
+            continue
+        lines: set[int] = result.setdefault(path, set())
         for hunk in file.get("hunks", []):
             for line in hunk.get("lines", []):
                 if line.get("kind") == "add" and line.get("new_line") is not None:
@@ -107,6 +112,10 @@ def find_context_window(file_path: str | Path, line: int, radius: int = 8) -> di
     return {"file": str(file_path), "line": line, "start": start, "end": end, "text": window}
 
 
+def _filter_memory_paths(changed_map: dict[str, set[int]]) -> dict[str, set[int]]:
+    return {path: lines for path, lines in changed_map.items() if not is_memory_path(path)}
+
+
 # --- Changed RIGHT-side line map helpers -------------------------------------
 
 
@@ -120,16 +129,18 @@ def _normalize_lines(lines: Any) -> set[int]:
 
 def build_changed_line_map(pr_files: list[dict[str, Any]] | dict[str, Any] | str) -> dict[str, set[int]]:
     if isinstance(pr_files, str):
-        return extract_changed_right_lines(pr_files)
+        return _filter_memory_paths(extract_changed_right_lines(pr_files))
     if isinstance(pr_files, dict):
         if "changed_lines" in pr_files:
-            return {str(k): _normalize_lines(v) for k, v in pr_files["changed_lines"].items()}
+            return _filter_memory_paths({str(k): _normalize_lines(v) for k, v in pr_files["changed_lines"].items()})
         pr_files = pr_files.get("files") or pr_files.get("changed_files") or []
     changed: dict[str, set[int]] = {}
     for f in pr_files:
         filename = f.get("filename") or f.get("path") or f.get("new_path")
         patch = f.get("patch") or f.get("diff") or ""
         if not filename:
+            continue
+        if is_memory_path(str(filename)):
             continue
         if patch and not patch.startswith("diff --git"):
             patch = f"diff --git a/{filename} b/{filename}\n--- a/{filename}\n+++ b/{filename}\n{patch}"

@@ -5,9 +5,10 @@ from typing import Any
 from codex_review.core.artifacts import write_json
 from codex_review.core.errors import ValidationError
 from codex_review.model.inspection import validate_inspection_evidence
+from codex_review.stages.design.normalize import render_advisory_memory_context
 
 
-def build_cluster_prompt(design_inventory: dict[str, Any], design_context: dict[str, Any]) -> str:
+def build_cluster_prompt(design_inventory: dict[str, Any], design_context: dict[str, Any], memory_context: str | None = None) -> str:
     return (
         "Cluster design inventory by invariant/root cause. First inspect relevant files in pr-head "
         "and include top-level inspection_evidence items with path, purpose, and observation. "
@@ -15,6 +16,7 @@ def build_cluster_prompt(design_inventory: dict[str, Any], design_context: dict[
         "not a missing target path. If the issue is a missing file, cite the existing task/spec/design/proposal "
         "file that proves it is required and put the missing file path in observation. "
         "Return design-clusters.v1 JSON.\n"
+        + render_advisory_memory_context(memory_context)
         + str({"inventory":design_inventory,"context":design_context})
     )
 
