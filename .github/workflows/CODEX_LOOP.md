@@ -101,9 +101,15 @@ Current guards are:
 
 ## Token Guidance
 
-`GITHUB_TOKEN` is fine for read-only GitHub context where the workflow already uses `github.token`. It is not the current token for push or continuation dispatch.
+`GITHUB_TOKEN` is fine for read-only GitHub context where the workflow already uses `github.token`. It is not the current token for push or continuation dispatch. When this reusable workflow is called from another repository, `GITHUB_TOKEN` and `github.token` are caller-repository scoped, so they may not authenticate the private trusted-source checkout of `DongwonTTuna-Labs/home-server-infra`.
 
 Use `CODEX_LOOP_PAT` from the runner env for loop writes that must re-trigger follow-on workflows. Do not repeat the old PAT-forbidden fallback claim; the PAT is current implementation.
+
+Checkout authentication has one accepted exception. Every `actions/checkout@v4` step in `codex-loop-reusable.yml` uses checkout-only `read_pat` to pass runner env `CODEX_LOOP_PAT` as the checkout `token:`. This recovers trusted-source checkout when the caller-scoped token cannot read the private reusable-workflow repository.
+
+`persist-credentials: false` remains mandatory on every checkout. The PAT must not be persisted in local git config, logged, or passed through `workflow_call` secrets.
+
+The caller-repo checkout is also PAT-authenticated by explicit user-approved operational consistency across all 6 checkouts, not because PR-head code is trusted for execution. The rationale is trusted-source checkout recovery, one consistent checkout auth path for all current checkouts, and no new exposure surface because the same PAT already lives in the runner env for accepted loop writes.
 
 ## PR-Scoped Non-Merge Guard
 
