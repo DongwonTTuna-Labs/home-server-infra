@@ -26,7 +26,8 @@ def handle_design(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Any
         return build_design_context(_maybe_json(args.pr_context, {}), _maybe_json(args.in_path, {}), _maybe_text(args.review_context), _maybe_text(args.docs_context), None, _json_or_default(args.openspec_context, {})), "design-context.v1"
     if cmd == "build-inventory-prompt":
         from codex_review.stages.design.normalize import build_normalize_prompt
-        return build_normalize_prompt(_maybe_json(args.in_path or args.inventory, {})), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_normalize_prompt(_maybe_json(args.in_path or args.inventory, {}), memory_context=memory_context), None
     if cmd in {"default-inventory", "model-inventory"}:
         ctx = _maybe_json(args.in_path, {})
         items = []
@@ -43,7 +44,8 @@ def handle_design(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Any
             if not args.prompt:
                 from codex_review.model.adapter import write_prompt_if_needed
                 from codex_review.stages.design.normalize import build_normalize_prompt
-                args.prompt = str(write_prompt_if_needed(build_normalize_prompt(ctx), args.out))
+                memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+                args.prompt = str(write_prompt_if_needed(build_normalize_prompt(ctx, memory_context=memory_context), args.out))
             return _model_or_fallback(args, stage="design_inventory", expected_schema="design-inventory.v1", fallback=fallback), "design-inventory.v1"
         return fallback, "design-inventory.v1"
     if cmd == "normalize":
@@ -53,7 +55,8 @@ def handle_design(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Any
         return validate_design_inventory(_maybe_json(args.in_path, {}), tech, args.repo_path), "design-inventory.v1"
     if cmd == "build-clusters-prompt":
         from codex_review.stages.design.cluster import build_cluster_prompt
-        return build_cluster_prompt(_maybe_json(args.inventory or args.in_path, {}), _maybe_json(args.pr_context, {})), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_cluster_prompt(_maybe_json(args.inventory or args.in_path, {}), _maybe_json(args.pr_context, {}), memory_context=memory_context), None
     if cmd in {"default-clusters", "model-clusters"}:
         inv = _maybe_json(args.inventory or args.in_path, {})
         clusters = []
@@ -70,7 +73,8 @@ def handle_design(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Any
             if not args.prompt:
                 from codex_review.model.adapter import write_prompt_if_needed
                 from codex_review.stages.design.cluster import build_cluster_prompt
-                args.prompt = str(write_prompt_if_needed(build_cluster_prompt(inv, _maybe_json(args.pr_context, {})), args.out))
+                memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+                args.prompt = str(write_prompt_if_needed(build_cluster_prompt(inv, _maybe_json(args.pr_context, {}), memory_context=memory_context), args.out))
             return _model_or_fallback(args, stage="design_clusters", expected_schema="design-clusters.v1", fallback=fallback), "design-clusters.v1"
         return fallback, "design-clusters.v1"
     if cmd == "cluster":
@@ -178,14 +182,16 @@ def handle_design(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Any
             if not args.prompt:
                 from codex_review.model.adapter import write_prompt_if_needed
                 from codex_review.stages.design.coordinate import build_coordinate_prompt
-                args.prompt = str(write_prompt_if_needed(build_coordinate_prompt(ctx, _maybe_json(args.inventory, {}), []), args.out))
+                memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+                args.prompt = str(write_prompt_if_needed(build_coordinate_prompt(ctx, _maybe_json(args.inventory, {}), [], memory_context=memory_context), args.out))
             return _model_or_fallback(args, stage="design_plan", expected_schema="design-plan.v1", fallback=fallback), "design-plan.v1"
         return fallback, "design-plan.v1"
     if cmd == "build-plan-prompt":
         from codex_review.stages.design.coordinate import build_coordinate_prompt
         analyses_payload = _json_or_default(args.result, {})
         analyses = analyses_payload.get("analyses", analyses_payload if isinstance(analyses_payload, list) else [])
-        return build_coordinate_prompt(_maybe_json(args.pr_context, {}), _maybe_json(args.inventory, {}), analyses), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_coordinate_prompt(_maybe_json(args.pr_context, {}), _maybe_json(args.inventory, {}), analyses, memory_context=memory_context), None
     if cmd == "validate-plan":
         from codex_review.stages.design.coordinate import validate_design_plan
         return validate_design_plan(_maybe_json(args.in_path, {}), _maybe_json(args.pr_context, {}), config, args.repo_path), "design-plan.v1"

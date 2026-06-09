@@ -10,9 +10,10 @@ from codex_review.model.inspection import (
     render_evidence_citation_hint,
     validate_inspection_evidence,
 )
+from codex_review.stages.design.normalize import render_advisory_memory_context
 
 
-def build_coordinate_prompt(design_context: dict[str, Any], clusters: dict[str, Any], analyses: list[dict[str, Any]]) -> str:
+def build_coordinate_prompt(design_context: dict[str, Any], clusters: dict[str, Any], analyses: list[dict[str, Any]], memory_context: str | None = None) -> str:
     # The build-plan-prompt handler passes the design inventory as `clusters`;
     # its inspection_evidence paths are already verified to exist in pr-head.
     citation_hint = render_evidence_citation_hint(collect_existing_evidence_paths(clusters, design_context))
@@ -37,7 +38,7 @@ def build_coordinate_prompt(design_context: dict[str, Any], clusters: dict[str, 
         "work, needs_human must be reserved for explicit non-executable blockers; otherwise close the plan "
         "with edit_sequence, tests, and acceptance_criteria.\n"
     )
-    return instructions + citation_hint + "\n" + openspec_line + str({"context":design_context,"clusters":clusters,"analyses":analyses})
+    return instructions + citation_hint + "\n" + openspec_line + render_advisory_memory_context(memory_context) + str({"context":design_context,"clusters":clusters,"analyses":analyses})
 
 
 def validate_design_plan(

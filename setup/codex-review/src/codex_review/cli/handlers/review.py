@@ -38,7 +38,8 @@ def handle_review(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Any
         return fallback, "review-axis-findings.v1"
     if cmd == "build-review-prompt":
         from codex_review.stages.review.prompt import build_axis_prompt
-        return build_axis_prompt(args.axis or "correctness", _maybe_json(args.pr_context, {}), _maybe_text(args.review_context), _maybe_text(args.docs_context), config), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_axis_prompt(args.axis or "correctness", _maybe_json(args.pr_context, {}), _maybe_text(args.review_context), _maybe_text(args.docs_context), config, memory_context), None
     if cmd == "validate":
         from codex_review.stages.review.validate import validate_axis_findings
         payload = _maybe_json(args.in_path, {})

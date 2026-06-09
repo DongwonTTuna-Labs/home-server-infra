@@ -27,13 +27,15 @@ def handle_fix_dispatch(args: argparse.Namespace, config: dict[str, Any]) -> tup
     if cmd == "build-agent-prompt":
         from codex_review.stages.fix_dispatch.prompt import build_fix_agent_prompt
         task = _maybe_json(args.in_path, {})
-        return build_fix_agent_prompt(task, _maybe_json(args.inventory, {}), _maybe_json(args.result, {}), _maybe_text(args.docs_context), config), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_fix_agent_prompt(task, _maybe_json(args.inventory, {}), _maybe_json(args.result, {}), _maybe_text(args.docs_context), config, memory_context=memory_context), None
     if cmd == "prepare-agents":
         from codex_review.stages.fix_dispatch.prompt import build_fix_agent_prompt
         manifest = _maybe_json(args.inventory or args.in_path, {})
         design_plan = _maybe_json(args.design_plan, {})
         chief = _maybe_json(args.chief_decision or args.result, {})
         docs = _maybe_text(args.docs_context)
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
         base_dir = Path(args.work_dir) if args.work_dir else Path("codex-review-artifacts/fix_dispatch/agents")
         base_dir.mkdir(parents=True, exist_ok=True)
         include = []
@@ -47,7 +49,7 @@ def handle_fix_dispatch(args: argparse.Namespace, config: dict[str, Any]) -> tup
             output_file = task_dir / "result.json"
             validated_file = task_dir / "result.validated.json"
             write_json(task_file, task, None)
-            write_text(prompt_file, build_fix_agent_prompt(task, design_plan, chief, docs, config))
+            write_text(prompt_file, build_fix_agent_prompt(task, design_plan, chief, docs, config, memory_context=memory_context))
             include.append(
                 {
                     "task_id": task_id,
@@ -76,6 +78,7 @@ def handle_fix_dispatch(args: argparse.Namespace, config: dict[str, Any]) -> tup
         design_plan = _maybe_json(args.design_plan, {})
         chief = _maybe_json(args.chief_decision or args.result, {})
         docs = _maybe_text(args.docs_context)
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
         base_dir = Path(args.work_dir) if args.work_dir else (Path(args.out).parent / "agents" if args.out else Path("codex-review-artifacts/fix_dispatch/agents"))
         base_dir.mkdir(parents=True, exist_ok=True)
         results=[]
@@ -83,7 +86,7 @@ def handle_fix_dispatch(args: argparse.Namespace, config: dict[str, Any]) -> tup
             task_id = str(task.get("task_id"))
             task_dir = base_dir / task_id
             task_dir.mkdir(parents=True, exist_ok=True)
-            prompt = build_fix_agent_prompt(task, design_plan, chief, docs, config)
+            prompt = build_fix_agent_prompt(task, design_plan, chief, docs, config, memory_context=memory_context)
             prompt_path = task_dir / "prompt.md"
             write_text(prompt_path, prompt)
             out_path = task_dir / "result.json"

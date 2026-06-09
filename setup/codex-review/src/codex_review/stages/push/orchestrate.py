@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from codex_review.core.errors import CodexReviewError, ValidationError
+from codex_review.memory.writer import write_trusted_push_memory_sidecar
 from codex_review.security.patch_policy import validate_patch_policy
 from .apply_patch import apply_merged_patch, collect_applied_diff, run_diff_check
-from .commit import build_commit_message, commit_plan_from_artifacts, create_commit, create_commits_from_plan, validate_commit_diff
+from .commit import attach_trusted_sidecar_to_commit_plan, build_commit_message, commit_plan_from_artifacts, create_commit, create_commits_from_plan, validate_commit_diff
 from .push import push_commit, verify_pushed_head
 from .run_tests import run_required_tests, select_test_commands
 from .validate import validate_current_head, validate_push_target, validate_ready_to_push, validate_worktree_clean
@@ -389,13 +390,28 @@ def commit_and_push_validated_fix(
         _configure_git_author(repo_path, policy)
         design_plan_hash = str(merged_fix.get("plan_hash") or merged_fix.get("design_plan_hash") or "unknown")
         commit_plan = commit_plan_from_artifacts(merged_fix, validation_result, applied_diff)
-        commit_shas = create_commits_from_plan(repo_path, commit_plan, design_plan_hash, str(old_head), merged_fix)
+        memory_report = write_trusted_push_memory_sidecar(repo_path, pr_context, merged_fix, validation_result, commit_plan, config)
+        memory_paths = list(memory_report.get("paths") or [])
+        commit_plan = attach_trusted_sidecar_to_commit_plan(commit_plan, memory_paths)
+        memory_prefix = str(policy.get("memory_write_prefix") or "")
+        commit_shas = create_commits_from_plan(
+            repo_path,
+            commit_plan,
+            design_plan_hash,
+            str(old_head),
+            merged_fix,
+            trusted_force_add_paths=memory_paths,
+            trusted_force_add_prefix=memory_prefix,
+        )
         commit_sha = commit_shas[-1]
-        commit_policy_reports = [validate_commit_diff(repo_path, sha, policy) for sha in commit_shas]
+        commit_policy_reports = [
+            validate_commit_diff(repo_path, sha, policy, trusted_memory_paths=memory_paths, trusted_memory_prefix=memory_prefix)
+            for sha in commit_shas
+        ]
         commit_policy_report = {"commits": commit_policy_reports, "passed": all(r.get("passed", True) for r in commit_policy_reports)}
         head_ref = pr_context.get("head_ref")
         if not head_ref:
-            return {"schema_version": "push-result.v1", "status": "committed_no_head_ref", "pushed": False, "commit_sha": commit_sha, "commit_shas": commit_shas, "commit_plan": commit_plan, "policy_report": commit_policy_report}
+            return {"schema_version": "push-result.v1", "status": "committed_no_head_ref", "pushed": False, "commit_sha": commit_sha, "commit_shas": commit_shas, "commit_plan": commit_plan, "memory_sidecar": memory_report, "policy_report": commit_policy_report}
         push_report = push_commit(repo_path, str(head_ref), owner, repo, token)
         pushed = bool(push_report.get("pushed"))
         verified = bool(push_report.get("verified"))
@@ -412,6 +428,7 @@ def commit_and_push_validated_fix(
             "commit_sha": commit_sha,
             "commit_shas": commit_shas,
             "commit_plan": commit_plan,
+            "memory_sidecar": memory_report,
             "verified": verified,
             "remote_head_sha": remote_head_sha,
             "updated_head_sha": updated_head_sha,

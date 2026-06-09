@@ -39,7 +39,8 @@ metadata/
 mirrors/
 **/mirrors/
 
-# Local agent/runtime artifacts
+# Local agent/runtime artifacts. PR review memory stays ignored on base/main;
+# trusted memory writers force-add canonical `.omo/review-memory/pr-<n>/` files only.
 .omo/
 
 # Python cache artifacts

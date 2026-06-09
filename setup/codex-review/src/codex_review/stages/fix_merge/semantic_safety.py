@@ -14,7 +14,9 @@ from codex_review.context.budget import compact_json
 from codex_review.context.budget import estimate_tokens
 from codex_review.core.errors import ValidationError
 from codex_review.core.output import write_output
+from codex_review.memory.paths import is_memory_path
 from codex_review.patches.commit_plan import normalize_commit_plan
+from codex_review.stages.fix_merge.prompt import advisory_memory_context_section
 
 
 def patch_text_from_merged_fix(merged_fix: dict[str, Any]) -> str:
@@ -31,6 +33,28 @@ def _compact_json_like(value: Any, *, limit: int = 20000) -> str:
     return compact_json(value, max_chars=limit)
 
 
+def _changed_file_path_candidates(item: Any) -> list[str]:
+    if isinstance(item, dict):
+        return [
+            str(item[key])
+            for key in ("filename", "path", "new_path", "old_path")
+            if item.get(key) and str(item[key]) != "/dev/null"
+        ]
+    if item:
+        return [str(item)]
+    return []
+
+
+def _is_memory_changed_file(item: Any) -> bool:
+    return any(is_memory_path(path) for path in _changed_file_path_candidates(item))
+
+
+def _filter_memory_changed_files(changed_files: Any) -> Any:
+    if not isinstance(changed_files, list):
+        return changed_files
+    return [item for item in changed_files if not _is_memory_changed_file(item)]
+
+
 def build_semantic_patch_safety_prompt(
     merged_fix: dict[str, Any],
     pr_context: dict[str, Any],
@@ -38,13 +62,15 @@ def build_semantic_patch_safety_prompt(
     *,
     repo_path: str | Path | None = None,
     token_budget: int | None = None,
+    memory_context: str | None = None,
 ) -> str:
     patch = patch_text_from_merged_fix(merged_fix)
     patch_hash = sha256_text(patch)
     status = str(merged_fix.get("status") or "")
     title = pr_context.get("title") or pr_context.get("pr_title") or ""
     body = pr_context.get("body") or pr_context.get("pr_body") or ""
-    changed_files = pr_context.get("files") or pr_context.get("changed_files") or []
+    changed_files = _filter_memory_changed_files(pr_context.get("files") or pr_context.get("changed_files") or [])
+    memory_block = advisory_memory_context_section(memory_context)
 
     repo_note = ""
     if repo_path and Path(repo_path).exists():
@@ -95,7 +121,7 @@ use status `not_required`, approved false, the exact patch_hash, and an empty co
 ## OpenSpec and repository docs context
 {docs_context}
 
-## Stage06 merged fix artifact summary
+{memory_block}## Stage06 merged fix artifact summary
 {_compact_json_like({k: v for k, v in merged_fix.items() if k not in {'patch', 'patch_text'}}, limit=20000)}
 
 ## Exact merged patch

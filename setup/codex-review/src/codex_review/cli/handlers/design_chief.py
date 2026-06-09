@@ -36,7 +36,8 @@ def handle_design_chief(args: argparse.Namespace, config: dict[str, Any]) -> tup
         return fallback, "design-chief-decision.v1"
     if cmd == "build-chief-prompt":
         from codex_review.stages.design_chief.prompt import build_design_chief_prompt
-        return build_design_chief_prompt(_maybe_json(args.in_path, {}), _maybe_json(args.inventory, {}), _maybe_json(args.pr_context, {}), config), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_design_chief_prompt(_maybe_json(args.in_path, {}), _maybe_json(args.inventory, {}), _maybe_json(args.pr_context, {}), config, memory_context=memory_context), None
     if cmd == "validate":
         from codex_review.stages.design_chief.validate import validate_chief_decision
         return validate_chief_decision(_maybe_json(args.in_path, {}), _maybe_json(args.inventory or args.design_plan, {}), config, args.repo_path), "design-chief-decision.v1"

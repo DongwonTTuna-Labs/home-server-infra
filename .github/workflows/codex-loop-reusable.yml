@@ -1,5 +1,12 @@
 name: Codex Loop Reusable Core
 
+# Thin orchestrator module map:
+# - memory classify: .github/actions/codex-memory-classify
+# - context: .github/actions/codex-context
+# - review/techlead: .github/actions/codex-review-phase
+# - design/design-chief: .github/actions/codex-design-phase
+# - fix/push: .github/actions/codex-fix-phase
+
 on:
   workflow_call:
     inputs:
@@ -180,10 +187,86 @@ jobs:
           path: ${{ runner.temp }}/codex-loop-state.json
           retention-days: 7
 
-  run-stage:
-    name: Run Stage
+  classify:
+    name: Classify Memory-Only Change
     needs: [validate, setup-state]
     if: ${{ always() && needs.validate.outputs.valid == 'true' && needs.setup-state.result == 'success' }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      memory_only: ${{ steps.classify.outputs.memory_only }}
+      should_run_model: ${{ steps.classify.outputs.should_run_model }}
+      classification_reason: ${{ steps.classify.outputs.classification_reason }}
+      codex_memory_marker: ${{ steps.classify.outputs.codex_memory_marker }}
+      actor_guard: ${{ steps.classify.outputs.actor_guard }}
+    steps:
+      - name: Checkout PR head data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Resolve trusted workflow source
+        id: trusted_source
+        shell: bash
+        env:
+          JOB_CONTEXT: ${{ toJson(job) }}
+        run: |
+          set -euo pipefail
+          compact_job_context="$(printf '%s' "${JOB_CONTEXT}" | tr -d '\n')"
+          workflow_repository="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_repository"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')"
+          workflow_sha="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_sha"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{40})".*/\1/p')"
+
+          if [[ ! "${workflow_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "trusted workflow repository is missing or invalid" >&2
+            exit 1
+          fi
+          if [[ ! "${workflow_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "trusted workflow sha is missing or invalid" >&2
+            exit 1
+          fi
+
+          {
+            echo "repository=${workflow_repository}"
+            echo "sha=${workflow_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout trusted workflow source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.trusted_source.outputs.repository }}
+          ref: ${{ steps.trusted_source.outputs.sha }}
+          path: trusted-core
+          persist-credentials: false
+
+      - name: Setup trusted codex-review helper
+        id: setup_codex
+        uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@main
+
+      - name: Classify memory-only diff
+        id: classify
+        uses: ./trusted-core/.github/actions/codex-memory-classify
+        with:
+          workspace: ${{ github.workspace }}
+          repo-path: pr-head
+          head-sha: ${{ inputs.head_sha }}
+          github-actor: ${{ github.actor }}
+          requested-by: ${{ inputs.requested_by }}
+          own-actors: ${{ vars.CODEX_LOOP_OWN_ACTORS || 'github-actions[bot]' }}
+          output-path: ${{ runner.temp }}/codex-memory-only-change.json
+
+  run-stage:
+    name: Run Stage
+    needs: [validate, setup-state, classify]
+    if: ${{ always() && needs.validate.outputs.valid == 'true' && needs.setup-state.result == 'success' && needs.classify.outputs.should_run_model == 'true' }}
     runs-on:
       group: "Home Server Runners"
       labels: dongwontuna-labs-runner
@@ -205,6 +288,39 @@ jobs:
           path: pr-head
           persist-credentials: false
 
+      - name: Resolve trusted workflow source
+        id: trusted_source
+        shell: bash
+        env:
+          JOB_CONTEXT: ${{ toJson(job) }}
+        run: |
+          set -euo pipefail
+          compact_job_context="$(printf '%s' "${JOB_CONTEXT}" | tr -d '\n')"
+          workflow_repository="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_repository"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')"
+          workflow_sha="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_sha"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{40})".*/\1/p')"
+
+          if [[ ! "${workflow_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "trusted workflow repository is missing or invalid" >&2
+            exit 1
+          fi
+          if [[ ! "${workflow_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "trusted workflow sha is missing or invalid" >&2
+            exit 1
+          fi
+
+          {
+            echo "repository=${workflow_repository}"
+            echo "sha=${workflow_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout trusted workflow source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.trusted_source.outputs.repository }}
+          ref: ${{ steps.trusted_source.outputs.sha }}
+          path: trusted-core
+          persist-credentials: false
+
       - name: Setup trusted codex-review helper
         id: setup_codex
         uses: DongwonTTuna-Labs/home-server-infra/.github/actions/setup-codex-review@main
@@ -215,72 +331,18 @@ jobs:
           name: codex-loop-state-${{ inputs.correlation_id }}-${{ inputs.iteration }}.json
           path: ${{ runner.temp }}
 
-      - name: Prepare common context and review prompt
-        id: prepare_stage
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
-          INPUT_BASE_REF: ${{ inputs.base_ref }}
-          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
-          INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
-          INPUT_ITERATION: ${{ inputs.iteration }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p codex-review-artifacts/common
-          # Always-live: the loop always runs live model work using the static
-          # relay key; there is no relay probe to gate this on.
-          live_enabled="true"
-
-          jq -n \
-            --arg repository "${REPOSITORY}" \
-            --arg head_sha "${INPUT_HEAD_SHA}" \
-            --arg current_head_sha "${INPUT_HEAD_SHA}" \
-            --arg base_ref "${INPUT_BASE_REF}" \
-            --argjson pr_number "${INPUT_PR_NUMBER}" \
-            '{repository:$repository, pr_number:$pr_number, head_sha:$head_sha, current_head_sha:$current_head_sha, base_ref:$base_ref}' \
-            > codex-review-artifacts/common/pr-seed.json
-
-          codex-review context pr \
-            --pr-context codex-review-artifacts/common/pr-seed.json \
-            --repo-path pr-head \
-            --token "${GH_TOKEN}" \
-            --out codex-review-artifacts/common/pr-context.json
-          codex-review context changed-lines \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --out codex-review-artifacts/common/changed-lines.json
-          codex-review context docs \
-            --repo-path pr-head \
-            --out codex-review-artifacts/common/docs-context.md
-          codex-review context openspec \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --repo-path pr-head \
-            --token "${GH_TOKEN}" \
-            --out codex-review-artifacts/common/openspec-context.json
-
-          # Review is the first sequential stage and always runs.
-          mkdir -p codex-review-artifacts/review/correctness codex-review-artifacts/review-state-bundle
-          codex-review review build-review-prompt \
-            --axis correctness \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --docs-context codex-review-artifacts/common/docs-context.md \
-            --out codex-review-artifacts/review/correctness/prompt.md
-          codex-review schema openai-strict --schema review-axis-findings.v1 --out codex-review-artifacts/review/correctness/findings.strict.json
-          if [[ "${live_enabled}" == "true" ]]; then
-            echo "needs_review_axis_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            codex-review review default-result \
-              --axis correctness \
-              --out codex-review-artifacts/review/correctness/findings.raw.json
-            echo "needs_review_axis_model=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-          {
-            echo "## Codex loop stage prepare"
-            echo "review prompt and common context prepared"
-          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Prepare common context
+        id: codex_context
+        uses: ./trusted-core/.github/actions/codex-context
+        with:
+          workspace: ${{ github.workspace }}
+          repo-path: pr-head
+          artifact-dir: codex-review-artifacts/common
+          repository: ${{ github.repository }}
+          pr-number: ${{ inputs.pr_number }}
+          head-sha: ${{ inputs.head_sha }}
+          base-ref: ${{ inputs.base_ref }}
+          github-token: ${{ github.token }}
 
       - name: Read relay API key from runner environment
         id: relay_key
@@ -291,706 +353,66 @@ jobs:
           echo "::add-mask::${CODEX_RELAY_API_KEY}"
           echo "key=${CODEX_RELAY_API_KEY}" >> "${GITHUB_OUTPUT}"
 
-      - name: Run live Codex review findings
-        if: ${{ steps.prepare_stage.outputs.needs_review_axis_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/review-findings
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/review/correctness/findings.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/review/correctness/findings.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/review/correctness/prompt.md`. Your working directory is the PR head checkout under review; inspect files here and cite repo-relative paths (e.g. `src/foo.py`).
-            Return the `review-axis-findings.v1` JSON result.
-
-      - name: Prepare review techlead decision
-        id: review_techlead_prepare
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/review/correctness/findings.raw.json
-          codex-review review validate \
-            --axis correctness \
-            --in codex-review-artifacts/review/correctness/findings.raw.json \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --changed-lines codex-review-artifacts/common/changed-lines.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/review/correctness/findings.validated.json
-          codex-review review combine \
-            --artifacts codex-review-artifacts/review \
-            --out codex-review-artifacts/review/combined-findings.json
-          codex-review techlead build-techlead-prompt \
-            --in codex-review-artifacts/review/combined-findings.json \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --docs-context codex-review-artifacts/common/docs-context.md \
-            --out codex-review-artifacts/review/techlead.prompt.md
-          codex-review schema openai-strict --schema techlead-decision.v1 --out codex-review-artifacts/review/techlead-decision.strict.json
-          if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_review_techlead_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            codex-review techlead default-result \
-              --in codex-review-artifacts/review/combined-findings.json \
-              --out codex-review-artifacts/review/techlead-decision.raw.json
-            echo "needs_review_techlead_model=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Run live Codex review techlead
-        if: ${{ steps.review_techlead_prepare.outputs.needs_review_techlead_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/review-techlead
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/review/techlead-decision.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/review/techlead-decision.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/review/techlead.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            Return the `techlead-decision.v1` JSON result.
-
-      - name: Complete review stage state
+      - name: Run review phase
         id: review_complete
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/review/techlead-decision.raw.json
-          codex-review techlead validate \
-            --in codex-review-artifacts/review/techlead-decision.raw.json \
-            --artifacts codex-review-artifacts/review/combined-findings.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/review-state-bundle/techlead-decision.json
-          codex-review techlead classify \
-            --in codex-review-artifacts/review-state-bundle/techlead-decision.json \
-            --artifacts codex-review-artifacts/review/combined-findings.json \
-            --out codex-review-artifacts/review-state-bundle/review-publication.json
-          codex-review techlead publish --dry-run \
-            --in codex-review-artifacts/review-state-bundle/review-publication.json \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --changed-lines codex-review-artifacts/common/changed-lines.json \
-            --out codex-review-artifacts/review-state-bundle/publish-report.json
-          codex-review loop route-after-techlead \
-            --in codex-review-artifacts/review-state-bundle/techlead-decision.json \
-            --out codex-review-artifacts/review-state-bundle/route.json
-          route="$(jq -er '.route' codex-review-artifacts/review-state-bundle/route.json)"
-          case "${route}" in
-            run_design)
-              next_stage="design"; lgtm="false"; terminal_reason="" ;;
-            stop_lgtm)
-              next_stage=""; lgtm="true"; terminal_reason="" ;;
-            stop_after_publish)
-              next_stage=""; lgtm="false"; terminal_reason="review_findings_published" ;;
-            stop_needs_human)
-              next_stage=""; lgtm="false"; terminal_reason="review_needs_human" ;;
-            *)
-              next_stage=""; lgtm="false"; terminal_reason="model_output_invalid" ;;
-          esac
-          cp codex-review-artifacts/review/combined-findings.json codex-review-artifacts/review-state-bundle/combined-findings.json
-          {
-            echo "next_stage=${next_stage}"
-            echo "lgtm=${lgtm}"
-            echo "terminal_reason=${terminal_reason}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Prepare design inventory
-        id: design_inventory_prepare
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' }}
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          mkdir -p codex-review-artifacts/design codex-review-artifacts/design-state-bundle
-          codex-review design context \
-            --in codex-review-artifacts/review-state-bundle/techlead-decision.json \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --review-context codex-review-artifacts/common/docs-context.md \
-            --docs-context codex-review-artifacts/common/docs-context.md \
-            --openspec-context codex-review-artifacts/common/openspec-context.json \
-            --out codex-review-artifacts/design/design-context.json
-          codex-review design build-inventory-prompt \
-            --in codex-review-artifacts/design/design-context.json \
-            --out codex-review-artifacts/design/design-inventory.prompt.md
-          codex-review schema openai-strict --schema design-inventory.v1 --out codex-review-artifacts/design/design-inventory.strict.json
-          if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_design_inventory_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            codex-review design default-inventory \
-              --in codex-review-artifacts/design/design-context.json \
-              --out codex-review-artifacts/design/design-inventory.raw.json
-            echo "needs_design_inventory_model=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Run live Codex design inventory
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' && steps.design_inventory_prepare.outputs.needs_design_inventory_model == 'true' }}
-        uses: openai/codex-action@v1
+        uses: ./trusted-core/.github/actions/codex-review-phase
         with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/design-inventory
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-inventory.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-inventory.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/design/design-inventory.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            Return the `design-inventory.v1` JSON result.
+          workspace: ${{ github.workspace }}
+          repo-path: pr-head
+          common-artifact-dir: codex-review-artifacts/common
+          review-artifact-dir: codex-review-artifacts/review
+          review-state-bundle-dir: codex-review-artifacts/review-state-bundle
+          memory-context: codex-review-artifacts/common/memory-context.md
+          relay-api-key: ${{ steps.relay_key.outputs.key }}
+          codex-home-root: ${{ runner.temp }}/codex-home
 
-      - name: Prepare design clusters prompt
-        id: design_clusters_prepare
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' }}
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/design/design-inventory.raw.json
-          codex-review design normalize \
-            --in codex-review-artifacts/design/design-inventory.raw.json \
-            --pr-context codex-review-artifacts/design/design-context.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/design/design-inventory.json
-          codex-review design build-clusters-prompt \
-            --inventory codex-review-artifacts/design/design-inventory.json \
-            --pr-context codex-review-artifacts/design/design-context.json \
-            --out codex-review-artifacts/design/design-clusters.prompt.md
-          codex-review schema openai-strict --schema design-clusters.v1 --out codex-review-artifacts/design/design-clusters.strict.json
-          if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_design_clusters_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            codex-review design default-clusters \
-              --inventory codex-review-artifacts/design/design-inventory.json \
-              --out codex-review-artifacts/design/design-clusters.raw.json
-            echo "needs_design_clusters_model=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Run live Codex design clusters
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' && steps.design_clusters_prepare.outputs.needs_design_clusters_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/design-clusters
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-clusters.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-clusters.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/design/design-clusters.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            Return the `design-clusters.v1` JSON result.
-
-      - name: Prepare design plan prompt
-        id: design_plan_prepare
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' }}
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/design/design-clusters.raw.json
-          codex-review design cluster \
-            --in codex-review-artifacts/design/design-clusters.raw.json \
-            --inventory codex-review-artifacts/design/design-inventory.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/design/design-clusters.json
-          codex-review design collect-analyses \
-            --artifacts codex-review-artifacts/design/design-clusters.json \
-            --out codex-review-artifacts/design/design-analyses.json
-          codex-review design build-plan-prompt \
-            --pr-context codex-review-artifacts/design/design-context.json \
-            --inventory codex-review-artifacts/design/design-inventory.json \
-            --result codex-review-artifacts/design/design-analyses.json \
-            --out codex-review-artifacts/design/design-plan.prompt.md
-          codex-review schema openai-strict --schema design-plan.v1 --out codex-review-artifacts/design/design-plan.strict.json
-          if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_design_plan_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            codex-review design default-plan \
-              --pr-context codex-review-artifacts/design/design-context.json \
-              --inventory codex-review-artifacts/design/design-inventory.json \
-              --out codex-review-artifacts/design/design-plan.raw.json
-            echo "needs_design_plan_model=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Run live Codex design plan
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' && steps.design_plan_prepare.outputs.needs_design_plan_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/design-plan
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/design/design-plan.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design/design-plan.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/design/design-plan.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            Return the `design-plan.v1` JSON result.
-
-      - name: Prepare design chief prompt
-        id: design_chief_prepare
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' }}
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/design/design-plan.raw.json
-          codex-review design validate-plan \
-            --in codex-review-artifacts/design/design-plan.raw.json \
-            --pr-context codex-review-artifacts/design/design-context.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/design-state-bundle/design-plan.json
-          cp codex-review-artifacts/design/design-context.json codex-review-artifacts/design-state-bundle/design-context.json
-          codex-review design_chief build-chief-prompt \
-            --in codex-review-artifacts/design-state-bundle/design-plan.json \
-            --inventory codex-review-artifacts/design/design-inventory.json \
-            --pr-context codex-review-artifacts/design/design-context.json \
-            --out codex-review-artifacts/design-state-bundle/chief.prompt.md
-          codex-review schema openai-strict --schema design-chief-decision.v1 --out codex-review-artifacts/design-state-bundle/chief-decision.strict.json
-          if [[ "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_design_chief_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            codex-review design_chief default-result \
-              --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
-              --out codex-review-artifacts/design-state-bundle/chief-decision.raw.json
-            echo "needs_design_chief_model=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Run live Codex design chief
-        if: ${{ steps.review_complete.outputs.next_stage == 'design' && steps.design_chief_prepare.outputs.needs_design_chief_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/design-chief
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief-decision.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief-decision.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/design-state-bundle/chief.prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            Return the `design-chief-decision.v1` JSON result.
-
-      - name: Complete design stage state
+      - name: Run design phase
         id: design_complete
         if: ${{ steps.review_complete.outputs.next_stage == 'design' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/design-state-bundle/chief-decision.raw.json
-          codex-review design_chief validate \
-            --in codex-review-artifacts/design-state-bundle/chief-decision.raw.json \
-            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/design-state-bundle/chief-decision.json
-          codex-review design_chief publish --dry-run \
-            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
-            --in codex-review-artifacts/design-state-bundle/chief-decision.json \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --out codex-review-artifacts/design-state-bundle/publish-report.json
-          codex-review design_chief route \
-            --in codex-review-artifacts/design-state-bundle/chief-decision.json \
-            --out codex-review-artifacts/design-state-bundle/route.json
-          route="$(jq -er '.route' codex-review-artifacts/design-state-bundle/route.json)"
-          case "${route}" in
-            run_fix_dispatch)
-              next_stage="fix"; lgtm="false"; terminal_reason="" ;;
-            stop_needs_human)
-              next_stage=""; lgtm="false"; terminal_reason="policy_rejected" ;;
-            stop_noop)
-              next_stage=""; lgtm="false"; terminal_reason="no_fix_needed" ;;
-            *)
-              next_stage=""; lgtm="false"; terminal_reason="model_output_invalid" ;;
-          esac
-          {
-            echo "next_stage=${next_stage}"
-            echo "lgtm=${lgtm}"
-            echo "terminal_reason=${terminal_reason}"
-          } >> "${GITHUB_OUTPUT}"
+        uses: ./trusted-core/.github/actions/codex-design-phase
+        with:
+          workspace: ${{ github.workspace }}
+          repo-path: pr-head
+          common-artifact-dir: codex-review-artifacts/common
+          review-state-bundle-dir: codex-review-artifacts/review-state-bundle
+          design-artifact-dir: codex-review-artifacts/design
+          design-state-bundle-dir: codex-review-artifacts/design-state-bundle
+          memory-context: codex-review-artifacts/common/memory-context.md
+          relay-api-key: ${{ steps.relay_key.outputs.key }}
+          codex-home-root: ${{ runner.temp }}/codex-home
 
-      - name: Prepare fix dispatch
-        id: fix_dispatch_prepare
+      - name: Read loop PAT from runner environment
+        id: loop_pat
         if: ${{ steps.design_complete.outputs.next_stage == 'fix' }}
         shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
         run: |
           set -euo pipefail
-          mkdir -p codex-review-artifacts/fix_dispatch codex-review-artifacts/fix-context codex-review-artifacts/fix-state-bundle
-          cp codex-review-artifacts/common/pr-context.json codex-review-artifacts/fix-context/pr-context.json
-          cp codex-review-artifacts/common/docs-context.md codex-review-artifacts/fix-context/docs-context.md
-          codex-review fix_dispatch plan \
-            --in codex-review-artifacts/design-state-bundle/design-plan.json \
-            --chief-decision codex-review-artifacts/design-state-bundle/chief-decision.json \
-            --out codex-review-artifacts/fix_dispatch/manifest.json
-          codex-review fix_dispatch prepare-agents \
-            --inventory codex-review-artifacts/fix_dispatch/manifest.json \
-            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
-            --chief-decision codex-review-artifacts/design-state-bundle/chief-decision.json \
-            --docs-context codex-review-artifacts/fix-context/docs-context.md \
-            --repo-path pr-head \
-            --work-dir codex-review-artifacts/fix_dispatch/agents \
-            --out codex-review-artifacts/fix_dispatch/agent-matrix.json
-          has_agent_tasks="$(jq -er 'if (.include | length) > 0 then "true" else "false" end' codex-review-artifacts/fix_dispatch/agent-matrix.json)"
-          if [[ "${has_agent_tasks}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_fix_agent_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "needs_fix_agent_model=false" >> "${GITHUB_OUTPUT}"
-            while IFS= read -r task_file; do
-              task_dir="$(dirname "${task_file}")"
-              codex-review fix_dispatch default-agent-result \
-                --inventory "${task_file}" \
-                --out "${task_dir}/result.json"
-              codex-review fix_dispatch validate-agent-result \
-                --inventory "${task_file}" \
-                --in "${task_dir}/result.json" \
-                --repo-path pr-head \
-                --out "${task_dir}/result.validated.json"
-            done < <(find codex-review-artifacts/fix_dispatch/agents -name task.json -print | sort)
+          loop_pat="${CODEX_LOOP_PAT:-}"
+          if [[ -n "${loop_pat}" ]]; then
+            echo "::add-mask::${loop_pat}"
           fi
+          echo "token=${loop_pat}" >> "${GITHUB_OUTPUT}"
 
-      - name: Run live Codex fix agents serially
-        if: ${{ steps.design_complete.outputs.next_stage == 'fix' && steps.fix_dispatch_prepare.outputs.needs_fix_agent_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/fix-agents-serially
-          working-directory: pr-head
-          prompt: |
-            Inspect every `${{ github.workspace }}/codex-review-artifacts/fix_dispatch/agents/*/prompt.md` file. Your working directory is the PR head checkout; apply the requested edits to files here.
-            For each agent directory, write only schema-valid JSON for `fix-dispatch-agent-result.v1` to that directory's `result.json`.
-            Use the requested `edits` search/replace output contract when possible. Do not post comments, push commits, access secrets, or modify files outside `${{ github.workspace }}/codex-review-artifacts/fix_dispatch/agents/*/result.json`.
-
-      - name: Prepare fix merge
-        id: fix_merge_prepare
-        if: ${{ steps.design_complete.outputs.next_stage == 'fix' }}
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          while IFS= read -r task_file; do
-            task_dir="$(dirname "${task_file}")"
-            test -s "${task_dir}/result.json"
-            codex-review fix_dispatch validate-agent-result \
-              --inventory "${task_file}" \
-              --in "${task_dir}/result.json" \
-              --repo-path pr-head \
-              --out "${task_dir}/result.validated.json"
-          done < <(find codex-review-artifacts/fix_dispatch/agents -name task.json -print | sort)
-          codex-review fix_dispatch collect \
-            --inventory codex-review-artifacts/fix_dispatch/manifest.json \
-            --artifacts codex-review-artifacts/fix_dispatch/agents \
-            --out codex-review-artifacts/fix_dispatch/collection.json
-          mkdir -p codex-review-artifacts/fix_merge codex-review-artifacts/push
-          codex-review fix_merge premerge \
-            --in codex-review-artifacts/fix_dispatch/collection.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/fix_merge/premerge-report.json
-          codex-review fix_merge prepare-merge-model \
-            --inventory codex-review-artifacts/fix_merge/premerge-report.json \
-            --in codex-review-artifacts/fix_dispatch/collection.json \
-            --pr-context codex-review-artifacts/fix-context/pr-context.json \
-            --docs-context codex-review-artifacts/fix-context/docs-context.md \
-            --repo-path pr-head \
-            --prompt-out codex-review-artifacts/fix_merge/merge-prompt.md \
-            --raw-out codex-review-artifacts/fix_merge/merged-fix.raw.json \
-            --out codex-review-artifacts/fix_merge/merge-route.json
-          codex-review schema openai-strict --schema fix-merge-merged-fix.v1 --out codex-review-artifacts/fix_merge/merged-fix.strict.json
-          needs_merge_model="$(jq -er '.needs_model | tostring' codex-review-artifacts/fix_merge/merge-route.json)"
-          if [[ "${needs_merge_model}" == "true" && "${RELAY_CONFIGURED}" == "true" ]]; then
-            echo "needs_fix_merge_model=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "needs_fix_merge_model=false" >> "${GITHUB_OUTPUT}"
-            if [[ "${needs_merge_model}" == "true" ]]; then
-              codex-review fix_merge default-merged-fix \
-                --inventory codex-review-artifacts/fix_merge/premerge-report.json \
-                --out codex-review-artifacts/fix_merge/merged-fix.raw.json
-            fi
-          fi
-
-      - name: Run live Codex fix merge
-        if: ${{ steps.design_complete.outputs.next_stage == 'fix' && steps.fix_merge_prepare.outputs.needs_fix_merge_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/fix-merge
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/merged-fix.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/merged-fix.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/fix_merge/merge-prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            The output must remain compatible with `fix_merge validate`, `push validate-fix`, and the later Task 4 push path.
-            Return the `fix-merge-merged-fix.v1` JSON result.
-
-      - name: Prepare fix semantic safety
-        id: fix_semantic_prepare
-        if: ${{ steps.design_complete.outputs.next_stage == 'fix' }}
-        shell: bash
-        env:
-          RELAY_CONFIGURED: "true"
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/fix_merge/merged-fix.raw.json
-          codex-review fix_merge validate \
-            --inventory codex-review-artifacts/fix_merge/premerge-report.json \
-            --chief-decision codex-review-artifacts/design-state-bundle/chief-decision.json \
-            --in codex-review-artifacts/fix_merge/merged-fix.raw.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/fix_merge/merged-fix.json
-          codex-review fix_merge build-semantic-safety-prompt \
-            --in codex-review-artifacts/fix_merge/merged-fix.json \
-            --pr-context codex-review-artifacts/fix-context/pr-context.json \
-            --docs-context codex-review-artifacts/fix-context/docs-context.md \
-            --repo-path pr-head \
-            --out codex-review-artifacts/fix_merge/semantic-safety-prompt.md
-          codex-review schema openai-strict --schema fix-merge-semantic-patch-safety.v1 --out codex-review-artifacts/fix_merge/semantic-safety.strict.json
-          patch_hash="$(jq -r '(.patch // .patch_text // "")' codex-review-artifacts/fix_merge/merged-fix.json | shasum -a 256 | cut -d ' ' -f 1)"
-          status="$(jq -er '.status | strings' codex-review-artifacts/fix_merge/merged-fix.json)"
-          needs_semantic_model="true"
-          if [[ "${status}" == "no_fix" || "${status}" == "blocked" || "${patch_hash}" == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]]; then
-            needs_semantic_model="false"
-            jq -n --arg patch_hash "${patch_hash}" \
-              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"not_required", approved:false, patch_hash:$patch_hash, summary:"No ready patch requires semantic push approval.", blocking_reason:null, reviewed_criteria:[], semantic_findings:[], commit_plan:[]}' \
-              > codex-review-artifacts/fix_merge/semantic-safety.raw.json
-          elif [[ "${RELAY_CONFIGURED}" != "true" ]]; then
-            needs_semantic_model="false"
-            jq -n --arg patch_hash "${patch_hash}" \
-              '{schema_version:"fix-merge-semantic-patch-safety.v1", status:"rejected", approved:false, patch_hash:$patch_hash, summary:"Semantic safety model is skipped without live autofix.", blocking_reason:"live autofix is disabled", reviewed_criteria:["exact patch hash computed", "push withheld"], semantic_findings:[], commit_plan:[]}' \
-              > codex-review-artifacts/fix_merge/semantic-safety.raw.json
-          fi
-          echo "needs_semantic_model=${needs_semantic_model}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run live Codex semantic safety
-        if: ${{ steps.design_complete.outputs.next_stage == 'fix' && steps.fix_semantic_prepare.outputs.needs_semantic_model == 'true' }}
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ steps.relay_key.outputs.key }}
-          responses-api-endpoint: https://relay-ai.dongwontuna.net/v1/responses
-          # gpt-5.5 reasoning effort (relay default is medium); use the highest
-          # tier for the agentic loop's review/design/fix decisions.
-          effort: xhigh
-          # Self-hosted container is the isolation boundary; skip the action's
-          # sudo-drop sandbox (runner has no passwordless sudo). Private infra.
-          safety-strategy: unsafe
-          # No bubblewrap: the runner container is the isolation boundary and can't
-          # nest user namespaces. danger-full-access runs codex commands directly.
-          sandbox: danger-full-access
-          # Fresh per-step Codex home so the action's proxy config is written once
-          # into a clean dir (persistent runner would otherwise accumulate config.toml).
-          codex-home: ${{ runner.temp }}/codex-home/semantic-safety
-          working-directory: pr-head
-          output-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety.raw.json
-          output-schema-file: ${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety.strict.json
-          prompt: |
-            Read `${{ github.workspace }}/codex-review-artifacts/fix_merge/semantic-safety-prompt.md`. Your working directory is the PR head checkout; inspect files here as needed and cite repo-relative paths.
-            Return the `fix-merge-semantic-patch-safety.v1` JSON result.
-
-      - name: Complete fix stage state
+      - name: Run fix phase
         id: fix_complete
         if: ${{ steps.design_complete.outputs.next_stage == 'fix' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s codex-review-artifacts/fix_merge/semantic-safety.raw.json
-          codex-review fix_merge validate-semantic-safety \
-            --in codex-review-artifacts/fix_merge/semantic-safety.raw.json \
-            --inventory codex-review-artifacts/fix_merge/merged-fix.json \
-            --out codex-review-artifacts/fix_merge/semantic-safety.json
-          codex-review push validate-fix \
-            --in codex-review-artifacts/fix_merge/merged-fix.json \
-            --semantic-safety codex-review-artifacts/fix_merge/semantic-safety.json \
-            --pr-context codex-review-artifacts/fix-context/pr-context.json \
-            --repo-path pr-head \
-            --out codex-review-artifacts/push/validated-fix.json
-          codex-review push check-loop-budget \
-            --in codex-review-artifacts/push/validated-fix.json \
-            --result codex-review-artifacts/fix_merge/merged-fix.json \
-            --design-plan codex-review-artifacts/design-state-bundle/design-plan.json \
-            --loop-state "${RUNNER_TEMP}/codex-loop-state.json" \
-            --out codex-review-artifacts/push/validated-fix.json
-          cp codex-review-artifacts/fix_dispatch/manifest.json codex-review-artifacts/fix-state-bundle/manifest.json
-          cp codex-review-artifacts/fix_merge/merged-fix.json codex-review-artifacts/fix-state-bundle/merged-fix.json
-          cp codex-review-artifacts/push/validated-fix.json codex-review-artifacts/fix-state-bundle/validated-fix.json
-          cp codex-review-artifacts/fix_merge/semantic-safety.json codex-review-artifacts/fix-state-bundle/semantic-safety.json
-          validation_status="$(jq -er '.status | strings' codex-review-artifacts/push/validated-fix.json)"
-          validated="$(jq -er '.validated | booleans | tostring' codex-review-artifacts/push/validated-fix.json)"
-          loop_budget_ok="$(jq -r 'if has("loop_budget_ok") then .loop_budget_ok else true end | tostring' codex-review-artifacts/push/validated-fix.json)"
-          next_stage=""
-          lgtm="false"
-          terminal_reason=""
-          if [[ "${validated}" == "true" && "${loop_budget_ok}" == "true" ]]; then
-            next_stage="push"
-          else
-            case "${validation_status}" in
-              no_fix|empty_patch)
-                terminal_reason="no_fix_needed" ;;
-              no_diff_repeat|no-diff-repeat|osc*|max_rounds_reached)
-                terminal_reason="no_fix_changes" ;;
-              *)
-                terminal_reason="model_output_invalid" ;;
-            esac
-          fi
-          {
-            echo "next_stage=${next_stage}"
-            echo "lgtm=${lgtm}"
-            echo "terminal_reason=${terminal_reason}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Commit and push validated fix
-        id: push_commit
-        if: ${{ steps.fix_complete.outputs.next_stage == 'push' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${CODEX_LOOP_PAT:?CODEX_LOOP_PAT not set on runner}"
-          mkdir -p codex-review-artifacts/push-state-bundle
-          codex-review push commit-push \
-            --in codex-review-artifacts/fix-state-bundle/merged-fix.json \
-            --validation codex-review-artifacts/fix-state-bundle/validated-fix.json \
-            --pr-context codex-review-artifacts/common/pr-context.json \
-            --repo-path pr-head \
-            --token "${CODEX_LOOP_PAT}" \
-            --out codex-review-artifacts/push/push-result.json
-
-      - name: Complete push stage state
-        id: push_complete
-        if: ${{ steps.fix_complete.outputs.next_stage == 'push' }}
-        shell: bash
-        env:
-          COMMIT_PUSH_OUTCOME: ${{ steps.push_commit.outcome }}
-        run: |
-          set -euo pipefail
-
-          push_result="codex-review-artifacts/push/push-result.json"
-          terminal_reason=""
-          should_redispatch="false"
-          lgtm="false"
-          updated_head_sha=""
-
-          if [[ "${COMMIT_PUSH_OUTCOME}" == "failure" || ! -s "${push_result}" ]]; then
-            terminal_reason="push_failed"
-          else
-            pushed="$(jq -r 'if (.pushed | type) == "boolean" then .pushed else false end | tostring' "${push_result}")"
-            verified="$(jq -r 'if (.verified | type) == "boolean" then .verified else false end | tostring' "${push_result}")"
-            status="$(jq -r '.status // "push_failed"' "${push_result}")"
-            result_updated_head_sha="$(jq -r '.updated_head_sha // ""' "${push_result}")"
-            remote_head_sha="$(jq -r '.remote_head_sha // ""' "${push_result}")"
-            if [[ "${pushed}" == "true" && "${verified}" == "true" && -n "${result_updated_head_sha}" && "${remote_head_sha}" == "${result_updated_head_sha}" ]]; then
-              # Push succeeded and was remote-verified: the loop should continue
-              # by re-reviewing the new head in a fresh iteration.
-              should_redispatch="true"
-              updated_head_sha="${result_updated_head_sha}"
-              cp "${push_result}" codex-review-artifacts/push-state-bundle/push-result.json
-            else
-              case "${status}" in
-                pushed_unverified) terminal_reason="pushed_unverified" ;;
-                push_failed) terminal_reason="push_failed" ;;
-                stale_head) terminal_reason="stale_head" ;;
-                no_fix|empty_patch|no_fix_changes|no_diff_repeat|no-diff-repeat) terminal_reason="no_fix_changes" ;;
-                validation_failed|tests_failed|semantic_safety_missing|semantic_safety_rejected|semantic_safety_hash_mismatch) terminal_reason="${status}" ;;
-                *) terminal_reason="push_failed" ;;
-              esac
-            fi
-          fi
-
-          {
-            echo "should_redispatch=${should_redispatch}"
-            echo "lgtm=${lgtm}"
-            echo "terminal_reason=${terminal_reason}"
-            echo "updated_head_sha=${updated_head_sha}"
-          } >> "${GITHUB_OUTPUT}"
+        uses: ./trusted-core/.github/actions/codex-fix-phase
+        with:
+          workspace: ${{ github.workspace }}
+          repo-path: pr-head
+          common-artifact-dir: codex-review-artifacts/common
+          design-state-bundle-dir: codex-review-artifacts/design-state-bundle
+          fix-dispatch-artifact-dir: codex-review-artifacts/fix_dispatch
+          fix-context-dir: codex-review-artifacts/fix-context
+          fix-merge-artifact-dir: codex-review-artifacts/fix_merge
+          fix-state-bundle-dir: codex-review-artifacts/fix-state-bundle
+          push-artifact-dir: codex-review-artifacts/push
+          push-state-bundle-dir: codex-review-artifacts/push-state-bundle
+          memory-context: codex-review-artifacts/common/memory-context.md
+          loop-state-path: ${{ runner.temp }}/codex-loop-state.json
+          relay-api-key: ${{ steps.relay_key.outputs.key }}
+          loop-pat: ${{ steps.loop_pat.outputs.token }}
+          codex-home-root: ${{ runner.temp }}/codex-home
 
       - name: Resolve final stage outcome
         id: stage_outputs
@@ -1003,9 +425,9 @@ jobs:
           DESIGN_TERMINAL_REASON: ${{ steps.design_complete.outputs.terminal_reason }}
           FIX_NEXT_STAGE: ${{ steps.fix_complete.outputs.next_stage }}
           FIX_TERMINAL_REASON: ${{ steps.fix_complete.outputs.terminal_reason }}
-          PUSH_REDISPATCH: ${{ steps.push_complete.outputs.should_redispatch }}
-          PUSH_TERMINAL_REASON: ${{ steps.push_complete.outputs.terminal_reason }}
-          PUSH_UPDATED_HEAD_SHA: ${{ steps.push_complete.outputs.updated_head_sha }}
+          PUSH_REDISPATCH: ${{ steps.fix_complete.outputs.should_redispatch }}
+          PUSH_TERMINAL_REASON: ${{ steps.fix_complete.outputs.push_terminal_reason }}
+          PUSH_UPDATED_HEAD_SHA: ${{ steps.fix_complete.outputs.updated_head_sha }}
         run: |
           set -euo pipefail
 
@@ -1054,9 +476,70 @@ jobs:
             echo "updated_head_sha=${updated_head_sha}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Record non-pushed terminal review memory
+        id: terminal_memory
+        if: ${{ always() && steps.stage_outputs.outputs.should_redispatch != 'true' && (steps.stage_outputs.outputs.lgtm == 'true' || steps.stage_outputs.outputs.terminal_reason != '') }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          COMMON_ARTIFACT_DIR: codex-review-artifacts/common
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          LOOP_STATE_PATH: ${{ runner.temp }}/codex-loop-state.json
+          REPO_PATH: pr-head
+          TERMINAL_LGTM: ${{ steps.stage_outputs.outputs.lgtm }}
+          TERMINAL_REASON: ${{ steps.stage_outputs.outputs.terminal_reason }}
+          TERMINAL_SHOULD_REDISPATCH: ${{ steps.stage_outputs.outputs.should_redispatch }}
+          TERMINAL_UPDATED_HEAD_SHA: ${{ steps.stage_outputs.outputs.updated_head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${TERMINAL_SHOULD_REDISPATCH}" == "true" ]]; then
+            echo "terminal memory skipped: pushed continuation"
+            exit 0
+          fi
+          if [[ "${TERMINAL_LGTM}" != "true" && -z "${TERMINAL_REASON}" ]]; then
+            echo "terminal memory skipped: non-terminal outcome"
+            exit 0
+          fi
+
+          loop_pat="${CODEX_LOOP_PAT:-}"
+          if [[ -n "${loop_pat}" ]]; then
+            echo "::add-mask::${loop_pat}"
+          fi
+
+          mkdir -p codex-review-artifacts/terminal-memory
+          terminal_status="${TERMINAL_REASON}"
+          terminal_reason="${TERMINAL_REASON}"
+          lgtm_json="false"
+          if [[ "${TERMINAL_LGTM}" == "true" ]]; then
+            terminal_status="lgtm"
+            terminal_reason="${terminal_reason:-lgtm}"
+            lgtm_json="true"
+          fi
+
+          jq -n \
+            --arg status "${terminal_status}" \
+            --arg terminal_reason "${terminal_reason}" \
+            --arg head_sha "${INPUT_HEAD_SHA}" \
+            --arg updated_head_sha "${TERMINAL_UPDATED_HEAD_SHA}" \
+            --argjson lgtm "${lgtm_json}" \
+            '{schema_version:"push-result.v1", pushed:false, lgtm:$lgtm, status:$status, terminal_reason:$terminal_reason, reason:$terminal_reason, head_sha:$head_sha, updated_head_sha:$updated_head_sha}' \
+            > codex-review-artifacts/terminal-memory/terminal-output.json
+
+          if ! codex-review reentry record-reentry \
+            --in codex-review-artifacts/terminal-memory/terminal-output.json \
+            --loop-state "${LOOP_STATE_PATH}" \
+            --pr-context "${COMMON_ARTIFACT_DIR}/pr-context.json" \
+            --repo-path "${REPO_PATH}" \
+            --token "${loop_pat}" \
+            --out codex-review-artifacts/terminal-memory/reentry-loop-state.json; then
+            echo "terminal memory record-reentry failed nonfatally" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
   finalize:
     name: Finalize Loop
-    needs: [validate, setup-state, run-stage]
+    needs: [validate, setup-state, classify, run-stage]
     if: ${{ always() }}
     runs-on:
       group: "Home Server Runners"
@@ -1078,6 +561,12 @@ jobs:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           VALIDATE_REASON: ${{ needs.validate.outputs.terminal_reason }}
           SETUP_RESULT: ${{ needs.setup-state.result }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          CLASSIFY_MEMORY_ONLY: ${{ needs.classify.outputs.memory_only }}
+          CLASSIFY_SHOULD_RUN_MODEL: ${{ needs.classify.outputs.should_run_model }}
+          CLASSIFY_REASON: ${{ needs.classify.outputs.classification_reason }}
+          CLASSIFY_CODEX_MEMORY_MARKER: ${{ needs.classify.outputs.codex_memory_marker }}
+          CLASSIFY_ACTOR_GUARD: ${{ needs.classify.outputs.actor_guard }}
           RUN_STAGE_RESULT: ${{ needs.run-stage.result }}
           RUN_STAGE_LGTM: ${{ needs.run-stage.outputs.lgtm }}
           RUN_STAGE_REDISPATCH: ${{ needs.run-stage.outputs.should_redispatch }}
@@ -1107,6 +596,16 @@ jobs:
             updated_head_sha=""
           elif [[ "${SETUP_RESULT}" != "success" ]]; then
             terminal_reason="state-setup-failed"
+            lgtm="false"
+            should_redispatch="false"
+            updated_head_sha=""
+          elif [[ "${CLASSIFY_RESULT}" != "success" ]]; then
+            terminal_reason="classify-failed"
+            lgtm="false"
+            should_redispatch="false"
+            updated_head_sha=""
+          elif [[ "${CLASSIFY_MEMORY_ONLY}" == "true" && "${CLASSIFY_SHOULD_RUN_MODEL}" == "false" && "${CLASSIFY_CODEX_MEMORY_MARKER}" == "true" && "${CLASSIFY_ACTOR_GUARD}" == "true" ]]; then
+            terminal_reason="memory_only_noop"
             lgtm="false"
             should_redispatch="false"
             updated_head_sha=""
@@ -1213,3 +712,27 @@ jobs:
             echo "terminal_reason=${terminal_reason}"
             echo "updated_head_sha=${updated_head_sha}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  required-checks:
+    name: Required Checks
+    needs: [validate, setup-state, classify, run-stage, finalize]
+    if: ${{ !cancelled() }}
+    runs-on:
+      group: "Home Server Runners"
+      labels: dongwontuna-labs-runner
+    permissions: {}
+    steps:
+      - name: Verify required job results
+        shell: bash
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+
+          echo "${NEEDS_JSON}" | jq .
+          if jq -e '[.[] | select(.result == "failure" or .result == "cancelled")] | length > 0' <<< "${NEEDS_JSON}" >/dev/null; then
+            jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | "\(.key)=\(.value.result)"' <<< "${NEEDS_JSON}"
+            exit 1
+          fi
+
+          echo "all required jobs succeeded or skipped"

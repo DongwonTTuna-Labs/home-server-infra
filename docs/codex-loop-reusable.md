@@ -1,465 +1,197 @@
 # Codex Loop Reusable Workflow Contract
 
-## Event Topology
+This document describes the current Codex Loop implementation in `home-server-infra` after the Phase 1 memory and workflow modularization work. The workflow and tests are the source of truth:
 
-This contract is for org-internal Codex loop automation in `DongwonTTuna-Labs` repositories. It defines one reusable core and one event adapter.
+1. `.github/workflows/codex-loop-reusable.yml`
+2. `setup/codex-review/tests/workflow/test_simplified_core.py`
+3. `.omo/evidence/gha-precedent-dossier.md`
 
-The reusable core is `codex-loop-reusable.yml` with `on: workflow_call`. It owns validation, trust checks, Codex relay setup, stage execution, and terminal decisions. Consumer repositories call it directly when they already have trusted PR context.
+The loop is private org infrastructure. It runs on the `Home Server Runners` runner group with the `dongwontuna-labs-runner` label.
 
-The event adapter is `codex-loop-dispatch.yml` with `on: repository_dispatch` and `types: [codex-loop]`. It runs on the default branch, validates `client_payload`, maps the payload into reusable workflow inputs, and calls the reusable core. It doesn't hold extra loop state.
+## Current Topology
 
-The manual adapter is `codex-loop-manual.yml` with `on: workflow_dispatch`. It is a debug-only entry point, defaults `dry_run` to `true`, requires the same PR identity inputs including `head_sha`, and is not the normal loop progression mechanism.
+The reusable core is `.github/workflows/codex-loop-reusable.yml` with `on: workflow_call`. It currently has six jobs in this order:
 
-The core and adapter run on the `Home Server Runners` org runner group with the `dongwontuna-labs-runner` label unless a consuming repo explicitly passes another approved org-internal runner target in a later change.
+| Job | Role | Current behavior |
+| --- | --- | --- |
+| `validate` | Core | Validates typed workflow inputs. |
+| `setup-state` | Core | Checks out base and PR-head data, installs the trusted `codex-review` helper, and uploads the fresh loop-state artifact for this run. |
+| `classify` | Control | Classifies whether the new commit is a trusted Codex memory-only commit. |
+| `run-stage` | Core | Runs the live sequential model chain: review, design, fix, push. Later stages run only when earlier stage outputs request them. |
+| `finalize` | Core | Resolves the final outcome, emits reusable workflow outputs, and dispatches the next iteration only after a remote-verified push. |
+| `required-checks` | Control | Aggregates prior job results and fails only when a needed job failed or was cancelled. Skipped model work is allowed. |
 
-Labels and comments MUST NOT be used for internal loop state. For text checks, labels and comments MUST NOT be used for internal loop state. The loop state lives in typed workflow inputs, `repository_dispatch` payload, job outputs, summaries, and artifacts.
+The core jobs are `validate`, `setup-state`, `run-stage`, and `finalize`. The post-change control jobs are `classify` and `required-checks`.
 
-## Payload Schema
+## Final Module Map
 
-Use `event_type: codex-loop`. The current dispatch contract is payload schema v2. `client_payload` must contain these top-level keys:
+The reusable workflow is now a thin orchestrator for the job DAG, job-level gates, runner permissions, credential capture, artifact transport, and trusted-source checkouts. Per-phase step logic lives in trusted local composite actions checked out under `trusted-core/` from the called workflow job identity resolved at runtime and invoked with static `./trusted-core/.github/actions/...` paths.
 
-```json
-{
-  "schema_version": 2,
-  "pr_number": 123,
-  "head_sha": "40-char-commit-sha",
-  "base_ref": "main",
-  "stage": "review",
-  "iteration": 0,
-  "correlation_id": "codex-loop-123-<headsha-prefix>",
-  "requested_by": "github-login-or-app-slug",
-  "state_run_id": 1234567890,
-  "state_artifact_name": "codex-loop-state-codex-loop-123-<headsha-prefix>"
-}
-```
-
-The JSON Schema lives at `schemas/codex-loop-dispatch-payload.v2.schema.json`. It sets `additionalProperties: false`, so callers must not add labels, comments, model output, secrets, or arbitrary free-form state to `client_payload`.
-
-Field contract:
-
-| Field | Type | Required | Meaning |
+| Phase | Owning composite | Called from | Owns |
 | --- | --- | --- | --- |
-| `schema_version` | integer enum | yes | Must be `2`. This makes state-pointer payloads distinguishable from the original PR #18 payload shape. |
-| `pr_number` | integer | yes | Pull request number in the repository that receives the event. |
-| `head_sha` | string | yes | Expected PR head commit SHA. The core must compare this with the live PR head before any write, finalize, or continuation operation. |
-| `base_ref` | string | yes | Base branch name used for trust and checkout decisions. |
-| `stage` | string enum | yes | One of `review`, `design`, `fix`, or `push`. |
-| `iteration` | integer | yes | Zero-based loop counter for dispatches that entered the state machine. The default maximum is `5`. |
-| `correlation_id` | string | yes | Stable id for this loop chain, used in concurrency groups, summaries, artifacts, and state artifact names. |
-| `requested_by` | string | yes | GitHub login or app slug that requested this loop step. |
-| `state_run_id` | integer | yes | GitHub Actions run id that produced the state artifact to load before executing this step. The first adapter-created dispatch points at the run that initialized the state bundle. |
-| `state_artifact_name` | string | yes | Exact artifact name containing the state bundle for this loop step. It must be resolved by name, not by `gh run list --headSha` discovery. |
-| `dry_run` | boolean | no | Defaults to `true` for the core and adapters. |
-| `max_iterations` | integer | no | Defaults to `5`; see the cap semantics below. |
+| Memory classify | `.github/actions/codex-memory-classify` | `classify` job | `codex-review loop memory-only-change`, classifier outputs, and classifier summary. |
+| Common context | `.github/actions/codex-context` | `run-stage` job | PR context, changed lines, docs context, OpenSpec context, and memory context artifacts. |
+| Review/techlead | `.github/actions/codex-review-phase` | `run-stage` job | Review prompt/model/validation, combined findings, techlead prompt/model/decision, review publication, and route-after-techlead outputs. |
+| Design/design-chief | `.github/actions/codex-design-phase` | `run-stage` job | Design context, inventory, clusters, analysis collection, plan, design-chief prompt/model/decision, publication, and route outputs. |
+| Fix/push | `.github/actions/codex-fix-phase` | `run-stage` job | Fix dispatch, fix agents, merge, semantic safety, push validation, trusted memory sidecar write, commit/push, and push completion outputs. |
 
-No free-form state is allowed in the payload. If the loop needs more state later, add a new versioned schema in a separate change.
+The job-level workflow keeps the six jobs in order: `validate`, `setup-state`, `classify`, `run-stage`, `finalize`, and `required-checks`. The composites contain steps only; jobs, `needs`, runner labels, permissions, `if` gates, concurrency, and `workflow_call` inputs/outputs stay in the reusable workflow.
+
+Trust sourcing is part of the contract: `pr-head` is data/working tree only. The reusable workflow must not call `pr-head/.github/actions/...` and must not use bare `./.github/actions/codex-*` paths.
+
+The previous split-stage model is gone. There is no `stage` workflow input, no `state_run_id`, no `state_artifact_name`, no per-stage workflow fan-out, no matrix, and no cross-run state pointer contract. A single `run-stage` job executes `review -> design -> fix -> push` sequentially inside one workflow run. `repository_dispatch` is used only to start the next full iteration after a successful, remote-verified push.
 
 ## Inputs
 
-The reusable core accepts the same contract as typed `workflow_call` inputs:
+The reusable core currently accepts these `workflow_call` inputs:
 
-| Input | Type | Required | Notes |
+| Input | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `pr_number` | number | yes | Source PR number. |
-| `head_sha` | string | yes | Expected PR head SHA. |
-| `base_ref` | string | yes | Expected base ref. |
-| `stage` | string | yes | Must be `review`, `design`, `fix`, or `push`. |
-| `iteration` | number | yes | Must be within the accepted loop range. |
-| `correlation_id` | string | yes | Used to tie runs, artifacts, and dispatches together. |
-| `requested_by` | string | yes | Used for audit text and trust checks. |
-| `dry_run` | boolean | no | Defaults to `true` for the core and adapters. A `true` value forces non-writing behavior even if live support exists. |
-| `enable_live_autofix` | boolean | no | Defaults to `false`. Live model calls, relay-token minting, GitHub App-token minting, fix pushes, and continuation dispatch require `dry_run == false && enable_live_autofix == true`. |
-| `max_iterations` | number | no | Defaults to `5`. |
+| `pr_number` | number | yes | Pull request number. |
+| `head_sha` | string | yes | Expected PR head SHA for this iteration. |
+| `base_ref` | string | yes | Expected base branch. |
+| `iteration` | number | yes | Zero-based loop iteration. |
+| `correlation_id` | string | yes | Stable loop id, used in concurrency and artifacts. |
+| `requested_by` | string | yes | Actor or app slug that requested this iteration. |
 
-## Org Consumer Adapters
+Current continuation payloads carry only the next iteration entry inputs: `pr_number`, `head_sha`, `base_ref`, `iteration`, `correlation_id`, and `requested_by`. They do not carry stage names or state pointers.
 
-Org-internal consumers should add a thin adapter in the consuming repository. The adapter owns the event trigger and passes trusted PR context into the reusable core. The reusable core stays in `home-server-infra`.
+## Runner Environment Credentials
 
-Production consumers must pin the reusable workflow by commit SHA or by an approved internal tag. Don't pin production consumers to a branch, because a moving ref can change the automation that runs against PR code without a consumer-side review.
+The reusable workflow declares no `workflow_call` secrets and must not read `secrets.*` inputs. Credentials are runner environment variables on the self-hosted org runners:
 
-A safe first `pull_request_target` adapter can start in dry-run mode and call only the `review` stage:
-
-```yaml
-name: Codex Loop Review Adapter
-
-on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
-
-permissions: {}
-
-jobs:
-  codex-loop-review:
-    if: ${{ github.event.pull_request.draft == false }}
-    uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/codex-loop-reusable.yml@<sha-or-tag>
-    permissions:
-      contents: write
-      pull-requests: write
-      id-token: write
-    with:
-      pr_number: ${{ github.event.pull_request.number }}
-      head_sha: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.event.pull_request.base.ref }}
-      stage: review
-      iteration: 0
-      correlation_id: codex-loop-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-0
-      requested_by: ${{ github.actor }}
-      dry_run: true
-    secrets: inherit
-```
-
-The `dry_run: true` default is the safe initial path for a new consumer. Switch it only after the consumer has reviewed trust checks, runner access, app secrets, and artifact output for that repository.
-
-Live autofix is default-off in two independent ways: `dry_run` defaults to `true`, and `enable_live_autofix` defaults to `false`. A caller enables live behavior only by passing both `dry_run: false` and `enable_live_autofix: true`. Setting `dry_run: false` alone is still non-live/default-off; model stages use deterministic no-model artifacts, relay-token steps are skipped, GitHub App-token steps are skipped, push is skipped, and continuation dispatch is skipped.
-
-Initial review bootstrap is allowed only for `stage=review`, `iteration=0`, and both `state_run_id` and `state_artifact_name` empty. That first-review path creates a run-scoped empty loop-state bundle. Every resume or non-initial stage still requires explicit state pointers.
-
-The manual debug adapter is dry-run oriented. In its current shape it requires state pointers and does not expose `enable_live_autofix`, so it cannot be used as a no-state initial-review live-enable wrapper.
-
-Trusted fix-push continuation is now implemented behind the live gates. If Codex returns `should_redispatch=true`, a push and redispatch may occur only after same-repository trust checks, non-fork/stale-head guards, semantic safety validation, `dry_run == false`, and `enable_live_autofix == true`. Without both live flags the run terminates as non-live/default-off with no push or dispatch.
-
-The dispatch payload keys are `schema_version`, `pr_number`, `head_sha`, `base_ref`, `stage`, `iteration`, `correlation_id`, `requested_by`, `state_run_id`, `state_artifact_name`, and optional `dry_run` or `max_iterations`. They are used by the default-branch adapter and by future trusted continuation support.
-
-## Label Migration
-
-The old label-driven chain maps to typed stages like this:
-
-| Old label signal | New stage path |
+| Runner env var | Used for |
 | --- | --- |
-| `리뷰중` | Dispatch or reusable input `stage: review`. |
-| `리뷰완료` | Dispatch or reusable input `stage: design`. |
-| `설계완료` | Dispatch or reusable input `stage: fix`. |
-| `수정중` | Dispatch or reusable input `stage: fix`. |
-| `codex:needs-issue` | Terminal artifact path only. It is not a reusable input stage in the serial redesign. |
-| `codex:lgtm` | Optional future visible marker only. It is not internal loop state. |
+| `CODEX_RELAY_API_KEY` | Static codex-lb key for `openai/codex-action@v1` via `https://relay-ai.dongwontuna.net/v1/responses`. The workflow masks it before passing it to the model action. |
+| `CODEX_LOOP_PAT` | Push and continuation `repository_dispatch`. A PAT is the current implementation because memory commits and fix commits need follow-on workflows to run. |
 
-Internal labels `리뷰중`, `리뷰완료`, `설계완료`, and `수정중` are removed as orchestration triggers. Don't add or remove those labels to drive the loop. The source of truth is the typed workflow input or `repository_dispatch` payload.
+This is not the old GitHub App or OIDC relay-token model. It is also not a PAT-forbidden model. `GITHUB_TOKEN` may still be used for read-only GitHub API context where the workflow already does that, but push and dispatch continuation use `CODEX_LOOP_PAT` from the runner environment.
 
-Terminal visible labels or comments can be considered later as visible-status work. They are optional, separate from this loop contract, and must not become internal state.
+## Single-Run Stage Flow
 
-## Secrets
+`run-stage` builds common context once under `codex-review-artifacts/common/`, including:
 
-The reusable accepts these GitHub App secret names only. Do not put secret values in workflow YAML, docs, evidence, logs, PR bodies, or summaries.
+1. `pr-context.json`
+2. `changed-lines.json`
+3. `docs-context.md`
+4. `openspec-context.json`
+5. `memory-context.md`
 
-| Secret | Required For | Notes |
-| --- | --- | --- |
-| `CODEX_GITHUB_APP_ID` | live fix push and live continuation dispatch | GitHub App id for the org-internal automation app. Required only when `dry_run == false && enable_live_autofix == true` reaches a write or dispatch path. |
-| `CODEX_GITHUB_APP_PRIVATE_KEY` | live fix push and live continuation dispatch | PEM private key for the same app. Required only when `dry_run == false && enable_live_autofix == true` reaches a write or dispatch path. |
+The trusted helper builds `memory-context.md` with:
 
-Consumer repositories must map their own secret names explicitly. The RS consumer will map `CODEX_APP_ID` to `CODEX_GITHUB_APP_ID` and `CODEX_APP_PRIVATE_KEY` to `CODEX_GITHUB_APP_PRIVATE_KEY` in a later adapter change; `secrets: inherit` does not rename them.
+```bash
+codex-review context memory \
+  --pr-context codex-review-artifacts/common/pr-context.json \
+  --repo-path pr-head \
+  --out codex-review-artifacts/common/memory-context.md
+```
 
-PAT fallback is forbidden. Workflows must not accept, document, or branch to a PAT for write, finalize, or dispatch operations.
+That same memory context is passed to the nine current prompt-builder paths: review, techlead, design inventory, design clusters, design plan, design chief, fix dispatch agents, fix merge, and semantic safety.
 
-Codex model access uses GitHub OIDC and the org native `codex-lb` relay path. Jobs that need the relay grant `id-token: write`, exchange the OIDC token for a short-lived relay key through `codex-review oidc relay-token`, mask the key, and pass the relay endpoint and key to Codex. No long-lived relay key is stored in GitHub secrets.
+The PR head checkout is data for trusted helper inspection and model working-directory use. Consumer workflows with privileged write-back must not run untrusted PR-head build scripts, package managers, actions, or helper installation while base-repo secrets or write tokens are in scope.
 
-## Permissions
+## Review Memory Contract
 
-Use explicit least-privilege permissions. Never use `write-all`.
+Review memory lives in PR-scoped files under:
 
-| Area | Required Permissions | Notes |
-| --- | --- | --- |
-| Dispatch adapter validation | `contents: read`, `pull-requests: read` | No `id-token` and no write permission. |
-| Core validation and trust checks | `contents: read`, `pull-requests: read` | Runs before relay setup or writes. |
-| Core relay and model run | `contents: read`, `pull-requests: read`, `id-token: write` | Needed for OIDC relay exchange. |
-| Core write and continuation | `contents: write`, `pull-requests: write` | Used only after trust guards and live gates pass, with GitHub App installation tokens. |
+```text
+.omo/review-memory/pr-<n>/
+```
 
-No issue permission is included in this change. Terminal failures go to job summary and artifacts, not issue creation, PR comments, or labels.
+Canonical generated files are:
 
-## Trust Boundary
-
-The trusted boundary is the `DongwonTTuna-Labs` organization plus the GitHub App and OIDC relay trust configured for this infrastructure. A job must validate PR identity, current head SHA, base ref, actor, repository owner, and fork status before relay setup, checkout of PR code, writes, or continuation dispatch.
-
-Fork PRs are not write-capable in this contract. If a fork PR reaches the loop, it must terminate before relay setup or write operations with a clear terminal reason in the job summary and artifact.
-
-Same-repo fix pushes are live-gated. The reusable workflow validates trust and stage output, requires `dry_run == false && enable_live_autofix == true`, pushes only trusted same-repo branches, emits an `updated_head_sha`, and dispatches that updated SHA with the GitHub App installation token. Dry-run/default-off paths do not push or redispatch.
-
-### Checkout Topology
-
-The reusable core separates trusted code from untrusted PR data using four named worktrees. Each worktree has a fixed repository/ref source, credential policy, trust level, and allowed-action contract. A job must never collapse these into a single checkout, because that would let untrusted PR-head content run with trusted credentials.
-
-| Worktree | Repository/ref | Credential policy | Trust level | Allowed actions | Forbidden actions |
-| --- | --- | --- | --- | --- | --- |
-| `trusted-core/` | `DongwonTTuna-Labs/home-server-infra@<pinned SHA>`, the same SHA the consumer pinned in `uses:`, resolved from `github.workflow_ref` or an explicit `core_sha` assertion | Trusted org checkout; carries no PR-head write credentials | Trusted | Install and run the trusted `codex-review` CLI and trusted helper scripts | Checking out or executing PR-head code in this worktree |
-| `target-base/` | Consumer repository base ref or base SHA (`base_ref`) | `persist-credentials: false` | Trusted comparison/reference context | Read-only base context for diff and reference against the PR head | Writing, pushing, or executing as a privileged step |
-| `pr-head/` | Consumer PR head SHA (`head_sha`) | `persist-credentials: false` | Untrusted PR-head data | Read PR-head files as data for review and diff only | Executing PR-head scripts, actions, package managers, or helper installation under secrets |
-| `pr-head-write/` | Consumer PR head SHA, fresh checkout taken only after same-repo, fork, and stale-head guards pass | Credentials limited to the GitHub App installation token | Write-capable only after trust guards pass (future fix-push work) | Apply a verified fix and push to a trusted same-repo branch | Fork PRs, stale heads, or executing arbitrary PR-head scripts under secrets |
-
-`PR head is data only; never execute PR-head scripts, actions, package managers, or helper installation under secrets.` The `pr-head/` worktree exists so the trusted `codex-review` CLI in `trusted-core/` can read the proposed change as text. It is never a place to run the consumer's build, install, test, or lint commands while org secrets or the GitHub App token are in scope.
-
-`pr-head-write/` is a separate, fresh checkout taken only after the same-repo, fork, stale-head, semantic-safety, and live-enable guards pass. It carries only the GitHub App installation token, and never reuses the `pr-head/` data worktree.
-
-CLI SHA sourcing rule: the reusable core must source the `codex-review` CLI from the same pinned `home-server-infra` SHA as the workflow itself. The core resolves that SHA from `github.workflow_ref` (parsed) or asserts an explicit `core_sha` input in later implementation, then checks out `trusted-core/` at that exact SHA. A branch pin or any other moving ref is forbidden for production, because a moving core ref could change the trusted CLI that runs against PR data without a pinned, reviewable SHA.
-
-## Loop State Machine
-
-The serial redesign has four callable stages: `review`, `design`, `fix`, and `push`. A full loop sequence is `review -> design -> fix -> push -> review`; the return to `review` starts the next iteration only after a trusted live push has produced an updated PR head SHA.
-
-Allowed non-terminal transitions:
-
-| Current stage | Allowed next stage | Meaning |
-| --- | --- | --- |
-| `review` | `design` | Review found scoped changes that need a design pass before modification. |
-| `design` | `fix` | Design is complete and the loop may prepare the scoped fix artifacts. |
-| `fix` | `push` | Fix artifacts, semantic-safety evidence, and dispatch ledger are ready for a push decision. |
-| `push` | `review` | A trusted same-repository fix commit was pushed, the PR head moved, and the next iteration reviews the updated head. |
-
-Terminal states are not payload stages. They are workflow outputs, summaries, and artifacts only:
-
-| Terminal state | Required output shape | Meaning |
-| --- | --- | --- |
-| LGTM | `lgtm=true`, `should_redispatch=false`, `terminal_reason=lgtm` or an equivalent success reason | The PR is ready and no further design, fix, push, or dispatch step is required. |
-| Dry-run/default-off terminal | `lgtm=false`, `should_redispatch=false`, `terminal_reason=dry_run` or equivalent dry-run placeholder | The loop intentionally stopped without model writes, GitHub App-token minting, push, or redispatch. |
-| Failure terminal | `lgtm=false`, `should_redispatch=false`, non-empty `terminal_reason` | Validation, trust, stale-head, max-iteration, relay, ambiguous-output, fork, closed-PR, semantic-safety, push, or dispatch failure stopped the loop. |
-
-The reusable workflow has a simple five-job topology: `validate`, `trust-and-stale-guard`, `setup-relay`, `run-stage`, and `finalize`. `run-stage` owns all stage-specific behavior internally; the workflow must not add per-stage jobs, `strategy.matrix`, or `fromJson` fan-out.
-
-A valid continuation dispatch must carry the next `stage`, the updated `iteration`, the expected `head_sha`, and the explicit state pointers `state_run_id` and `state_artifact_name`. The next run must load that artifact before stage execution. It must not infer prior state from labels, comments, issues, or `gh run list --headSha`.
-
-### Dispatch And Iteration Caps
-
-`iteration` is zero-based. The first review dispatch for a head starts at `0`. A continuation that moves from `push` back to `review` after a trusted same-repository fix push increments `iteration` by `1` and must carry the updated PR `head_sha`.
-
-`max_iterations` defaults to `5`. A run where `iteration >= max_iterations` must not dispatch another loop step. It must terminate with a max-iteration terminal reason before any write or redispatch attempt. Validation may accept the run for summary/artifact publication, but finalization must keep `should_redispatch=false`.
-
-Each continuation attempt must obey both caps:
-
-| Cap | Rule |
+| File | Meaning |
 | --- | --- |
-| Per-run dispatch cap | A single workflow run may emit at most one continuation dispatch. |
-| Loop iteration cap | A loop chain may continue only while `iteration < max_iterations`. |
+| `ledger.json` | Schema-valid `review-memory.v1` ledger. |
+| `learnings.md` | Generated projection from ledger entries. |
+| `decisions.md` | Generated projection from ledger entries. |
+| `issues.md` | Generated projection from ledger entries. |
+| `problems.md` | Generated projection from ledger entries. |
 
-### Stale-Head Checkpoints
+Memory is advisory PR-scoped context. Treat PR-branch memory as untrusted data unless a specific entry is trusted by provenance. It may inform prompts as background, but it must not route stages, force LGTM, suppress current findings by prompt text, decide stale-head safety, authorize writes, trigger redispatch, or replace current code, current OpenSpec, schemas, security rules, or system instructions.
 
-The stale-head guard runs at every trust boundary:
+Trusted resolved-finding memory can affect suppression only through the trusted exact-fingerprint path implemented in the helper, not through free-form prompt prose. Missing, corrupt, oversized, or untrusted memory must fail safe to advisory or empty context.
 
-1. Dispatch validation records the payload `head_sha` and state pointers without resolving historical runs by head SHA.
-2. Before relay setup, checkout, writes, state artifact loading, or stage execution, the core compares the live PR head with payload `head_sha`.
-3. Before any fix push or continuation dispatch, the workflow checks the PR head again. If a push stage created a new commit, the continuation payload must use that new SHA; if a user or another workflow moved the head unexpectedly, the run terminates with `stale-head-sha`.
-4. The next run repeats the same guard before loading `state_artifact_name` from `state_run_id`.
+## Memory-Only No-Op Gate
 
-A stale-head terminal is final for that run. It must be visible in summaries and artifacts, not labels or comments.
+The implemented no-op gate is Model A plus Option A:
 
-## Loop Termination
+1. No workflow-level `paths-ignore` is used for the reusable core.
+2. `classify` runs after `setup-state` and before model work.
+3. `classify` calls `codex-review loop memory-only-change` against the PR-head checkout.
+4. A no-op requires all of these signals: changed paths are only review-memory paths, the head commit has the `codex-memory: true` marker, and the actor/requester guard matches configured own actors.
+5. `run-stage` runs only when `needs.classify.outputs.should_run_model == 'true'`.
+6. `finalize` emits `terminal_reason=memory_only_noop`, `should_redispatch=false`, and an empty `updated_head_sha` when the guarded no-op is accepted.
+7. `required-checks` still succeeds when downstream model work is skipped.
 
-The loop has four callable stages: `review`, `design`, `fix`, and `push`.
+The classifier is fail-open for model work. Missing marker, actor mismatch, invalid refs, mixed code and memory changes, and empty diffs keep `should_run_model=true`.
 
-A successful terminal run happens when Codex returns a machine-readable result that the PR is ready and no further design, fix, or push stage is required.
+## Required Checks And Branch Protection
 
-A continuing run may happen only after the `push` stage pushes a trusted same-repo commit, emits `updated_head_sha`, and dispatches a new `stage=review` event with `iteration` increased by `1` and the updated `head_sha`. This path is live-gated and remains inert unless `dry_run == false && enable_live_autofix == true`.
+Consumer branch protection should require only the final aggregator job:
 
-A failure terminal run happens when validation fails, max iteration is exceeded, SHA is stale, the actor isn't trusted, required GitHub App secrets are missing, the payload is malformed, Codex output is ambiguous, the PR is closed or missing, the PR comes from a fork, or a write fails.
+```text
+required-checks
+```
 
-The canonical machine-readable enum is `schemas/terminal-reason.v1.json`. Workflow outputs, summaries, and artifacts should use only these underscore names after emitter-alignment work is complete.
+Do not require individual model or dispatch jobs. `run-stage` may legitimately skip for memory-only no-op commits, and skipped jobs report success under GitHub Actions semantics. The aggregator inspects `validate`, `setup-state`, `classify`, `run-stage`, and `finalize`; it fails only failed or cancelled dependencies.
 
-| reason | meaning | originating stage/guard |
-| --- | --- | --- |
-| `lgtm` | The PR is accepted with no further loop action. | `review` stage result |
-| `dry_run` | The run intentionally stopped before live writes or redispatch. | finalize dry-run guard |
-| `no_fix_needed` | The requested fix stage found no implementation change was necessary. | `fix` stage result |
-| `no_fix_changes` | The fix stage ran but produced no file diff to apply. | `fix` stage result |
-| `empty_patch` | A generated patch was empty or could not alter the worktree. | patch application guard |
-| `validation_failed` | Workflow inputs or dispatch payload failed validation. | dispatch/core validation guard |
-| `tests_failed` | Required validation commands or tests failed. | post-fix verification |
-| `semantic_safety_missing` | Required semantic-safety evidence was not present. | semantic safety guard |
-| `semantic_safety_rejected` | Semantic-safety validation rejected the proposed change. | semantic safety guard |
-| `semantic_safety_hash_mismatch` | Safety evidence did not match the expected artifact hash. | semantic safety guard |
-| `policy_rejected` | Repository or org policy blocked continuation. | policy guard |
-| `stale_head` | The live PR head no longer matches the expected `head_sha`. | stale-head guard |
-| `base_ref_mismatch` | The live PR base ref no longer matches the expected `base_ref`. | trust and stale guard |
-| `pr_closed` | The PR is closed or unavailable for loop processing. | trust and stale guard |
-| `fork_pr` | The PR head is from a fork and is not write-capable. | trust and stale guard |
-| `untrusted_repository_owner` | The repository owner is outside the trusted org boundary. | trust guard |
-| `untrusted_requester` | The requester is not an accepted actor for the PR. | trust guard |
-| `missing_app_credentials` | Required GitHub App credentials are absent for a live write path. | app token setup guard |
-| `app_token_scope_invalid` | The GitHub App token lacks the required repository permissions. | app token setup guard |
-| `push_failed` | A trusted fix push or push-capable continuation failed. | fix push guard |
-| `pushed_unverified` | A push completed but the updated head could not be verified. | post-push stale-head guard |
-| `dispatch_failed` | A continuation `repository_dispatch` request failed. | dispatch guard |
-| `dispatch_duplicate` | A duplicate continuation dispatch was detected or suppressed. | dispatch guard |
-| `max_iterations` | The loop reached `iteration >= max_iterations`. | iteration cap guard |
-| `oscillation_detected` | The loop detected repeated non-progressing states. | loop progress guard |
-| `artifact_missing` | A required state or stage artifact was missing. | artifact load guard |
-| `artifact_schema_invalid` | A required artifact existed but failed schema validation. | artifact validation guard |
-| `model_output_invalid` | Codex output was missing, malformed, or internally inconsistent. | stage result parser |
-| `stage_failed` | A stage failed without a more specific terminal reason. | stage execution |
-| `issue_created` | Future optional issue path completed by creating an issue. | `issue` stage result, future optional |
+## Consumer Trigger Guidance
 
-Current emitter alignment note: existing workflows still emit some hyphenated or placeholder strings. Do not add new workflow strings; align them in later emitter tasks as follows.
+Do not try to implement memory-only suppression with workflow-level `paths-ignore` in a consumer adapter.
 
-| current workflow string | canonical reason |
+`paths` and `paths-ignore` are documented for `push`, `pull_request`, and `pull_request_target` path filters. They do not provide a general solution for `repository_dispatch`, `workflow_call`, or `workflow_dispatch`, and skipped required workflows can leave required checks pending. For Codex Loop memory commits, keep the workflow running and use the in-workflow `classify` plus `required-checks` pattern.
+
+`[skip ci]` and `skip-checks` apply to `push` and `pull_request` workflows. They do not stop `pull_request_target` or `repository_dispatch`. Do not rely on them to stop Codex Loop re-entry.
+
+`GITHUB_TOKEN` has special non-recursion behavior for many events created by workflow actions. When a workflow needs a write to trigger follow-on workflows, use a GitHub App token or PAT. The current Codex Loop uses `CODEX_LOOP_PAT` for push and `repository_dispatch`, so assume memory commits can re-trigger consumers and keep the classifier guard enabled.
+
+## Loop Guards
+
+Current loop-guard layers are:
+
+| Guard | Current contract |
 | --- | --- |
-| `dry-run` | `dry_run` |
-| `dry-run-placeholder` | `dry_run` |
-| `max-iterations-exceeded` | `max_iterations` |
-| `stale-head-sha` | `stale_head` |
-| `base-ref-mismatch` | `base_ref_mismatch` |
-| `pr-closed` | `pr_closed` |
-| `fork-pr` | `fork_pr` |
-| `untrusted-repository-owner` | `untrusted_repository_owner` |
-| `untrusted-requester` | `untrusted_requester` |
-| `trusted-fix-push-not-implemented` | legacy placeholder; do not emit for live-capable fix-push paths |
-| `missing-*`, `invalid-*`, `validation-failed` | `validation_failed` |
-| `invalid-pr_number`, `invalid-iteration`, `invalid-max_iterations`, `invalid-stage`, `invalid-dry_run` | `validation_failed` |
-| `relay-token-empty`, `relay-setup-failed` | `missing_app_credentials` |
-| `missing-stage-result-json` | `artifact_missing` |
-| `terminal-reason-required`, `invalid-next-stage`, `redispatch-missing-next-stage` | `model_output_invalid` |
-| `stage-failed`, `issue-stage-placeholder` | `stage_failed` |
-| `trust-or-stale-guard-failed` | `policy_rejected` |
+| Actor guard | The classifier compares `github.actor`, `requested_by`, and `CODEX_LOOP_OWN_ACTORS`, defaulting to `github-actions[bot]`. |
+| Commit marker | Memory-only no-op requires the `codex-memory: true` marker on the head commit. |
+| PR-keyed concurrency | The reusable core uses `concurrency.group: codex-loop-${{ inputs.correlation_id }}`. Consumers should pass a PR-stable correlation id for the loop chain. |
+| Required-check aggregator | Branch protection should require `required-checks`, not individual jobs that can skip. |
+| Remote-verified push | Continuation dispatch occurs only after a push reports a verified updated head SHA. |
 
-Terminal failures must be visible in job summary and artifacts. Labels and comments MUST NOT be used for internal loop state, including terminal failure state.
+## PR-Scoped Non-Merge Contract
 
-### Terminal Visibility Artifact And Conclusion
+`.omo/` stays ignored on base branches. Review memory is not normal source code and should not land on `main` as part of merging a PR.
 
-`finalize-stage` always publishes a `codex-loop-terminal-<correlation_id>-<iteration>` artifact containing a machine-readable `codex-loop-state.json` and a human-readable `terminal-summary.md`, and mirrors the human summary into `$GITHUB_STEP_SUMMARY`. The decision is sourced from the canonical `effective_outputs` step (the post-guard source of truth), not the pre-normalization `finalize` step.
+Trusted memory writers may force-add only canonical files under `.omo/review-memory/pr-<n>/` on the PR branch. They must not broaden autofix allowlists to let model patches edit memory directly.
 
-`codex-loop-state.json` carries at least `schema_version`, `stage`, `pr_number`, `head_sha`, `base_ref`, `correlation_id`, `iteration`, `terminal_reason`, `lgtm`, `should_redispatch`, `next_stage`, `state_run_id`, `state_artifact_name`, `updated_head_sha`, `dry_run`, and `selected_result`. `terminal-summary.md` states the terminal reason, the next manual action, the selected state artifact plus a `gh run download` lookup hint, and an explicit note that no labels, comments, or issues hold loop state. Neither file contains secrets, tokens, relay material, or raw model output.
-
-The workflow conclusion reflects the terminal outcome. These reasons keep the run green: an empty reason (LGTM terminal or in-progress continuation), `lgtm`, `dry_run`, `no_fix_needed`, `no_fix_changes`, `empty_patch`, and `issue_created`. Every other canonical `terminal_reason` (for example `validation_failed`, `stale_head`, `base_ref_mismatch`, `pr_closed`, `fork_pr`, `untrusted_repository_owner`, `untrusted_requester`, `missing_app_credentials`, `app_token_scope_invalid`, `tests_failed`, `semantic_safety_*`, `policy_rejected`, `push_failed`, `pushed_unverified`, `dispatch_failed`, `dispatch_duplicate`, `max_iterations`, `oscillation_detected`, `artifact_missing`, `artifact_schema_invalid`, `model_output_invalid`, `stage_failed`) fails the run via a non-zero exit in `finalize-stage`. Failure terminals are never masked as a successful continuation, and no broad `continue-on-error` covers them.
-
-## Rollout
-
-Start with a SHA-pinned org-internal consumer on one trusted repository. Use `stage=review`, `iteration=0`, a unique `correlation_id`, no state pointers, `dry_run: true`, and the default `enable_live_autofix: false` for the first run. Keep the first consumer in dry-run/default-off mode until workflow summaries and artifacts prove the loop can read PR context, validate trust, bootstrap the initial review state, and terminate without writes.
-
-`repository_dispatch` only starts workflows that already exist on the repository default branch. Merge `.github/workflows/codex-loop-dispatch.yml` to the default branch before running the dispatch smoke test. A branch-only adapter won't receive `repos/:owner/:repo/dispatches` events.
-
-Keep the existing visible label/comment workflows disabled or separate while the new loop is tested. Don't run both orchestration systems on the same PR.
-
-### Default-Branch Dispatch Smoke Test
-
-Do not run this by default. Run it only when there is an explicit dry-run test PR and approval to send a live `repository_dispatch` event.
-
-Smoke test prerequisites:
-
-| Placeholder | Required value |
-| --- | --- |
-| `<owner>` | Repository owner, normally `DongwonTTuna-Labs`. |
-| `<repo>` | Repository that already has `.github/workflows/codex-loop-dispatch.yml` on its default branch. |
-| `<pr-number>` | Open same-repository dry-run test PR number. |
-| `<head-sha>` | Current head SHA for that PR. |
-| `<base-ref>` | Base branch for that PR, for example `main`. |
-| `<iteration>` | Usually `0` for the first smoke run. |
-| `<requested-by>` | GitHub login or GitHub App slug requesting the smoke run. |
-| `<state-run-id>` | GitHub Actions run id that produced the state artifact for this dispatch. |
-| `<state-artifact-name>` | Exact state artifact name to load for this dispatch. |
-| `<max-iterations>` | Optional limit, usually `1` for a smoke run. |
-
-Confirm the PR identity before dispatching:
+Before merge, or in a guard job for protected branches, check the base branch with:
 
 ```bash
-gh pr view <pr-number> \
-  --repo <owner>/<repo> \
-  --json number,state,headRefOid,baseRefName,headRepositoryOwner,headRepository
+codex-review memory assert-not-on-base --base-ref main --repo-path <repo-path>
 ```
 
-The PR should be open, same-repository, and dry-run only. The `headRefOid` must equal `<head-sha>`, and `baseRefName` must equal `<base-ref>`.
+This command flags review-memory files present on base. A clean base exits successfully; a base branch containing `.omo/review-memory/pr-<n>/...` exits non-zero.
 
-Dispatch payload schema v2 smoke command:
+## Same-Repo And Fork Safety
 
-```bash
-gh api repos/:owner/:repo/dispatches \
-  --method POST \
-  --field event_type=codex-loop \
-  --field client_payload[schema_version]=2 \
-  --field client_payload[pr_number]=<pr-number> \
-  --field client_payload[head_sha]=<head-sha> \
-  --field client_payload[base_ref]=<base-ref> \
-  --field client_payload[stage]=review \
-  --field client_payload[iteration]=<iteration> \
-  --field client_payload[correlation_id]=codex-loop-<pr-number>-<head-sha> \
-  --field client_payload[requested_by]=<requested-by> \
-  --field client_payload[state_run_id]=<state-run-id> \
-  --field client_payload[state_artifact_name]=<state-artifact-name> \
-  --field client_payload[dry_run]=true \
-  --field client_payload[max_iterations]=<max-iterations>
-```
+Privileged write-back is for trusted same-repository contexts. Fork PRs and untrusted PR-head code require stricter handling:
 
-The required v2 `client_payload` keys are `schema_version`, `pr_number`, `head_sha`, `base_ref`, `stage`, `iteration`, `correlation_id`, `requested_by`, `state_run_id`, and `state_artifact_name`. Optional keys are `dry_run` and `max_iterations`. Keep `dry_run=true` for smoke tests.
+1. Treat PR-head files as data under privileged workflows.
+2. Do not execute PR-head scripts, package-manager lifecycle hooks, composite actions, or helper installation with base secrets or write tokens.
+3. Use explicit PR-head checkout or push targets when writing to a PR branch.
+4. Use `git add -f` only for canonical generated memory files that trusted code produced.
+5. Keep `.omo/review-memory/**` out of model patch allowlists.
 
-Collect evidence after dispatch:
+## Rollback And Disablement
 
-```bash
-gh run list \
-  --repo <owner>/<repo> \
-  --workflow codex-loop-dispatch.yml \
-  --json databaseId,displayTitle,event,headBranch,headSha,status,conclusion,createdAt \
-  --limit 10
-```
+To stop new Codex Loop entries, disable the consumer adapter or stop calling the reusable workflow. To stop continuation, remove access to `CODEX_LOOP_PAT` on the runner or disable dispatch-capable consumers. Preserve run summaries, artifacts, and memory files for diagnosis.
 
-```bash
-gh run view <run-id> \
-  --repo <owner>/<repo> \
-  --json conclusion,jobs
-```
-
-If labels or comments could be affected by another workflow in the same repository, compare PR-visible state before and after the run without treating labels or comments as loop state:
-
-```bash
-gh pr view <pr-number> \
-  --repo <owner>/<repo> \
-  --json labels,comments,reviews,latestReviews
-```
-
-Expected smoke result:
-
-1. The run event is `repository_dispatch` and the workflow is `Codex Loop Repository Dispatch`.
-2. The dispatch validation summary records `event_type=codex-loop` and `github.event.client_payload`.
-3. The reusable core receives the same `schema_version`, `pr_number`, `head_sha`, `base_ref`, `stage`, `iteration`, `correlation_id`, `requested_by`, `state_run_id`, `state_artifact_name`, `dry_run`, and `max_iterations` values.
-4. The run remains dry-run/default-off and doesn't mint a relay token, call `openai/codex-action`, mint a GitHub App installation token, push, dispatch continuation, or create dirty label/comment state.
-5. Any failure is terminal in the job summary or artifacts, not represented by labels or comments.
-
-Verify the first rollout by checking the reusable workflow inputs, the dispatch adapter payload validation, the OIDC relay exchange path, the GitHub App token path for write-capable jobs, and the absence of label/comment state changes.
-
-Expand to more repositories only after the first consumer records clean summaries, artifacts, and loop termination behavior.
-
-## Rollback
-
-Start with the least destructive stop: set `enable_live_autofix: false`, omit `enable_live_autofix`, or set `dry_run: true` in the consumer workflow call that invokes `DongwonTTuna-Labs/home-server-infra/.github/workflows/codex-loop-reusable.yml@<sha-or-tag>`. Any of those changes returns the loop to non-live/default-off behavior without deleting shared workflow source.
-
-If the shared workflow change itself is suspected, revert the HSI PR that introduced the live-capable reusable. If a consumer has already re-pinned to that HSI commit, re-pin the consumer back to the previous reviewed HSI SHA until the issue is understood.
-
-If new entries must stop entirely, disable or remove the consumer workflow call. This stops new consumer-triggered runs without deleting shared workflow source.
-
-If dispatch continuation is the failing path, disable the event adapter next. Either disable the `Codex Loop Repository Dispatch` workflow in repository settings or remove the `.github/workflows/codex-loop-dispatch.yml` trigger or adapter from the affected repository. Leave `codex-loop-reusable.yml` in place; without callers or dispatch adapters it is inert.
-
-If a bad loop is already running, find active runs by `correlation_id` in run summaries, logs, or artifacts, then cancel matching active runs:
-
-```bash
-gh run list \
-  --repo <owner>/<repo> \
-  --workflow codex-loop-dispatch.yml \
-  --json databaseId,displayTitle,status,conclusion,createdAt \
-  --limit 50
-```
-
-```bash
-gh run cancel <run-id> --repo <owner>/<repo>
-```
-
-Do not clean up by adding labels or comments as internal state markers.
-
-If write behavior is suspected, rotate or suspend the GitHub App credentials before re-enabling consumers. Preserve run summaries, logs, and artifacts for diagnosis.
-
-Known residual risk: the GitHub App installation and repository access are assumed installed until a live smoke test proves token minting and repository scope in the target repository.
-
-Rollback order:
-
-1. Set `enable_live_autofix: false`, omit it, or set `dry_run: true` in the consumer adapter.
-2. Revert the HSI live-capable PR if the shared reusable is suspect.
-3. Re-pin consumers to the previous reviewed HSI SHA if they had already adopted the live-capable SHA.
-4. Disable or remove the consumer workflow call if new entries must stop entirely.
-5. Disable or remove the `codex-loop-dispatch.yml` trigger or adapter if dispatch can still enter the loop.
-6. Leave the reusable workflow source inert when there are no callers.
-7. Cancel active runs tied to the affected `correlation_id`.
-8. Rotate or suspend GitHub App credentials if unexpected write behavior is suspected.
+Do not use labels or comments as internal loop state during rollback. Loop state and outcomes live in workflow inputs, job outputs, summaries, artifacts, dispatch payloads, and PR-scoped advisory memory.
 
 ## Non-Goals
 
-This change doesn't package or describe external distribution.
+This document describes the implemented Task 24 through 28 modularization and should be updated if composite ownership changes.
 
-This change doesn't allow PR labels or issue/PR comments as orchestration state. It MUST NOT use PR labels for internal loop state and MUST NOT use issue/PR comments for internal loop state.
+This document does not reintroduce split-stage jobs, GitHub App secrets, OIDC relay-token exchange, or PAT-forbidden claims.
 
-This change doesn't add issue creation or issue permissions. The `issue` stage is a loop stage name only for now, and terminal failures stay in job summaries and artifacts.
-
-This change doesn't add PAT fallback language or support.
-
-This change doesn't make fork PRs write-capable.
+This document does not make memory trusted orchestration state.

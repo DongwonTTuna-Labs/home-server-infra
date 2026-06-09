@@ -43,6 +43,7 @@ context:
   total_patch_tokens: 24000
   findings_tokens: 12000
   openspec_tokens: 8000
+  memory_tokens: 6000
 
 lifecycle:
   max_threads_per_triage: 16
@@ -60,6 +61,22 @@ lifecycle:
     - needs_human
     - blocked_by_conflict
 
+memory:
+  enabled: true
+  root: ".omo/review-memory"
+  notepad_files:
+    - learnings.md
+    - decisions.md
+    - issues.md
+    - problems.md
+  ledger_file: ledger.json
+  max_entries: 200
+  per_file_char_budget: 6000
+  total_char_budget: 24000
+  compaction_keep_recent_rounds: 3
+  provenance_required_for_suppression: true
+  hmac_env: CODEX_MEMORY_HMAC_KEY
+
 design:
   require_design_chief: true
   max_clusters: 12
@@ -74,6 +91,7 @@ autofix:
   oscillation_window: 10   # how many recent pushes to remember for cycle detection
   pingpong_threshold: 2    # same finding addressed in >= N prior rounds => oscillation
   revert_threshold: 0.8    # Jaccard of added-vs-prior-removed lines => revert loop
+  memory_write_prefix: ".omo/review-memory/"
   allowed_prefixes:
     - src/
     - tests/

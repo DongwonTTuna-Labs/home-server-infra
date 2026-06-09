@@ -45,7 +45,15 @@ def handle_techlead(args: argparse.Namespace, config: dict[str, Any]) -> tuple[A
         return filtered, "review-combined-findings.v1"
     if cmd == "build-techlead-prompt":
         from codex_review.stages.techlead.prompt import build_techlead_prompt
-        return build_techlead_prompt(_maybe_json(args.in_path, {}), _maybe_json(args.pr_context, {}), _maybe_text(args.review_context), _maybe_text(args.docs_context), config), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_techlead_prompt(
+            _maybe_json(args.in_path, {}),
+            _maybe_json(args.pr_context, {}),
+            _maybe_text(args.review_context),
+            _maybe_text(args.docs_context),
+            config,
+            memory_context=memory_context,
+        ), None
     if cmd == "validate":
         from codex_review.stages.techlead.validate import validate_techlead_decision
         combined = _maybe_json(args.artifacts[0], {}) if args.artifacts else _maybe_json(args.inventory, {})

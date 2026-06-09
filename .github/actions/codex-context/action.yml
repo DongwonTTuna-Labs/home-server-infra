@@ -1,0 +1,103 @@
+name: Build Codex Context
+description: Build common Codex loop PR, changed-lines, docs, OpenSpec, and memory context artifacts.
+
+inputs:
+  workspace:
+    description: Absolute workspace path containing the named PR checkout and artifact directories.
+    required: true
+  repo-path:
+    description: Repository checkout path to inspect as PR-head data.
+    required: true
+  artifact-dir:
+    description: Directory where common context artifacts are written.
+    required: true
+  repository:
+    description: GitHub repository slug for the pull request.
+    required: true
+  pr-number:
+    description: Pull request number.
+    required: true
+  head-sha:
+    description: Pull request head SHA.
+    required: true
+  base-ref:
+    description: Pull request base ref.
+    required: true
+  github-token:
+    description: GitHub API token used by context commands.
+    required: true
+
+outputs:
+  pr_context_path:
+    description: Path to the generated pull request context JSON.
+    value: ${{ steps.build.outputs.pr_context_path }}
+  changed_lines_path:
+    description: Path to the generated changed-lines JSON.
+    value: ${{ steps.build.outputs.changed_lines_path }}
+  docs_context_path:
+    description: Path to the generated docs context markdown.
+    value: ${{ steps.build.outputs.docs_context_path }}
+  openspec_context_path:
+    description: Path to the generated OpenSpec context JSON.
+    value: ${{ steps.build.outputs.openspec_context_path }}
+  memory_context_path:
+    description: Path to the generated memory context markdown.
+    value: ${{ steps.build.outputs.memory_context_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build common context artifacts
+      id: build
+      shell: bash
+      working-directory: ${{ inputs.workspace }}
+      env:
+        ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        REPOSITORY: ${{ inputs.repository }}
+        REPO_PATH: ${{ inputs.repo-path }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "${ARTIFACT_DIR}"
+
+        jq -n \
+          --arg repository "${REPOSITORY}" \
+          --arg head_sha "${INPUT_HEAD_SHA}" \
+          --arg current_head_sha "${INPUT_HEAD_SHA}" \
+          --arg base_ref "${INPUT_BASE_REF}" \
+          --argjson pr_number "${INPUT_PR_NUMBER}" \
+          '{repository:$repository, pr_number:$pr_number, head_sha:$head_sha, current_head_sha:$current_head_sha, base_ref:$base_ref}' \
+          > "${ARTIFACT_DIR}/pr-seed.json"
+
+        codex-review context pr \
+          --pr-context "${ARTIFACT_DIR}/pr-seed.json" \
+          --repo-path "${REPO_PATH}" \
+          --token "${GH_TOKEN}" \
+          --out "${ARTIFACT_DIR}/pr-context.json"
+        codex-review context changed-lines \
+          --pr-context "${ARTIFACT_DIR}/pr-context.json" \
+          --out "${ARTIFACT_DIR}/changed-lines.json"
+        codex-review context docs \
+          --repo-path "${REPO_PATH}" \
+          --out "${ARTIFACT_DIR}/docs-context.md"
+        codex-review context openspec \
+          --pr-context "${ARTIFACT_DIR}/pr-context.json" \
+          --repo-path "${REPO_PATH}" \
+          --token "${GH_TOKEN}" \
+          --out "${ARTIFACT_DIR}/openspec-context.json"
+        codex-review context memory \
+          --pr-context "${ARTIFACT_DIR}/pr-context.json" \
+          --repo-path "${REPO_PATH}" \
+          --out "${ARTIFACT_DIR}/memory-context.md"
+
+        {
+          echo "pr_context_path=${ARTIFACT_DIR}/pr-context.json"
+          echo "changed_lines_path=${ARTIFACT_DIR}/changed-lines.json"
+          echo "docs_context_path=${ARTIFACT_DIR}/docs-context.md"
+          echo "openspec_context_path=${ARTIFACT_DIR}/openspec-context.json"
+          echo "memory_context_path=${ARTIFACT_DIR}/memory-context.md"
+        } >> "${GITHUB_OUTPUT}"

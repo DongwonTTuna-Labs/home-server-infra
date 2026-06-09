@@ -23,12 +23,9 @@ jobs:
       pr_number: ${{ steps.validate_payload.outputs.pr_number }}
       head_sha: ${{ steps.validate_payload.outputs.head_sha }}
       base_ref: ${{ steps.validate_payload.outputs.base_ref }}
-      stage: ${{ steps.validate_payload.outputs.stage }}
       iteration: ${{ steps.validate_payload.outputs.iteration }}
       correlation_id: ${{ steps.validate_payload.outputs.correlation_id }}
       requested_by: ${{ steps.validate_payload.outputs.requested_by }}
-      state_run_id: ${{ steps.validate_payload.outputs.state_run_id }}
-      state_artifact_name: ${{ steps.validate_payload.outputs.state_artifact_name }}
     steps:
       - name: Validate repository_dispatch client_payload
         id: validate_payload
@@ -37,12 +34,9 @@ jobs:
           PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
           PAYLOAD_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
           PAYLOAD_BASE_REF: ${{ github.event.client_payload.base_ref }}
-          PAYLOAD_STAGE: ${{ github.event.client_payload.stage }}
           PAYLOAD_ITERATION: ${{ github.event.client_payload.iteration }}
           PAYLOAD_CORRELATION_ID: ${{ github.event.client_payload.correlation_id }}
           PAYLOAD_REQUESTED_BY: ${{ github.event.client_payload.requested_by }}
-          PAYLOAD_STATE_RUN_ID: ${{ github.event.client_payload.state_run_id }}
-          PAYLOAD_STATE_ARTIFACT_NAME: ${{ github.event.client_payload.state_artifact_name }}
         run: |
           set -euo pipefail
 
@@ -61,12 +55,9 @@ jobs:
           require_non_empty pr_number "${PAYLOAD_PR_NUMBER}"
           require_non_empty head_sha "${PAYLOAD_HEAD_SHA}"
           require_non_empty base_ref "${PAYLOAD_BASE_REF}"
-          require_non_empty stage "${PAYLOAD_STAGE}"
           require_non_empty iteration "${PAYLOAD_ITERATION}"
           require_non_empty correlation_id "${PAYLOAD_CORRELATION_ID}"
           require_non_empty requested_by "${PAYLOAD_REQUESTED_BY}"
-          require_non_empty state_run_id "${PAYLOAD_STATE_RUN_ID}"
-          require_non_empty state_artifact_name "${PAYLOAD_STATE_ARTIFACT_NAME}"
 
           if [[ "${valid}" == "true" ]]; then
             if ! [[ "${PAYLOAD_PR_NUMBER}" =~ ^[0-9]+$ ]]; then
@@ -75,33 +66,14 @@ jobs:
             elif ! [[ "${PAYLOAD_ITERATION}" =~ ^[0-9]+$ ]]; then
               terminal_reason="invalid-iteration"
               valid="false"
-            elif ! [[ "${PAYLOAD_STATE_RUN_ID}" =~ ^[0-9]+$ ]] || (( PAYLOAD_STATE_RUN_ID <= 0 )); then
-              terminal_reason="invalid-state_run_id"
-              valid="false"
-            elif [[ "${PAYLOAD_STATE_ARTIFACT_NAME}" == */* || "${PAYLOAD_STATE_ARTIFACT_NAME}" == "." || "${PAYLOAD_STATE_ARTIFACT_NAME}" == ".." ]]; then
-              terminal_reason="invalid-state_artifact_name"
-              valid="false"
             fi
-          fi
-
-          if [[ "${valid}" == "true" ]]; then
-            case "${PAYLOAD_STAGE}" in
-              review|design|fix|issue) ;;
-              *)
-                terminal_reason="invalid-stage"
-                valid="false"
-                ;;
-            esac
           fi
 
           {
             echo "## Codex loop dispatch validation"
             echo "payload schema: github.event.client_payload"
             echo "event_type=codex-loop"
-            echo "stage=${PAYLOAD_STAGE}"
             echo "iteration=${PAYLOAD_ITERATION}"
-            echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
-            echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
             echo "valid=${valid}"
             if [[ -n "${terminal_reason}" ]]; then
               echo "terminal_reason=${terminal_reason}"
@@ -117,12 +89,9 @@ jobs:
             echo "pr_number=${PAYLOAD_PR_NUMBER}"
             echo "head_sha=${PAYLOAD_HEAD_SHA}"
             echo "base_ref=${PAYLOAD_BASE_REF}"
-            echo "stage=${PAYLOAD_STAGE}"
             echo "iteration=${PAYLOAD_ITERATION}"
             echo "correlation_id=${PAYLOAD_CORRELATION_ID}"
             echo "requested_by=${PAYLOAD_REQUESTED_BY}"
-            echo "state_run_id=${PAYLOAD_STATE_RUN_ID}"
-            echo "state_artifact_name=${PAYLOAD_STATE_ARTIFACT_NAME}"
           } >> "${GITHUB_OUTPUT}"
 
   codex-loop:
@@ -139,9 +108,6 @@ jobs:
       pr_number: ${{ fromJSON(needs.validate-payload.outputs.pr_number) }}
       head_sha: ${{ needs.validate-payload.outputs.head_sha }}
       base_ref: ${{ needs.validate-payload.outputs.base_ref }}
-      stage: ${{ needs.validate-payload.outputs.stage }}
       iteration: ${{ fromJSON(needs.validate-payload.outputs.iteration) }}
       correlation_id: ${{ needs.validate-payload.outputs.correlation_id }}
       requested_by: ${{ needs.validate-payload.outputs.requested_by }}
-      state_run_id: ${{ needs.validate-payload.outputs.state_run_id }}
-      state_artifact_name: ${{ needs.validate-payload.outputs.state_artifact_name }}

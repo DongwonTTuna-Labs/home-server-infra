@@ -34,21 +34,24 @@ def handle_fix_merge(args: argparse.Namespace, config: dict[str, Any]) -> tuple[
         pre = _maybe_json(args.inventory, {})
         collection = _maybe_json(args.in_path, {})
         pr = _maybe_json(args.pr_context, {})
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
         if pre.get("clean") or not collection.get("results"):
             return create_merged_fix_from_premerge(pre, collection, pr, None), "fix-merge-merged-fix.v1"
         fallback = {"schema_version":"fix-merge-merged-fix.v1", "status":"blocked", "patch":"", "expected_head_sha": pr.get("head_sha"), "premerge_clean": False, "conflicts": pre.get("results", []), "defaulted": True}
         if not args.prompt:
-            args.prompt = str(write_prompt_if_needed(build_fix_merge_prompt(collection, pre, pr, {}, _maybe_text(args.docs_context)), args.out))
+            args.prompt = str(write_prompt_if_needed(build_fix_merge_prompt(collection, pre, pr, {}, _maybe_text(args.docs_context), memory_context=memory_context), args.out))
         return run_model_or_fallback(stage="fix_merge_merge", prompt_path=args.prompt, output_path=args.out, expected_schema="fix-merge-merged-fix.v1", fallback=fallback, model_command=args.model_command, cwd=args.model_cwd, target_repo_path=args.repo_path), "fix-merge-merged-fix.v1"
     if cmd == "build-merge-prompt":
         from codex_review.stages.fix_merge.prompt import build_fix_merge_prompt
-        return build_fix_merge_prompt(_maybe_json(args.in_path, {}), _maybe_json(args.inventory, {}), _maybe_json(args.result, {}), {}, _maybe_text(args.docs_context)), None
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
+        return build_fix_merge_prompt(_maybe_json(args.in_path, {}), _maybe_json(args.inventory, {}), _maybe_json(args.result, {}), {}, _maybe_text(args.docs_context), memory_context=memory_context), None
     if cmd == "prepare-merge-model":
         from codex_review.stages.fix_merge.premerge import create_merged_fix_from_premerge
         from codex_review.stages.fix_merge.prompt import build_fix_merge_prompt
         pre = _maybe_json(args.inventory, {})
         collection = _maybe_json(args.in_path, {})
         pr = _maybe_json(args.pr_context, {})
+        memory_context = None if args.memory_context is None else _maybe_text(args.memory_context)
         raw_out = args.raw_out or args.result
         prompt_out = args.prompt_out or args.prompt
         if pre.get("clean") or not collection.get("results"):
@@ -61,7 +64,7 @@ def handle_fix_merge(args: argparse.Namespace, config: dict[str, Any]) -> tuple[
             return route, None
         if not prompt_out:
             raise ValidationError("prepare-merge-model requires --prompt-out when model merge is needed")
-        write_text(prompt_out, build_fix_merge_prompt(pre, collection, {}, {}, {"pr_context": pr, "docs_context": _maybe_text(args.docs_context)}))
+        write_text(prompt_out, build_fix_merge_prompt(pre, collection, {}, {}, {"pr_context": pr, "docs_context": _maybe_text(args.docs_context)}, memory_context=memory_context))
         route = {"needs_model": True, "prompt": prompt_out, "raw_output": raw_out}
         if os.environ.get("GITHUB_OUTPUT"):
             write_output("needs_model", "true")
@@ -84,6 +87,7 @@ def handle_fix_merge(args: argparse.Namespace, config: dict[str, Any]) -> tuple[
             _maybe_text(args.docs_context, ""),
             repo_path=args.repo_path,
             token_budget=int((config.get("context", {}) or {}).get("model_token_budget", 0)) or None,
+            memory_context=None if args.memory_context is None else _maybe_text(args.memory_context),
         )
         return prompt, None
     if cmd == "validate-semantic-safety":
