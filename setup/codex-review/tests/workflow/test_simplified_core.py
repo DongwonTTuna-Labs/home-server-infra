@@ -29,6 +29,12 @@ FIX_ACTION = ROOT / ".github" / "actions" / "codex-fix-phase" / "action.yml"
 RELAY_ENDPOINT = "https://relay-ai.dongwontuna.net/v1/responses"
 MODEL_ACTION = "openai/codex-action@v1"
 MEMORY_CONTEXT = "codex-review-artifacts/common/memory-context.md"
+TRUSTED_SOURCE_CHECKOUT_WITH = {
+    "repository": "${{ steps.trusted_source.outputs.repository }}",
+    "ref": "${{ steps.trusted_source.outputs.sha }}",
+    "path": "trusted-core",
+    "persist-credentials": False,
+}
 REVIEW_PROMPT_BUILDERS_WITH_MEMORY = (
     ("prepare_stage", "codex-review review build-review-prompt"),
     ("review_techlead_prepare", "codex-review techlead build-techlead-prompt"),
@@ -268,6 +274,26 @@ def _step_index_by_id(steps: YamlSteps, step_id: str) -> int:
     raise AssertionError(f"step id not found: {step_id}")
 
 
+def _assert_trusted_source_resolver(steps: YamlSteps, checkout: YamlStep) -> None:
+    resolver = _step_by_id(steps, "trusted_source")
+    assert _required_str(resolver, "name") == "Resolve trusted workflow source"
+    assert _optional_str(resolver, "shell") == "bash"
+    assert _required_map(resolver, "env") == {"JOB_CONTEXT": "${{ toJson(job) }}"}
+    run = _required_str(resolver, "run")
+    for required in (
+        '"workflow_repository"',
+        '"workflow_sha"',
+        "trusted workflow repository is missing or invalid",
+        "trusted workflow sha is missing or invalid",
+        "repository=${workflow_repository}",
+        "sha=${workflow_sha}",
+    ):
+        assert required in run
+    assert "${{ job.workflow_repository }}" not in run
+    assert "${{ job.workflow_sha }}" not in run
+    assert steps.index(resolver) < steps.index(checkout)
+
+
 def _command_block(run: str, command: str) -> str:
     start = run.index(command)
     block: list[str] = []
@@ -290,6 +316,13 @@ def test_core_pipeline_and_control_jobs_in_order():
     assert _required_str_list(jobs["classify"], "needs") == ["validate", "setup-state"]
     assert _required_str_list(jobs["run-stage"], "needs") == ["validate", "setup-state", "classify"]
     assert _required_str_list(jobs["finalize"], "needs") == ["validate", "setup-state", "classify", "run-stage"]
+
+
+def test_trusted_workflow_source_has_no_direct_job_property_expressions():
+    text = _text()
+    assert "${{ job.workflow_repository }}" not in text
+    assert "${{ job.workflow_sha }}" not in text
+    assert "${{ toJson(job) }}" in text
 
 
 def test_no_matrix_or_fromjson_fanout_added():
@@ -348,13 +381,9 @@ def test_context_composite_is_trusted_sourced_and_metadata_scoped():
     action = _context_action_doc()
     runs = _required_map(action, "runs")
 
+    _assert_trusted_source_resolver(steps, checkout)
     assert _required_str(checkout, "uses") == "actions/checkout@v4"
-    assert _required_map(checkout, "with") == {
-        "repository": "${{ job.workflow_repository }}",
-        "ref": "${{ job.workflow_sha }}",
-        "path": "trusted-core",
-        "persist-credentials": False,
-    }
+    assert _required_map(checkout, "with") == TRUSTED_SOURCE_CHECKOUT_WITH
     assert steps.index(checkout) < _step_index_by_id(steps, "codex_context")
     context_uses = _required_str(context_step, "uses")
     assert context_uses == "./trusted-core/.github/actions/codex-context"
@@ -877,13 +906,9 @@ def test_classify_gate_precedes_and_gates_model_stage():
     )
     classify_step = _step_by_id(classify_steps, "classify")
     classify_with = _required_map(classify_step, "with")
+    _assert_trusted_source_resolver(classify_steps, checkout)
     assert _required_str(checkout, "uses") == "actions/checkout@v4"
-    assert _required_map(checkout, "with") == {
-        "repository": "${{ job.workflow_repository }}",
-        "ref": "${{ job.workflow_sha }}",
-        "path": "trusted-core",
-        "persist-credentials": False,
-    }
+    assert _required_map(checkout, "with") == TRUSTED_SOURCE_CHECKOUT_WITH
     assert classify_steps.index(checkout) < _step_index_by_id(classify_steps, "classify")
     assert _required_str(classify_step, "uses") == "./trusted-core/.github/actions/codex-memory-classify"
     assert classify_with == {

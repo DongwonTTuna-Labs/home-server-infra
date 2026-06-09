@@ -214,11 +214,36 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      - name: Resolve trusted workflow source
+        id: trusted_source
+        shell: bash
+        env:
+          JOB_CONTEXT: ${{ toJson(job) }}
+        run: |
+          set -euo pipefail
+          compact_job_context="$(printf '%s' "${JOB_CONTEXT}" | tr -d '\n')"
+          workflow_repository="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_repository"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')"
+          workflow_sha="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_sha"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{40})".*/\1/p')"
+
+          if [[ ! "${workflow_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "trusted workflow repository is missing or invalid" >&2
+            exit 1
+          fi
+          if [[ ! "${workflow_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "trusted workflow sha is missing or invalid" >&2
+            exit 1
+          fi
+
+          {
+            echo "repository=${workflow_repository}"
+            echo "sha=${workflow_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Checkout trusted workflow source
         uses: actions/checkout@v4
         with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
+          repository: ${{ steps.trusted_source.outputs.repository }}
+          ref: ${{ steps.trusted_source.outputs.sha }}
           path: trusted-core
           persist-credentials: false
 
@@ -263,11 +288,36 @@ jobs:
           path: pr-head
           persist-credentials: false
 
+      - name: Resolve trusted workflow source
+        id: trusted_source
+        shell: bash
+        env:
+          JOB_CONTEXT: ${{ toJson(job) }}
+        run: |
+          set -euo pipefail
+          compact_job_context="$(printf '%s' "${JOB_CONTEXT}" | tr -d '\n')"
+          workflow_repository="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_repository"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')"
+          workflow_sha="$(printf '%s' "${compact_job_context}" | sed -nE 's/.*"workflow_sha"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{40})".*/\1/p')"
+
+          if [[ ! "${workflow_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "trusted workflow repository is missing or invalid" >&2
+            exit 1
+          fi
+          if [[ ! "${workflow_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "trusted workflow sha is missing or invalid" >&2
+            exit 1
+          fi
+
+          {
+            echo "repository=${workflow_repository}"
+            echo "sha=${workflow_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Checkout trusted workflow source
         uses: actions/checkout@v4
         with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
+          repository: ${{ steps.trusted_source.outputs.repository }}
+          ref: ${{ steps.trusted_source.outputs.sha }}
           path: trusted-core
           persist-credentials: false
 

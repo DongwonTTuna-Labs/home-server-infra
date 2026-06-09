@@ -25,7 +25,7 @@ The core jobs are `validate`, `setup-state`, `run-stage`, and `finalize`. The po
 
 ## Final Module Map
 
-The reusable workflow is now a thin orchestrator for the job DAG, job-level gates, runner permissions, credential capture, artifact transport, and trusted-source checkouts. Per-phase step logic lives in trusted local composite actions checked out from `${{ job.workflow_repository }}@${{ job.workflow_sha }}` under `trusted-core/` and invoked with static `./trusted-core/.github/actions/...` paths.
+The reusable workflow is now a thin orchestrator for the job DAG, job-level gates, runner permissions, credential capture, artifact transport, and trusted-source checkouts. Per-phase step logic lives in trusted local composite actions checked out under `trusted-core/` from the called workflow job identity resolved at runtime and invoked with static `./trusted-core/.github/actions/...` paths.
 
 | Phase | Owning composite | Called from | Owns |
 | --- | --- | --- | --- |

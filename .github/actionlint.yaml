@@ -1,9 +1,3 @@
 self-hosted-runner:
   labels:
     - dongwontuna-labs-runner
-
-paths:
-  .github/workflows/codex-loop-reusable.yml:
-    ignore:
-      - 'property "workflow_repository" is not defined in object type'
-      - 'property "workflow_sha" is not defined in object type'
