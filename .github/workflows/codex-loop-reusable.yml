@@ -143,12 +143,22 @@ jobs:
     outputs:
       state_artifact_name: ${{ steps.state.outputs.state_artifact_name }}
     steps:
+      - name: Read checkout PAT from runner environment
+        id: read_pat
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CODEX_LOOP_PAT:?CODEX_LOOP_PAT not set on runner}"
+          echo "::add-mask::${CODEX_LOOP_PAT}"
+          echo "token=${CODEX_LOOP_PAT}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout target base reference
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
           ref: ${{ inputs.base_ref }}
           path: target-base
+          token: ${{ steps.read_pat.outputs.token }}
           persist-credentials: false
 
       - name: Checkout PR head data
@@ -157,6 +167,7 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ inputs.head_sha }}
           path: pr-head
+          token: ${{ steps.read_pat.outputs.token }}
           persist-credentials: false
 
       - name: Setup trusted codex-review helper
@@ -205,6 +216,15 @@ jobs:
       codex_memory_marker: ${{ steps.classify.outputs.codex_memory_marker }}
       actor_guard: ${{ steps.classify.outputs.actor_guard }}
     steps:
+      - name: Read checkout PAT from runner environment
+        id: read_pat
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CODEX_LOOP_PAT:?CODEX_LOOP_PAT not set on runner}"
+          echo "::add-mask::${CODEX_LOOP_PAT}"
+          echo "token=${CODEX_LOOP_PAT}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout PR head data
         uses: actions/checkout@v4
         with:
@@ -212,6 +232,7 @@ jobs:
           ref: ${{ inputs.head_sha }}
           path: pr-head
           fetch-depth: 2
+          token: ${{ steps.read_pat.outputs.token }}
           persist-credentials: false
 
       - name: Resolve trusted workflow source
@@ -245,6 +266,7 @@ jobs:
           repository: ${{ steps.trusted_source.outputs.repository }}
           ref: ${{ steps.trusted_source.outputs.sha }}
           path: trusted-core
+          token: ${{ steps.read_pat.outputs.token }}
           persist-credentials: false
 
       - name: Setup trusted codex-review helper
@@ -280,12 +302,22 @@ jobs:
       terminal_reason: ${{ steps.stage_outputs.outputs.terminal_reason }}
       updated_head_sha: ${{ steps.stage_outputs.outputs.updated_head_sha }}
     steps:
+      - name: Read checkout PAT from runner environment
+        id: read_pat
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CODEX_LOOP_PAT:?CODEX_LOOP_PAT not set on runner}"
+          echo "::add-mask::${CODEX_LOOP_PAT}"
+          echo "token=${CODEX_LOOP_PAT}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout PR head data
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
           ref: ${{ inputs.head_sha }}
           path: pr-head
+          token: ${{ steps.read_pat.outputs.token }}
           persist-credentials: false
 
       - name: Resolve trusted workflow source
@@ -319,6 +351,7 @@ jobs:
           repository: ${{ steps.trusted_source.outputs.repository }}
           ref: ${{ steps.trusted_source.outputs.sha }}
           path: trusted-core
+          token: ${{ steps.read_pat.outputs.token }}
           persist-credentials: false
 
       - name: Setup trusted codex-review helper
