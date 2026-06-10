@@ -33,6 +33,7 @@ TRUSTED_SOURCE_CHECKOUT_WITH = {
     "repository": "${{ steps.trusted_source.outputs.repository }}",
     "ref": "${{ steps.trusted_source.outputs.sha }}",
     "path": "trusted-core",
+    "token": "${{ steps.read_pat.outputs.token }}",
     "persist-credentials": False,
 }
 REVIEW_PROMPT_BUILDERS_WITH_MEMORY = (
