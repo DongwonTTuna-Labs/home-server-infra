@@ -35,6 +35,12 @@ on:
       AI_RELAY_API_KEY:
         description: Preferred relay key for model-capable stages; runner env may supply the same name.
         required: false
+      CF_ACCESS_CLIENT_ID:
+        description: Preferred Cloudflare Access client ID for model relay; runner env may supply the same name.
+        required: false
+      CF_ACCESS_CLIENT_SECRET:
+        description: Preferred Cloudflare Access client secret for model relay; runner env may supply the same name.
+        required: false
 
 permissions: {}
 
@@ -47,9 +53,6 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 120
-    env:
-      GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}
-      GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}
     steps:
       - name: Validate contract version
         shell: bash
@@ -61,38 +64,32 @@ jobs:
           fi
 
       - id: auth
-        name: Resolve PAT-only auth and relay key
+        name: Resolve PAT-only auth and relay credentials
         shell: bash
+        env:
+          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}
+          GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}
+          GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          github_pat="${GRIMOIRE_PAT_SECRET:-}"
-          if [ -z "$github_pat" ] && [ -n "${CODEX_LOOP_PAT:-}" ]; then
-            github_pat="$CODEX_LOOP_PAT"
-          fi
-          if [ -z "$github_pat" ]; then
-            echo "::error title=Grimoire PAT unavailable::Provide the named GRIMOIRE_PAT secret or runner CODEX_LOOP_PAT environment variable. For private reusable workflow access, check home-server-infra Settings -> Actions -> General -> Access."
-            exit 1
-          fi
-          echo "::add-mask::$github_pat"
-
-          relay_key="${GRIMOIRE_RELAY_SECRET:-}"
-          if [ -z "$relay_key" ] && [ -n "${AI_RELAY_API_KEY:-}" ]; then
-            relay_key="$AI_RELAY_API_KEY"
-          fi
-          if [ -z "$relay_key" ]; then
-            echo "::error title=Grimoire relay key unavailable::Provide the named AI_RELAY_API_KEY secret or runner AI_RELAY_API_KEY environment variable before model-capable stages."
-            exit 1
-          fi
-          echo "::add-mask::$relay_key"
-
-          {
-            echo "github_pat<<GRIMOIRE_PAT_EOF"
-            printf '%s\n' "$github_pat"
-            echo "GRIMOIRE_PAT_EOF"
-            echo "relay_key<<GRIMOIRE_RELAY_EOF"
-            printf '%s\n' "$relay_key"
-            echo "GRIMOIRE_RELAY_EOF"
-          } >> "$GITHUB_OUTPUT"
+          resolve_required() {
+            local output_name="$1" title="$2" value="${3:-}" named_name="$4" fallback_name="$5" stage="$6"
+            local fallback_value="${!fallback_name:-}"
+            if [ -z "$value" ] && [ -n "$fallback_value" ]; then
+              value="$fallback_value"
+            fi
+            if [ -z "$value" ]; then
+              echo "::error title=$title::Provide the named $named_name secret or runner $fallback_name environment variable before $stage."
+              exit 1
+            fi
+            echo "::add-mask::$value"
+            { echo "$output_name<<${output_name}_EOF"; printf '%s\n' "$value"; echo "${output_name}_EOF"; } >> "$GITHUB_OUTPUT"
+          }
+          resolve_required github_pat "Grimoire PAT unavailable" "${GRIMOIRE_PAT_SECRET:-}" GRIMOIRE_PAT CODEX_LOOP_PAT "checkout, Issues, labels, or push stages"
+          resolve_required relay_key "Grimoire relay key unavailable" "${GRIMOIRE_RELAY_SECRET:-}" AI_RELAY_API_KEY AI_RELAY_API_KEY "model-capable stages"
+          resolve_required cf_access_client_id "Grimoire CF Access client ID unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET:-}" CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_ID "model-capable stages"
+          resolve_required cf_access_client_secret "Grimoire CF Access client secret unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET:-}" CF_ACCESS_CLIENT_SECRET CF_ACCESS_CLIENT_SECRET "model-capable stages"
 
       - name: Checkout trusted control plane
         uses: actions/checkout@v4
@@ -139,6 +136,8 @@ jobs:
         env:
           GRIMOIRE_GITHUB_PAT: ${{ steps.auth.outputs.github_pat }}
           AI_RELAY_API_KEY: ${{ steps.auth.outputs.relay_key }}
+          CF_ACCESS_CLIENT_ID: ${{ steps.auth.outputs.cf_access_client_id }}
+          CF_ACCESS_CLIENT_SECRET: ${{ steps.auth.outputs.cf_access_client_secret }}
           OPENCODE_DISABLE_PROJECT_CONFIG: "1"
           OPENCODE_PURE: "1"
         with:

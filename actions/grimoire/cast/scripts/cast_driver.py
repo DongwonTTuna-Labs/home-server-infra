@@ -671,6 +671,8 @@ def run_validate_workflow(args: argparse.Namespace) -> int:
         "grimoire_contract_version:",
         "GRIMOIRE_PAT:",
         "AI_RELAY_API_KEY:",
+        "CF_ACCESS_CLIENT_ID:",
+        "CF_ACCESS_CLIENT_SECRET:",
         "group: Home Server Runners",
         "labels: dongwontuna-labs-runner",
         "repository: DongwonTTuna-Labs/home-server-infra",

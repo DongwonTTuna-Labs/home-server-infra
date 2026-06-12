@@ -34,7 +34,7 @@
     "secrets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["GRIMOIRE_PAT", "AI_RELAY_API_KEY"],
+      "required": ["GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"],
       "properties": {
         "GRIMOIRE_PAT": {
           "type": "object",
@@ -55,6 +55,28 @@
             "required": {
               "const": false,
               "description": "Optional so runner AI_RELAY_API_KEY fallback remains reachable; model stages fail closed when neither source exists."
+            }
+          }
+        },
+        "CF_ACCESS_CLIENT_ID": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": {
+            "required": {
+              "const": false,
+              "description": "Optional so runner CF_ACCESS_CLIENT_ID fallback remains reachable; model stages fail closed when this Cloudflare Access value is absent."
+            }
+          }
+        },
+        "CF_ACCESS_CLIENT_SECRET": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": {
+            "required": {
+              "const": false,
+              "description": "Optional so runner CF_ACCESS_CLIENT_SECRET fallback remains reachable; model stages fail closed when this Cloudflare Access value is absent."
             }
           }
         }

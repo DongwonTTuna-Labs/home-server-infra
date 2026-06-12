@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import tempfile
@@ -17,7 +18,11 @@ EXPECTED_INPUTS = {
     "base_ref",
     "grimoire_contract_version",
 }
-EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY"}
+EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"}
+EXPECTED_CF_HEADERS = {
+    "CF-Access-Client-Id": "{env:CF_ACCESS_CLIENT_ID}",
+    "CF-Access-Client-Secret": "{env:CF_ACCESS_CLIENT_SECRET}",
+}
 EXPECTED_STAGES = (
     "trusted-controller",
     "review",
@@ -194,12 +199,36 @@ def assert_auth_and_inline_shell(text: str) -> None:
     for marker in forbidden_auth:
         require(marker not in text, f"forbidden GITHUB_TOKEN or GitHub App auth marker: {marker}")
     require(".omo/evidence" not in text, ".omo/evidence must not be a runtime workflow coupling")
+    required_auth_markers = (
+        "GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET: ${{ secrets.CF_ACCESS_CLIENT_ID }}",
+        "GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}",
+        "resolve_required cf_access_client_id",
+        "resolve_required cf_access_client_secret",
+        "CF_ACCESS_CLIENT_ID: ${{ steps.auth.outputs.cf_access_client_id }}",
+        "CF_ACCESS_CLIENT_SECRET: ${{ steps.auth.outputs.cf_access_client_secret }}",
+    )
+    for marker in required_auth_markers:
+        require(marker in text, f"workflow missing CF Access auth marker: {marker}")
 
     for body in block_scalar_bodies(text):
         nonempty = [line for line in body if line.strip()]
         require(len(nonempty) <= 35, "workflow contains a large inline shell block instead of action-local helpers")
         body_text = "\n".join(body)
         require(not re.search(r"\b(?:python3?|node|ruby)\s+[-<]", body_text), "workflow must not embed interpreter heredocs or scripts")
+
+
+def assert_opencode_provider_headers(repo_root: Path) -> None:
+    config_path = repo_root / "config" / "grimoire" / "opencode.json"
+    try:
+        payload = json.loads(read_text(config_path))
+    except json.JSONDecodeError as exc:
+        raise ContractError(f"invalid OpenCode config JSON: {config_path}: {exc}") from exc
+    try:
+        options = payload["provider"]["ai-relay"]["options"]
+    except (KeyError, TypeError) as exc:
+        raise ContractError("OpenCode AI relay provider options are missing") from exc
+    require(options.get("apiKey") == "{env:AI_RELAY_API_KEY}", "OpenCode AI relay apiKey must remain env-backed")
+    require(options.get("headers") == EXPECTED_CF_HEADERS, "OpenCode AI relay must inject env-backed Cloudflare Access headers")
 
 
 def assert_workflow_contract(workflow_path: Path, repo_root: Path) -> None:
@@ -210,6 +239,7 @@ def assert_workflow_contract(workflow_path: Path, repo_root: Path) -> None:
     assert_runner_and_checkouts(text)
     assert_stage_paths(text, repo_root)
     assert_auth_and_inline_shell(text)
+    assert_opencode_provider_headers(repo_root)
 
 
 def replace_once(text: str, old: str, new: str) -> str:
@@ -260,7 +290,7 @@ def assert_negative_fixtures(workflow_path: Path, repo_root: Path) -> None:
         ("bare-local-action-path", lambda text: replace_once(text, "./control-plane/actions/grimoire/cast", "./actions/grimoire/cast"), repo_root),
         (
             "undeclared-secret",
-            lambda text: replace_once(text, "      GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}", "      GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}\n      EXTRA_SECRET: ${{ secrets.EXTRA_SECRET }}"),
+            lambda text: replace_once(text, "          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}", "          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}\n          EXTRA_SECRET: ${{ secrets.EXTRA_SECRET }}"),
             repo_root,
         ),
         ("evidence-runtime-coupling", lambda text: replace_once(text, "mkdir -p consumer/.omo/ci", "mkdir -p consumer/.omo/ci\n          touch consumer/.omo/evidence/runtime.txt"), repo_root),

@@ -13,7 +13,7 @@
     "controller_owned": true,
     "consumer_pr_head_config_trusted": false,
     "runtime_simulation_inputs_allowed": false,
-    "credential_source": "AI_RELAY_API_KEY environment only",
+    "credential_source": "AI_RELAY_API_KEY plus CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET environment only",
     "privileged_github_auth": "GRIMOIRE_PAT named secret, with CODEX_LOOP_PAT runner-env fallback resolved by the reusable workflow task"
   },
   "provider": {
@@ -22,7 +22,11 @@
       "name": "AI Relay",
       "options": {
         "baseURL": "https://relay-ai.dongwontuna.net/v1",
-        "apiKey": "{env:AI_RELAY_API_KEY}"
+        "apiKey": "{env:AI_RELAY_API_KEY}",
+        "headers": {
+          "CF-Access-Client-Id": "{env:CF_ACCESS_CLIENT_ID}",
+          "CF-Access-Client-Secret": "{env:CF_ACCESS_CLIENT_SECRET}"
+        }
       },
       "models": {
         "gpt-5.5": {
