@@ -9,7 +9,7 @@ from pathlib import Path
 
 EXPECTED_PR_TYPES = ["opened", "ready_for_review", "synchronize", "reopened"]
 EXPECTED_WITH_KEYS = {"consumer_repository", "consumer_ref", "pull_request_number", "head_sha", "base_ref"}
-EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY"}
+EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"}
 FORBIDDEN_EVENTS = {"workflow_dispatch", "pull_request_target", "push"}
 FORBIDDEN_RUNTIME_KEYS = {"mode", "dry_run", "dry-run", "allow_live", "allow-live", "simulate", "simulation"}
 
