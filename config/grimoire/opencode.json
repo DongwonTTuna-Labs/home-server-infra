@@ -7,7 +7,7 @@
   "default_agent": "atlas",
   "plugin": [
     "opencode-claude-auth@1.5.4",
-    "oh-my-openagent@4.8.1"
+    "oh-my-openagent@latest"
   ],
   "grimoire_policy": {
     "controller_owned": true,
