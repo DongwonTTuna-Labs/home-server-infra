@@ -1,0 +1,46 @@
+name: Grimoire Verify
+description: Emit or validate F1-F4 machine verdicts and expose the stable jq all-APPROVE predicate.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  spec-sufficiency:
+    description: Spec sufficiency JSON path.
+    required: false
+    default: .omo/ci/spec-sufficiency.json
+  spec-gap-status:
+    description: Spec-gap status JSON path.
+    required: false
+    default: .omo/ci/spec-gap-status.json
+  fix-status:
+    description: Fix status JSON path.
+    required: false
+    default: .omo/ci/fix-status.json
+  output-path:
+    description: Verdict JSON path.
+    required: false
+    default: .omo/grimoire/verdict.json
+outputs:
+  approved:
+    description: Whether all F1-F4 fields approve under schema version 1.
+    value: ${{ steps.stage.outputs.approved }}
+  output_path:
+    description: Absolute path to verdict JSON.
+    value: ${{ steps.stage.outputs.output_path }}
+  jq_predicate:
+    description: Stable jq all-APPROVE predicate for Task 3/4 consumption.
+    value: ${{ steps.stage.outputs.jq_predicate }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/verify.py" \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --spec-sufficiency "${{ inputs.spec-sufficiency }}" \
+          --spec-gap-status "${{ inputs.spec-gap-status }}" \
+          --fix-status "${{ inputs.fix-status }}" \
+          --output "${{ inputs.output-path }}" \
+          --github-output "$GITHUB_OUTPUT"
