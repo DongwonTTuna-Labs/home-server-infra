@@ -1,0 +1,70 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",
+  // Controller-owned OMO policy. Credentialed Grimoire runs must load this file
+  // from the trusted control-plane checkout, never from consumer PR-head .opencode.
+  "trust": {
+    "config_owner": "home-server-infra grimoire control plane",
+    "consumer_pr_head_opencode_trusted": false,
+    "consumer_pr_head_plugins_trusted": false,
+    "runtime_simulation_inputs_allowed": false
+  },
+  "agents": {
+    "prometheus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "momus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "atlas": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "sisyphus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "hephaestus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "oracle": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "explore": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "medium",
+      "reasoningEffort": "medium"
+    },
+    "librarian": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "medium",
+      "reasoningEffort": "medium"
+    }
+  },
+  "categories": {
+    "deep": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "unspecified-high": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "quick": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "medium",
+      "reasoningEffort": "medium"
+    }
+  }
+}
