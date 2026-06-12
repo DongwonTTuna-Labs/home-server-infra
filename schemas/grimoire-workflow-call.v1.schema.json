@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DongwonTTuna-Labs/home-server-infra/schemas/grimoire-workflow-call.v1.schema.json",
+  "title": "Grimoire workflow_call v1 contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["inputs", "secrets"],
+  "properties": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "not": {
+          "enum": ["mode", "dry_run", "dry-run", "allow_live", "allow-live", "simulate", "simulation", "workflow_dispatch"]
+        }
+      },
+      "required": [
+        "consumer_repository",
+        "consumer_ref",
+        "pull_request_number",
+        "head_sha",
+        "base_ref",
+        "grimoire_contract_version"
+      ],
+      "properties": {
+        "consumer_repository": { "const": "string", "description": "Required workflow_call string input." },
+        "consumer_ref": { "const": "string", "description": "Required workflow_call string input." },
+        "pull_request_number": { "const": "string", "description": "Required workflow_call string input." },
+        "head_sha": { "const": "string", "description": "Required workflow_call string input." },
+        "base_ref": { "const": "string", "description": "Required workflow_call string input." },
+        "grimoire_contract_version": { "const": "string", "description": "Optional workflow_call string input with default 1." }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["GRIMOIRE_PAT", "AI_RELAY_API_KEY"],
+      "properties": {
+        "GRIMOIRE_PAT": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": {
+            "required": {
+              "const": false,
+              "description": "Optional so the self-hosted runner CODEX_LOOP_PAT fallback remains reachable; auth still fails closed when neither source exists."
+            }
+          }
+        },
+        "AI_RELAY_API_KEY": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": {
+            "required": {
+              "const": false,
+              "description": "Optional so runner AI_RELAY_API_KEY fallback remains reachable; model stages fail closed when neither source exists."
+            }
+          }
+        }
+      }
+    }
+  }
+}

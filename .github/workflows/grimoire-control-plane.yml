@@ -1,0 +1,161 @@
+name: Grimoire Control Plane
+
+on:
+  workflow_call:
+    inputs:
+      consumer_repository:
+        description: Consumer repository in owner/name form.
+        required: true
+        type: string
+      consumer_ref:
+        description: Consumer PR head ref that may receive exactly one scoped bot push after fixed approval.
+        required: true
+        type: string
+      pull_request_number:
+        description: Consumer pull request number.
+        required: true
+        type: string
+      head_sha:
+        description: Consumer pull request head SHA.
+        required: true
+        type: string
+      base_ref:
+        description: Consumer pull request base ref used only for data checkout diffing.
+        required: true
+        type: string
+      grimoire_contract_version:
+        description: Grimoire reusable workflow contract version. Only version 1 is accepted.
+        required: false
+        default: "1"
+        type: string
+    secrets:
+      GRIMOIRE_PAT:
+        description: Preferred PAT for checkout, Issues, labels, and the single scoped bot push.
+        required: false
+      AI_RELAY_API_KEY:
+        description: Preferred relay key for model-capable stages; runner env may supply the same name.
+        required: false
+
+permissions: {}
+
+jobs:
+  grimoire:
+    name: Grimoire reusable control plane
+    runs-on:
+      group: Home Server Runners
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    env:
+      GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}
+      GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}
+    steps:
+      - name: Validate contract version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.grimoire_contract_version }}" != "1" ]; then
+            echo "::error title=Unsupported Grimoire contract::grimoire_contract_version must be 1. If this private reusable workflow cannot be reached, check home-server-infra Settings -> Actions -> General -> Access."
+            exit 1
+          fi
+
+      - id: auth
+        name: Resolve PAT-only auth and relay key
+        shell: bash
+        run: |
+          set -euo pipefail
+          github_pat="${GRIMOIRE_PAT_SECRET:-}"
+          if [ -z "$github_pat" ] && [ -n "${CODEX_LOOP_PAT:-}" ]; then
+            github_pat="$CODEX_LOOP_PAT"
+          fi
+          if [ -z "$github_pat" ]; then
+            echo "::error title=Grimoire PAT unavailable::Provide the named GRIMOIRE_PAT secret or runner CODEX_LOOP_PAT environment variable. For private reusable workflow access, check home-server-infra Settings -> Actions -> General -> Access."
+            exit 1
+          fi
+          echo "::add-mask::$github_pat"
+
+          relay_key="${GRIMOIRE_RELAY_SECRET:-}"
+          if [ -z "$relay_key" ] && [ -n "${AI_RELAY_API_KEY:-}" ]; then
+            relay_key="$AI_RELAY_API_KEY"
+          fi
+          if [ -z "$relay_key" ]; then
+            echo "::error title=Grimoire relay key unavailable::Provide the named AI_RELAY_API_KEY secret or runner AI_RELAY_API_KEY environment variable before model-capable stages."
+            exit 1
+          fi
+          echo "::add-mask::$relay_key"
+
+          {
+            echo "github_pat<<GRIMOIRE_PAT_EOF"
+            printf '%s\n' "$github_pat"
+            echo "GRIMOIRE_PAT_EOF"
+            echo "relay_key<<GRIMOIRE_RELAY_EOF"
+            printf '%s\n' "$relay_key"
+            echo "GRIMOIRE_RELAY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: main
+          token: ${{ steps.auth.outputs.github_pat }}
+          path: control-plane
+          persist-credentials: false
+
+      - name: Checkout consumer repository as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.consumer_repository }}
+          ref: ${{ inputs.head_sha }}
+          token: ${{ steps.auth.outputs.github_pat }}
+          path: consumer
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record consumer changed files for trusted guard
+        shell: bash
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p consumer/.omo/ci
+          git -C consumer diff --name-only "origin/${BASE_REF}" "$HEAD_SHA" > consumer/.omo/ci/changed-files.txt
+
+      - id: trusted
+        name: Run trusted-controller once
+        continue-on-error: true
+        uses: ./control-plane/actions/grimoire/trusted-controller
+        with:
+          consumer-workspace: ${{ github.workspace }}/consumer
+          control-plane-root: ${{ github.workspace }}/control-plane
+          changed-files: ${{ github.workspace }}/consumer/.omo/ci/changed-files.txt
+          output-path: .omo/ci/trusted-controller-status.json
+
+      - id: cast
+        name: Run cast driver
+        uses: ./control-plane/actions/grimoire/cast
+        env:
+          GRIMOIRE_GITHUB_PAT: ${{ steps.auth.outputs.github_pat }}
+          AI_RELAY_API_KEY: ${{ steps.auth.outputs.relay_key }}
+          OPENCODE_DISABLE_PROJECT_CONFIG: "1"
+          OPENCODE_PURE: "1"
+        with:
+          consumer-workspace: ${{ github.workspace }}/consumer
+          control-plane-root: ${{ github.workspace }}/control-plane
+          repository: ${{ inputs.consumer_repository }}
+          pr-number: ${{ inputs.pull_request_number }}
+          head-sha: ${{ inputs.head_sha }}
+          base-ref: ${{ inputs.base_ref }}
+          consumer-ref: ${{ inputs.consumer_ref }}
+          changed-files: ${{ github.workspace }}/consumer/.omo/ci/changed-files.txt
+          trusted-status: ${{ steps.trusted.outputs.status_path }}
+          trusted-controller-outcome: ${{ steps.trusted.outcome }}
+          trusted-controller-status: ${{ steps.trusted.outputs.status }}
+          trusted-controller-action: ${{ steps.trusted.outputs.action }}
+          model-execution-allowed: ${{ steps.trusted.outputs.model_execution_allowed }}
+          write-allowed: ${{ steps.trusted.outputs.write_allowed }}
+          commit-allowed: ${{ steps.trusted.outputs.commit_allowed }}
+          push-allowed: ${{ steps.trusted.outputs.push_allowed }}
+          github-mutation-allowed: ${{ steps.trusted.outputs.github_mutation_allowed }}
