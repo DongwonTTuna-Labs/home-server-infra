@@ -129,6 +129,8 @@ jobs:
     secrets:
       GRIMOIRE_PAT: ${{ secrets.GRIMOIRE_PAT }}
       AI_RELAY_API_KEY: ${{ secrets.AI_RELAY_API_KEY }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
 ```
 <!-- grimoire-consumer-workflow:recommended:end -->
 
@@ -161,8 +163,11 @@ Grimoire uses a PAT-only auth model for privileged GitHub operations.
 3. If neither is present, the workflow fails closed before checkout, Issues, labels, or push stages.
 4. Preferred model relay auth is the named consumer secret `AI_RELAY_API_KEY`.
 5. If that named secret is absent, the runner may provide `AI_RELAY_API_KEY` from its environment.
-6. If no relay key is present, the workflow fails closed before model-capable stages.
-7. Both resolved credentials are masked before use. Docs, logs, fixtures, comments, and evidence must never include raw secrets, prefixes, lengths, hashes, token-bearing URLs, or private run URLs.
+6. Cloudflare Access for the AI relay uses named consumer secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
+7. If either Cloudflare Access named secret is absent, the runner may provide the same-name `CF_ACCESS_CLIENT_ID` or `CF_ACCESS_CLIENT_SECRET` environment variable.
+8. If no relay key is present, or either Cloudflare Access value is absent, the workflow fails closed before model-capable stages.
+9. OpenCode receives those Cloudflare Access values only as provider headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` from environment-backed config.
+10. Resolved credentials are masked before use. Docs, logs, fixtures, comments, and evidence must never include raw secrets, prefixes, lengths, hashes, token-bearing URLs, or private run URLs.
 
 The reusable workflow runs on self-hosted infrastructure only:
 

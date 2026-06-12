@@ -111,6 +111,10 @@ REQUIRED_PHRASES = (
     "head_sha",
     "base_ref",
     "AI_RELAY_API_KEY",
+    "CF_ACCESS_CLIENT_ID",
+    "CF_ACCESS_CLIENT_SECRET",
+    "CF-Access-Client-Id",
+    "CF-Access-Client-Secret",
     "Settings, Actions, General, Access",
     "private reusable workflows and actions",
     "Helper files under `actions/grimoire/<stage>/scripts/` are action-local implementation details",
@@ -229,6 +233,8 @@ def assert_recommended_consumer_snippet(docs_text: str) -> None:
         "base_ref: ${{ github.event.pull_request.base.ref }}",
         "GRIMOIRE_PAT: ${{ secrets.GRIMOIRE_PAT }}",
         "AI_RELAY_API_KEY: ${{ secrets.AI_RELAY_API_KEY }}",
+        "CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}",
+        "CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}",
     )
     for phrase in required:
         require(phrase in snippet, f"recommended consumer snippet missing: {phrase}")
