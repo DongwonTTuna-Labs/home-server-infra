@@ -238,8 +238,9 @@ The controller will write the normalized artifact to {output}.
 
 def run_live_review(workspace: pathlib.Path, output: pathlib.Path, root: pathlib.Path) -> tuple[dict[str, object], int]:
     blockers: list[str] = []
-    if not os.environ.get("AI_RELAY_API_KEY"):
-        blockers.append("AI_RELAY_API_KEY is not set")
+    for required_env in ("AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
+        if not os.environ.get(required_env):
+            blockers.append(f"{required_env} is not set")
     opencode_config = root / "config" / "grimoire" / "opencode.json"
     omo_config = root / "config" / "grimoire" / "oh-my-openagent.jsonc"
     if not opencode_config.is_file():

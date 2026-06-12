@@ -239,8 +239,9 @@ def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pat
 
 def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, object], allowed: list[str], prompt_output: pathlib.Path) -> None:
     blockers: list[str] = []
-    if not os.environ.get("AI_RELAY_API_KEY"):
-        blockers.append("AI_RELAY_API_KEY is not set")
+    for required_env in ("AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
+        if not os.environ.get(required_env):
+            blockers.append(f"{required_env} is not set")
     opencode_config = root / "config" / "grimoire" / "opencode.json"
     omo_config = root / "config" / "grimoire" / "oh-my-openagent.jsonc"
     if not opencode_config.is_file():

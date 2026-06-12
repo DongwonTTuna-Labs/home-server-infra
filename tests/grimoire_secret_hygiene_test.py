@@ -11,6 +11,8 @@ SENTINELS = (
     "GRIMOIRE_FIXTURE_CODEX_RELAY_API_KEY_SENTINEL",
     "GRIMOIRE_FIXTURE_CODEX_LOOP_PAT_SENTINEL",
     "GRIMOIRE_FIXTURE_AI_RELAY_API_KEY_SENTINEL",
+    "GRIMOIRE_FIXTURE_CF_ACCESS_CLIENT_ID_SENTINEL",
+    "GRIMOIRE_FIXTURE_CF_ACCESS_CLIENT_SECRET_SENTINEL",
 )
 TOKEN_PATTERNS = (
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
@@ -18,7 +20,7 @@ TOKEN_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~-]{16,}"),
     re.compile(r"(?i)https?://[^\s\"'<>]+(?:token|access_token|api[_-]?key)=[^\s\"'<>]+"),
-    re.compile(r"(?i)\b(?:CODEX_RELAY_API_KEY|CODEX_LOOP_PAT|AI_RELAY_API_KEY|GRIMOIRE_PAT)\s*[:=]\s*[\"']?[^\"'\s]+"),
+    re.compile(r"(?i)\b(?:CODEX_RELAY_API_KEY|CODEX_LOOP_PAT|AI_RELAY_API_KEY|GRIMOIRE_PAT|CF_ACCESS_CLIENT_ID|CF_ACCESS_CLIENT_SECRET)\s*[:=]\s*[\"']?[^\"'\s]+"),
     re.compile(r"(?i)\b(?:token|secret|password|api[_-]?key)\s*[:=]\s*[\"']?[^\"'\s]+"),
 )
 
