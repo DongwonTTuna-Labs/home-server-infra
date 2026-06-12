@@ -30,10 +30,10 @@ Private consumers can call the reusable workflow only after a maintainer enables
 
 ## Auth Model
 
-Privileged GitHub operations use PAT-only auth. The preferred named secret is `GRIMOIRE_PAT`; the self-hosted runner `CODEX_LOOP_PAT` fallback remains available and fail-closed. Model stages use named `AI_RELAY_API_KEY` first, then runner environment fallback. Both credential paths are masked and must not appear in docs, logs, fixtures, comments, or evidence.
+Privileged GitHub operations use PAT-only auth. The preferred named secret is `GRIMOIRE_PAT`; the self-hosted runner `CODEX_LOOP_PAT` fallback remains available and fail-closed. Model stages use named `AI_RELAY_API_KEY`, `CF_ACCESS_CLIENT_ID`, and `CF_ACCESS_CLIENT_SECRET` first, then same-name runner environment fallbacks for the relay and Cloudflare Access values. The OpenCode provider sends `CF-Access-Client-Id` and `CF-Access-Client-Secret` as environment-backed request headers. All credential paths are masked and must not appear in docs, logs, fixtures, comments, or evidence.
 
 ## Migration Next
 
-Consumer repositories should migrate to a thin caller workflow that calls `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`, passes PR metadata inputs, and maps only `GRIMOIRE_PAT` and `AI_RELAY_API_KEY` by name.
+Consumer repositories should migrate to a thin caller workflow that calls `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`, passes PR metadata inputs, and maps only `GRIMOIRE_PAT`, `AI_RELAY_API_KEY`, `CF_ACCESS_CLIENT_ID`, and `CF_ACCESS_CLIENT_SECRET` by name.
 
 The first observed real cross-repo PR-event run belongs to the later rollout task after human merge and private access setup.
