@@ -1,0 +1,86 @@
+name: Grimoire Fix
+description: Enforce fix-stage scope/no-op guard and emit the Atlas handoff contract.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  control-plane-root:
+    description: Trusted control-plane checkout root containing controller-owned config.
+    required: false
+    default: ""
+  spec-sufficiency:
+    description: Spec sufficiency JSON path.
+    required: false
+    default: .omo/ci/spec-sufficiency.json
+  spec-gap-status:
+    description: Spec-gap status JSON path.
+    required: false
+    default: .omo/ci/spec-gap-status.json
+  pr-touched:
+    description: Optional newline-delimited PR-touched paths file.
+    required: false
+    default: ""
+  direct-extra:
+    description: Optional newline-delimited direct test/docs/spec extra paths file.
+    required: false
+    default: ""
+  changed-files:
+    description: Optional newline-delimited post-fix changed paths file.
+    required: false
+    default: ""
+  output-path:
+    description: Fix status JSON path.
+    required: false
+    default: .omo/ci/fix-status.json
+  handoff-path:
+    description: Atlas handoff markdown path.
+    required: false
+    default: .omo/ci/fix-handoff-prompt.md
+outputs:
+  status:
+    description: clear-noop, fixed, scope-violation, or blocked.
+    value: ${{ steps.stage.outputs.status }}
+  scope_ok:
+    description: Whether all changed files stayed inside the scope guard.
+    value: ${{ steps.stage.outputs.scope_ok }}
+  noop:
+    description: Whether this is a clear-noop with no commit or push.
+    value: ${{ steps.stage.outputs.noop }}
+  should_commit:
+    description: Whether a later driver may commit after verify approval.
+    value: ${{ steps.stage.outputs.should_commit }}
+  should_push:
+    description: Whether a later driver may push after verify approval.
+    value: ${{ steps.stage.outputs.should_push }}
+  output_path:
+    description: Absolute path to fix status JSON.
+    value: ${{ steps.stage.outputs.output_path }}
+  handoff_path:
+    description: Absolute path to Atlas handoff markdown.
+    value: ${{ steps.stage.outputs.handoff_path }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        args=(
+          --consumer-workspace "${{ inputs.consumer-workspace }}"
+          --control-plane-root "${{ inputs.control-plane-root }}"
+          --spec-sufficiency "${{ inputs.spec-sufficiency }}"
+          --spec-gap-status "${{ inputs.spec-gap-status }}"
+          --output "${{ inputs.output-path }}"
+          --handoff-output "${{ inputs.handoff-path }}"
+          --github-output "$GITHUB_OUTPUT"
+        )
+        if [ -n "${{ inputs.pr-touched }}" ]; then
+          args+=(--pr-touched "${{ inputs.pr-touched }}")
+        fi
+        if [ -n "${{ inputs.direct-extra }}" ]; then
+          args+=(--direct-extra "${{ inputs.direct-extra }}")
+        fi
+        if [ -n "${{ inputs.changed-files }}" ]; then
+          args+=(--changed-files "${{ inputs.changed-files }}")
+        fi
+        python3 "$GITHUB_ACTION_PATH/scripts/fix.py" "${args[@]}"
