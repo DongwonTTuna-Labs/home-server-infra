@@ -1,0 +1,247 @@
+name: Grimoire Cast Driver
+description: Sequence trusted Grimoire stages and apply recovered termination or synchronize-loop semantics.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  control-plane-root:
+    description: Trusted control-plane checkout root.
+    required: true
+  repository:
+    description: Consumer repository in owner/name form.
+    required: true
+  pr-number:
+    description: Pull request number for labels, Issues, and artifacts.
+    required: true
+  head-sha:
+    description: Pull request head SHA checked out under consumer-workspace.
+    required: true
+  base-ref:
+    description: Pull request base ref metadata.
+    required: true
+  consumer-ref:
+    description: Pull request head ref to receive the single scoped bot push after fixed approval.
+    required: true
+  trusted-status:
+    description: Trusted-controller status JSON path emitted by the orchestrator-run guard.
+    required: true
+  trusted-controller-outcome:
+    description: Orchestrator trusted-controller step outcome.
+    required: true
+  trusted-controller-status:
+    description: Trusted-controller status output.
+    required: true
+  trusted-controller-action:
+    description: Trusted-controller action output.
+    required: true
+  model-execution-allowed:
+    description: Trusted-controller model execution capability output.
+    required: true
+  write-allowed:
+    description: Trusted-controller write capability output.
+    required: true
+  commit-allowed:
+    description: Trusted-controller commit capability output.
+    required: true
+  push-allowed:
+    description: Trusted-controller push capability output.
+    required: true
+  github-mutation-allowed:
+    description: Trusted-controller Issues and labels mutation capability output.
+    required: true
+  changed-files:
+    description: Optional newline-delimited changed files from the consumer PR.
+    required: false
+    default: ""
+  pr-touched:
+    description: Optional newline-delimited PR touched paths for the fix scope guard.
+    required: false
+    default: ""
+  direct-extra:
+    description: Optional newline-delimited direct test/docs/spec extra paths for the fix scope guard.
+    required: false
+    default: ""
+  liveness-timeout-minutes:
+    description: Wall-clock boulder liveness guard; not a semantic iteration cap.
+    required: false
+    default: "90"
+outputs:
+  status:
+    description: terminal, awaiting-synchronize, or fizzled.
+    value: ${{ steps.complete.outputs.status }}
+  decision:
+    description: clear-noop-terminal, scoped-push, spec-gap-halt, or fizzled.
+    value: ${{ steps.complete.outputs.decision }}
+  terminal:
+    description: Whether this run reached the clear-noop terminal.
+    value: ${{ steps.complete.outputs.terminal }}
+  final_status_path:
+    description: Absolute path to the final cast status JSON artifact.
+    value: ${{ steps.complete.outputs.output_path }}
+runs:
+  using: composite
+  steps:
+    - id: preflight
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/cast_driver.py" preflight \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --trusted-status-path "${{ inputs.trusted-status }}" \
+          --trusted-outcome "${{ inputs.trusted-controller-outcome }}" \
+          --trusted-status "${{ inputs.trusted-controller-status }}" \
+          --trusted-action "${{ inputs.trusted-controller-action }}" \
+          --model-execution-allowed "${{ inputs.model-execution-allowed }}" \
+          --write-allowed "${{ inputs.write-allowed }}" \
+          --commit-allowed "${{ inputs.commit-allowed }}" \
+          --push-allowed "${{ inputs.push-allowed }}" \
+          --github-mutation-allowed "${{ inputs.github-mutation-allowed }}" \
+          --output ".omo/ci/cast-preflight.json" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - id: labels-running
+      if: ${{ steps.preflight.outputs.can_continue == 'true' }}
+      uses: ./control-plane/actions/grimoire/labels
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        transition: running
+        repository: ${{ inputs.repository }}
+        pr-number: ${{ inputs.pr-number }}
+
+    - id: review
+      if: ${{ steps.preflight.outputs.can_continue == 'true' }}
+      continue-on-error: true
+      uses: ./control-plane/actions/grimoire/review
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        control-plane-root: ${{ inputs.control-plane-root }}
+
+    - id: design
+      if: ${{ steps.preflight.outputs.can_continue == 'true' && steps.review.outcome == 'success' }}
+      continue-on-error: true
+      uses: ./control-plane/actions/grimoire/design
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        repository: ${{ inputs.repository }}
+
+    - id: out-of-scope-issues
+      if: ${{ steps.preflight.outputs.can_continue == 'true' && steps.design.outputs.output_path != '' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/cast_driver.py" file-issues \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --design-path "${{ steps.design.outputs.output_path }}" \
+          --repository "${{ inputs.repository }}" \
+          --pr-number "${{ inputs.pr-number }}" \
+          --output ".omo/ci/out-of-scope-issues-status.json" \
+          --ledger ".omo/ci/out-of-scope-issues-ledger.json" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - id: spec-gap
+      if: ${{ steps.preflight.outputs.can_continue == 'true' && steps.design.outputs.should_halt == 'true' }}
+      continue-on-error: true
+      uses: ./control-plane/actions/grimoire/spec-gap
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        input-path: ${{ steps.design.outputs.output_path }}
+
+    - id: fix
+      if: ${{ steps.preflight.outputs.can_continue == 'true' && steps.design.outputs.output_path != '' && steps.design.outputs.should_halt != 'true' }}
+      continue-on-error: true
+      uses: ./control-plane/actions/grimoire/fix
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        control-plane-root: ${{ inputs.control-plane-root }}
+        spec-sufficiency: ${{ steps.design.outputs.output_path }}
+        pr-touched: ${{ inputs.changed-files }}
+        direct-extra: ${{ inputs.direct-extra }}
+
+    - id: boulder
+      if: ${{ steps.preflight.outputs.can_continue == 'true' && steps.fix.outputs.output_path != '' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/cast_driver.py" boulder \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --fix-status "${{ steps.fix.outputs.output_path }}" \
+          --timeout-minutes "${{ inputs.liveness-timeout-minutes }}" \
+          --output ".omo/boulder.json" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - id: verify
+      if: ${{ steps.preflight.outputs.can_continue == 'true' && steps.fix.outcome == 'success' && steps.fix.outputs.output_path != '' }}
+      continue-on-error: true
+      uses: ./control-plane/actions/grimoire/verify
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        spec-sufficiency: ${{ steps.design.outputs.output_path }}
+        fix-status: ${{ steps.fix.outputs.output_path }}
+
+    - id: decide
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/cast_driver.py" decide \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --preflight-status ".omo/ci/cast-preflight.json" \
+          --review-status ".omo/ci/review-findings.json" \
+          --review-outcome "${{ steps.review.outcome }}" \
+          --design-status ".omo/ci/spec-sufficiency.json" \
+          --issue-status ".omo/ci/out-of-scope-issues-status.json" \
+          --spec-gap-status ".omo/ci/spec-gap-status.json" \
+          --fix-status ".omo/ci/fix-status.json" \
+          --fix-outcome "${{ steps.fix.outcome }}" \
+          --boulder-status ".omo/boulder.json" \
+          --verdict-status ".omo/grimoire/verdict.json" \
+          --verify-outcome "${{ steps.verify.outcome }}" \
+          --output ".omo/ci/cast-decision.json" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - id: labels-done
+      if: ${{ steps.decide.outputs.label_transition == 'done' }}
+      uses: ./control-plane/actions/grimoire/labels
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        transition: done
+        repository: ${{ inputs.repository }}
+        pr-number: ${{ inputs.pr-number }}
+
+    - id: labels-fizzled
+      if: ${{ steps.decide.outputs.label_transition == 'fizzled' }}
+      uses: ./control-plane/actions/grimoire/labels
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        transition: fizzled
+        repository: ${{ inputs.repository }}
+        pr-number: ${{ inputs.pr-number }}
+
+    - id: push
+      if: ${{ steps.decide.outputs.should_push == 'true' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/cast_driver.py" push \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --decision ".omo/ci/cast-decision.json" \
+          --repository "${{ inputs.repository }}" \
+          --consumer-ref "${{ inputs.consumer-ref }}" \
+          --head-sha "${{ inputs.head-sha }}" \
+          --output ".omo/ci/cast-push-status.json" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - id: complete
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/cast_driver.py" complete \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --decision ".omo/ci/cast-decision.json" \
+          --push-status ".omo/ci/cast-push-status.json" \
+          --output ".omo/ci/cast-final-status.json" \
+          --github-output "$GITHUB_OUTPUT"

@@ -1,0 +1,47 @@
+name: Grimoire Spec Gap
+description: Render the five-section OpenSpec insufficiency halt artifact.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  input-path:
+    description: Spec sufficiency JSON path.
+    required: false
+    default: .omo/ci/spec-sufficiency.json
+  comment-path:
+    description: Markdown comment artifact path.
+    required: false
+    default: .omo/ci/spec-gap-comment.md
+  status-path:
+    description: Spec-gap status JSON path.
+    required: false
+    default: .omo/ci/spec-gap-status.json
+outputs:
+  status:
+    description: halt, clear, or blocked.
+    value: ${{ steps.stage.outputs.status }}
+  should_comment:
+    description: Whether a PR comment should be posted by the later workflow.
+    value: ${{ steps.stage.outputs.should_comment }}
+  should_halt:
+    description: Whether the loop must halt before code changes.
+    value: ${{ steps.stage.outputs.should_halt }}
+  comment_path:
+    description: Absolute path to markdown comment artifact.
+    value: ${{ steps.stage.outputs.comment_path }}
+  status_path:
+    description: Absolute path to spec-gap status JSON.
+    value: ${{ steps.stage.outputs.status_path }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/spec_gap.py" \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --input "${{ inputs.input-path }}" \
+          --comment-output "${{ inputs.comment-path }}" \
+          --status-output "${{ inputs.status-path }}" \
+          --github-output "$GITHUB_OUTPUT"

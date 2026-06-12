@@ -1,0 +1,45 @@
+name: Grimoire Review
+description: Emit the read-only four-lens Grimoire review findings artifact.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  control-plane-root:
+    description: Trusted control-plane checkout root containing controller-owned config.
+    required: false
+    default: ""
+  output-path:
+    description: Review findings JSON path, relative to consumer-workspace when not absolute.
+    required: false
+    default: .omo/ci/review-findings.json
+outputs:
+  status:
+    description: approved, findings, or blocked.
+    value: ${{ steps.stage.outputs.status }}
+  approval_signal:
+    description: Stable review approval signal.
+    value: ${{ steps.stage.outputs.approval_signal }}
+  read_only:
+    description: Always true for this stage.
+    value: ${{ steps.stage.outputs.read_only }}
+  mutation_allowed:
+    description: Always false for this stage.
+    value: ${{ steps.stage.outputs.mutation_allowed }}
+  findings_count:
+    description: Count of emitted review findings.
+    value: ${{ steps.stage.outputs.findings_count }}
+  output_path:
+    description: Absolute path to review findings JSON.
+    value: ${{ steps.stage.outputs.output_path }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/review.py" \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --control-plane-root "${{ inputs.control-plane-root }}" \
+          --output "${{ inputs.output-path }}" \
+          --github-output "$GITHUB_OUTPUT"

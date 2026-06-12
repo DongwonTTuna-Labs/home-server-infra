@@ -1,0 +1,71 @@
+name: Grimoire Design
+description: Bind read-only findings to OpenSpec/OMO scope and emit sufficiency plus in/out-of-scope classification.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  repository:
+    description: Repository name used for stable out-of-scope fingerprints.
+    required: true
+  review-input:
+    description: Review findings JSON path.
+    required: false
+    default: .omo/ci/review-findings.json
+  spec-root:
+    description: OpenSpec root under the consumer workspace.
+    required: false
+    default: openspec
+  spec-path:
+    description: Optional explicit OpenSpec evidence path or directory.
+    required: false
+    default: ""
+  output-path:
+    description: Spec sufficiency JSON path.
+    required: false
+    default: .omo/ci/spec-sufficiency.json
+  plan-path:
+    description: Markdown design plan path.
+    required: false
+    default: .omo/ci/design-plan.md
+outputs:
+  status:
+    description: sufficient, insufficient, or blocked.
+    value: ${{ steps.stage.outputs.status }}
+  spec_sufficient:
+    description: Whether in-scope findings have OpenSpec evidence.
+    value: ${{ steps.stage.outputs.spec_sufficient }}
+  should_halt:
+    description: Whether downstream code-changing stages must halt.
+    value: ${{ steps.stage.outputs.should_halt }}
+  in_scope_count:
+    description: Count of in-scope review findings.
+    value: ${{ steps.stage.outputs.in_scope_count }}
+  out_of_scope_count:
+    description: Count of out-of-scope findings with stable fingerprints.
+    value: ${{ steps.stage.outputs.out_of_scope_count }}
+  output_path:
+    description: Absolute path to spec sufficiency JSON.
+    value: ${{ steps.stage.outputs.output_path }}
+  plan_path:
+    description: Absolute path to markdown design plan.
+    value: ${{ steps.stage.outputs.plan_path }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        args=(
+          --consumer-workspace "${{ inputs.consumer-workspace }}"
+          --repository "${{ inputs.repository }}"
+          --review-input "${{ inputs.review-input }}"
+          --spec-root "${{ inputs.spec-root }}"
+          --output "${{ inputs.output-path }}"
+          --plan "${{ inputs.plan-path }}"
+          --github-output "$GITHUB_OUTPUT"
+        )
+        if [ -n "${{ inputs.spec-path }}" ]; then
+          args+=(--spec "${{ inputs.spec-path }}")
+        fi
+        python3 "$GITHUB_ACTION_PATH/scripts/design.py" "${args[@]}"

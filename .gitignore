@@ -54,6 +54,7 @@ __pycache__/
 # Explicit safe examples/docs whose names contain secret-like words.
 !docs/secrets.md
 !scripts/scan-secrets.sh
+!tests/grimoire_secret_hygiene_test.py
 !stacks/agent-stack/secrets/
 !stacks/agent-stack/secrets/cloudflared.env.example
 !**/.env.example

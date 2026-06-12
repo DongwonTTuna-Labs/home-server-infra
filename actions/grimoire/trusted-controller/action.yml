@@ -1,0 +1,64 @@
+name: Grimoire Trusted Controller
+description: Validate trusted control-plane material and halt on protected paths before privileged stages.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  control-plane-root:
+    description: Trusted control-plane checkout root. Defaults to this action package root.
+    required: false
+    default: ""
+  changed-files:
+    description: Optional newline-delimited changed-path file.
+    required: false
+    default: ""
+  output-path:
+    description: Trusted-controller status JSON path, relative to consumer-workspace when not absolute.
+    required: false
+    default: .omo/ci/trusted-controller-status.json
+outputs:
+  status:
+    description: ok, protected, or blocked.
+    value: ${{ steps.stage.outputs.status }}
+  action:
+    description: continue or halt.
+    value: ${{ steps.stage.outputs.action }}
+  model_execution_allowed:
+    description: Whether model execution may proceed.
+    value: ${{ steps.stage.outputs.model_execution_allowed }}
+  write_allowed:
+    description: Whether write-capable stages may proceed.
+    value: ${{ steps.stage.outputs.write_allowed }}
+  commit_allowed:
+    description: Whether commit creation may proceed later.
+    value: ${{ steps.stage.outputs.commit_allowed }}
+  push_allowed:
+    description: Whether push may proceed later.
+    value: ${{ steps.stage.outputs.push_allowed }}
+  github_mutation_allowed:
+    description: Whether Issues or labels mutations may proceed later.
+    value: ${{ steps.stage.outputs.github_mutation_allowed }}
+  status_path:
+    description: Absolute path to the trusted-controller status artifact.
+    value: ${{ steps.stage.outputs.status_path }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        control_plane_root="${{ inputs.control-plane-root }}"
+        if [ -z "$control_plane_root" ]; then
+          control_plane_root="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
+        fi
+        args=(
+          --consumer-workspace "${{ inputs.consumer-workspace }}"
+          --control-plane-root "$control_plane_root"
+          --output "${{ inputs.output-path }}"
+          --github-output "$GITHUB_OUTPUT"
+        )
+        if [ -n "${{ inputs.changed-files }}" ]; then
+          args+=(--changed-files "${{ inputs.changed-files }}")
+        fi
+        python3 "$GITHUB_ACTION_PATH/scripts/trusted_controller.py" "${args[@]}"

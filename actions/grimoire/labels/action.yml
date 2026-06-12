@@ -1,0 +1,57 @@
+name: Grimoire Labels
+description: Compute idempotent display-only Grimoire label transitions while preserving unrelated labels.
+inputs:
+  consumer-workspace:
+    description: Consumer repository workspace treated as PR-head data.
+    required: true
+  transition:
+    description: "Display transition to apply: running, done, or fizzled."
+    required: true
+  state-file:
+    description: Newline-delimited local label state file.
+    required: false
+    default: .omo/ci/grimoire-label-state.txt
+  state-output:
+    description: Newline-delimited local output label state file. Defaults to state-file.
+    required: false
+    default: ""
+  status-path:
+    description: Label status JSON path.
+    required: false
+    default: .omo/ci/grimoire-label-status.json
+  repository:
+    description: Repository metadata for the status artifact.
+    required: false
+    default: local-consumer
+  pr-number:
+    description: Pull request number metadata for the status artifact.
+    required: false
+    default: "0"
+outputs:
+  changed:
+    description: Whether the transition changed managed display labels.
+    value: ${{ steps.stage.outputs.changed }}
+  operation_count:
+    description: Count of managed label operations.
+    value: ${{ steps.stage.outputs.operation_count }}
+  status_path:
+    description: Absolute path to label status JSON.
+    value: ${{ steps.stage.outputs.status_path }}
+  state_output:
+    description: Absolute path to final local label state file.
+    value: ${{ steps.stage.outputs.state_output }}
+runs:
+  using: composite
+  steps:
+    - id: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/scripts/labels.py" "${{ inputs.transition }}" \
+          --consumer-workspace "${{ inputs.consumer-workspace }}" \
+          --state-file "${{ inputs.state-file }}" \
+          --state-output "${{ inputs.state-output }}" \
+          --status-output "${{ inputs.status-path }}" \
+          --repository "${{ inputs.repository }}" \
+          --pr-number "${{ inputs.pr-number }}" \
+          --github-output "$GITHUB_OUTPUT"

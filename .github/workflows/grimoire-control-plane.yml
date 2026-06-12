@@ -1,0 +1,160 @@
+name: Grimoire Control Plane
+
+on:
+  workflow_call:
+    inputs:
+      consumer_repository:
+        description: Consumer repository in owner/name form.
+        required: true
+        type: string
+      consumer_ref:
+        description: Consumer PR head ref that may receive exactly one scoped bot push after fixed approval.
+        required: true
+        type: string
+      pull_request_number:
+        description: Consumer pull request number.
+        required: true
+        type: string
+      head_sha:
+        description: Consumer pull request head SHA.
+        required: true
+        type: string
+      base_ref:
+        description: Consumer pull request base ref used only for data checkout diffing.
+        required: true
+        type: string
+      grimoire_contract_version:
+        description: Grimoire reusable workflow contract version. Only version 1 is accepted.
+        required: false
+        default: "1"
+        type: string
+    secrets:
+      GRIMOIRE_PAT:
+        description: Preferred PAT for checkout, Issues, labels, and the single scoped bot push.
+        required: false
+      AI_RELAY_API_KEY:
+        description: Preferred relay key for model-capable stages; runner env may supply the same name.
+        required: false
+      CF_ACCESS_CLIENT_ID:
+        description: Preferred Cloudflare Access client ID for model relay; runner env may supply the same name.
+        required: false
+      CF_ACCESS_CLIENT_SECRET:
+        description: Preferred Cloudflare Access client secret for model relay; runner env may supply the same name.
+        required: false
+
+permissions: {}
+
+jobs:
+  grimoire:
+    name: Grimoire reusable control plane
+    runs-on:
+      group: Home Server Runners
+      labels: dongwontuna-labs-runner
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    steps:
+      - name: Validate contract version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.grimoire_contract_version }}" != "1" ]; then
+            echo "::error title=Unsupported Grimoire contract::grimoire_contract_version must be 1. If this private reusable workflow cannot be reached, check home-server-infra Settings -> Actions -> General -> Access."
+            exit 1
+          fi
+
+      - id: auth
+        name: Resolve PAT-only auth and relay credentials
+        shell: bash
+        env:
+          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}
+          GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}
+          GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          resolve_required() {
+            local output_name="$1" title="$2" value="${3:-}" named_name="$4" fallback_name="$5" stage="$6"
+            local fallback_value="${!fallback_name:-}"
+            if [ -z "$value" ] && [ -n "$fallback_value" ]; then
+              value="$fallback_value"
+            fi
+            if [ -z "$value" ]; then
+              echo "::error title=$title::Provide the named $named_name secret or runner $fallback_name environment variable before $stage."
+              exit 1
+            fi
+            echo "::add-mask::$value"
+            { echo "$output_name<<${output_name}_EOF"; printf '%s\n' "$value"; echo "${output_name}_EOF"; } >> "$GITHUB_OUTPUT"
+          }
+          resolve_required github_pat "Grimoire PAT unavailable" "${GRIMOIRE_PAT_SECRET:-}" GRIMOIRE_PAT CODEX_LOOP_PAT "checkout, Issues, labels, or push stages"
+          resolve_required relay_key "Grimoire relay key unavailable" "${GRIMOIRE_RELAY_SECRET:-}" AI_RELAY_API_KEY AI_RELAY_API_KEY "model-capable stages"
+          resolve_required cf_access_client_id "Grimoire CF Access client ID unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET:-}" CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_ID "model-capable stages"
+          resolve_required cf_access_client_secret "Grimoire CF Access client secret unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET:-}" CF_ACCESS_CLIENT_SECRET CF_ACCESS_CLIENT_SECRET "model-capable stages"
+
+      - name: Checkout trusted control plane
+        uses: actions/checkout@v4
+        with:
+          repository: DongwonTTuna-Labs/home-server-infra
+          ref: main
+          token: ${{ steps.auth.outputs.github_pat }}
+          path: control-plane
+          persist-credentials: false
+
+      - name: Checkout consumer repository as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.consumer_repository }}
+          ref: ${{ inputs.head_sha }}
+          token: ${{ steps.auth.outputs.github_pat }}
+          path: consumer
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record consumer changed files for trusted guard
+        shell: bash
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p consumer/.omo/ci
+          git -C consumer diff --name-only "origin/${BASE_REF}" "$HEAD_SHA" > consumer/.omo/ci/changed-files.txt
+
+      - id: trusted
+        name: Run trusted-controller once
+        continue-on-error: true
+        uses: ./control-plane/actions/grimoire/trusted-controller
+        with:
+          consumer-workspace: ${{ github.workspace }}/consumer
+          control-plane-root: ${{ github.workspace }}/control-plane
+          changed-files: ${{ github.workspace }}/consumer/.omo/ci/changed-files.txt
+          output-path: .omo/ci/trusted-controller-status.json
+
+      - id: cast
+        name: Run cast driver
+        uses: ./control-plane/actions/grimoire/cast
+        env:
+          GRIMOIRE_GITHUB_PAT: ${{ steps.auth.outputs.github_pat }}
+          AI_RELAY_API_KEY: ${{ steps.auth.outputs.relay_key }}
+          CF_ACCESS_CLIENT_ID: ${{ steps.auth.outputs.cf_access_client_id }}
+          CF_ACCESS_CLIENT_SECRET: ${{ steps.auth.outputs.cf_access_client_secret }}
+          OPENCODE_DISABLE_PROJECT_CONFIG: "1"
+          OPENCODE_PURE: "1"
+        with:
+          consumer-workspace: ${{ github.workspace }}/consumer
+          control-plane-root: ${{ github.workspace }}/control-plane
+          repository: ${{ inputs.consumer_repository }}
+          pr-number: ${{ inputs.pull_request_number }}
+          head-sha: ${{ inputs.head_sha }}
+          base-ref: ${{ inputs.base_ref }}
+          consumer-ref: ${{ inputs.consumer_ref }}
+          changed-files: ${{ github.workspace }}/consumer/.omo/ci/changed-files.txt
+          trusted-status: ${{ steps.trusted.outputs.status_path }}
+          trusted-controller-outcome: ${{ steps.trusted.outcome }}
+          trusted-controller-status: ${{ steps.trusted.outputs.status }}
+          trusted-controller-action: ${{ steps.trusted.outputs.action }}
+          model-execution-allowed: ${{ steps.trusted.outputs.model_execution_allowed }}
+          write-allowed: ${{ steps.trusted.outputs.write_allowed }}
+          commit-allowed: ${{ steps.trusted.outputs.commit_allowed }}
+          push-allowed: ${{ steps.trusted.outputs.push_allowed }}
+          github-mutation-allowed: ${{ steps.trusted.outputs.github_mutation_allowed }}
