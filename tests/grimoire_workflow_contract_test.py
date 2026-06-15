@@ -263,6 +263,19 @@ def assert_opencode_provider_headers(repo_root: Path) -> None:
         payload = json.loads(read_text(config_path))
     except json.JSONDecodeError as exc:
         raise ContractError(f"invalid OpenCode config JSON: {config_path}: {exc}") from exc
+    forbidden_metadata = {
+        "grimoire_policy",
+        "controller_owned",
+        "consumer_pr_head_config_trusted",
+        "runtime_simulation_inputs_allowed",
+        "credential_source",
+        "privileged_github_auth",
+    }
+    present_metadata = sorted(forbidden_metadata & set(payload))
+    require(not present_metadata, "OpenCode runtime config must not contain controller policy metadata: " + ", ".join(present_metadata))
+    allowed_runtime_keys = {"$schema", "model", "small_model", "share", "autoupdate", "default_agent", "plugin", "provider", "agent"}
+    extra_keys = sorted(set(payload) - allowed_runtime_keys)
+    require(not extra_keys, "OpenCode runtime config contains schema-unsafe top-level keys: " + ", ".join(extra_keys))
     try:
         options = payload["provider"]["ai-relay"]["options"]
     except (KeyError, TypeError) as exc:
