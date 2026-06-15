@@ -12,7 +12,6 @@ import tempfile
 from datetime import datetime, timezone
 
 STAGE = "grimoire-self-smoke"
-TEMP_ROOT = pathlib.Path("/var/folders/vz/hx33c759727ftq88cxbgp8r40000gn/T/opencode")
 
 PROPOSAL = """# Change: Grimoire Push Smoke
 
@@ -142,13 +141,22 @@ def helper(root: pathlib.Path, stage: str, name: str) -> pathlib.Path:
     return path
 
 
+def default_artifact_root() -> pathlib.Path:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if runner_temp:
+        root = pathlib.Path(runner_temp)
+        root.mkdir(parents=True, exist_ok=True)
+        return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-", dir=str(root)))
+    return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-"))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the real-opencode Grimoire self-smoke without external push.")
     parser.add_argument("--control-plane-root", default=".")
     parser.add_argument("--artifact-root", default="")
     args = parser.parse_args(argv)
     root = pathlib.Path(args.control_plane_root).resolve()
-    artifact_root = pathlib.Path(args.artifact_root).resolve() if args.artifact_root else pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-", dir=str(TEMP_ROOT)))
+    artifact_root = pathlib.Path(args.artifact_root).resolve() if args.artifact_root else default_artifact_root()
     if artifact_root.exists():
         shutil.rmtree(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
