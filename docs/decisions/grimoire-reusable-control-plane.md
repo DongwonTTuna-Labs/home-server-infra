@@ -103,7 +103,7 @@ The scope authority is OpenSpec plus OMO. The priority order is:
 
 ## Runtime Policy
 
-There is no runtime simulation input, no dry-run toggle, and no separate manual Grimoire workflow in the reusable control plane. Safety comes from the pull request event gate, the `LGTM` stop label, the trusted-controller protected-path guard, the fix scope guard, and the F1-F4 verification gate.
+There is no runtime simulation input, no dry-run toggle, and no separate manual Grimoire workflow in the reusable control plane. Safety comes from the pull request event gate, the `grimoire:disabled` stop label, the trusted-controller protected-path guard, the fix scope guard, and the F1-F4 verification gate.
 
 Local tests and fixtures prove behavior before rollout. Live cross-repo evidence is a later task after the infra PR is merged and private reusable workflow access is enabled by a maintainer.
 

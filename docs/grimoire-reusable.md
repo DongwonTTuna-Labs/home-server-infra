@@ -118,7 +118,7 @@ permissions: {}
 
 jobs:
   grimoire:
-    if: ${{ github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, 'LGTM') }}
+    if: ${{ github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, 'grimoire:disabled') }}
     uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main
     with:
       consumer_repository: ${{ github.repository }}
@@ -138,7 +138,7 @@ Required caller behavior:
 
 1. Use only the `pull_request` event with types `[opened, ready_for_review, synchronize, reopened]`.
 2. Keep top-level `permissions: {}` in the consumer caller.
-3. Keep the job-level guard for non-draft PRs and the absence of the `LGTM` stop label.
+3. Keep the job-level guard for non-draft PRs and the absence of the `grimoire:disabled` stop label.
 4. Call `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`.
 5. Pass `consumer_repository`, `consumer_ref`, `pull_request_number`, `head_sha`, and `base_ref` from GitHub pull request metadata.
 6. Map named secrets explicitly. Don't use `secrets: inherit`.
@@ -181,7 +181,7 @@ The reusable workflow keeps top-level `permissions: {}` and grants only explicit
 
 ### Stop And Rollback Signals
 
-To stop Grimoire on a PR, add the `LGTM` label. The consumer job guard skips PRs with that label.
+To stop Grimoire on a PR, add the `grimoire:disabled` label. The consumer job guard skips PRs with that label.
 
 To roll back a consumer repository to no Grimoire automation, remove the thin caller workflow from that consumer repo. Don't change the reusable control plane for a per-consumer stop.
 
@@ -279,8 +279,8 @@ The loop must not fix out-of-scope findings. It must not use private log excerpt
 There is no runtime simulation input and no separate manual Grimoire workflow. The loop is always-on for eligible pull requests and is controlled by:
 
 1. Pull request trigger types `[opened, ready_for_review, synchronize, reopened]`
-2. Job-level Ready-only and non-`LGTM` gate
-3. `LGTM` stop label
+2. Job-level Ready-only and non-`grimoire:disabled` gate
+3. `grimoire:disabled` stop label
 4. Trusted-controller protected-path guard
 5. OpenSpec and OMO scope guard
 6. F1-F4 verification gate
