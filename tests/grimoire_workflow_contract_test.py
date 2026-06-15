@@ -161,10 +161,10 @@ def assert_runner_and_checkouts(text: str) -> None:
     require("labels: dongwontuna-labs-runner" in text, "workflow must target the dongwontuna-labs-runner label")
     require(not re.search(r"\b(?:ubuntu|macos|windows)-latest\b", text), "GitHub-hosted runner fallback is forbidden")
 
-    require(text.count("uses: actions/checkout@v4") == 2, "workflow must have exactly two explicit checkout steps")
+    require(text.count("uses: actions/checkout@v6") == 2, "workflow must have exactly two explicit checkout steps")
     control = step_block(text, "Checkout trusted control plane")
     for snippet in (
-        "uses: actions/checkout@v4",
+        "uses: actions/checkout@v6",
         "repository: DongwonTTuna-Labs/home-server-infra",
         "ref: main",
         "token: ${{ steps.auth.outputs.github_pat }}",
@@ -174,7 +174,7 @@ def assert_runner_and_checkouts(text: str) -> None:
         require(snippet in control, f"control-plane checkout missing {snippet}")
     consumer = step_block(text, "Checkout consumer repository as data")
     for snippet in (
-        "uses: actions/checkout@v4",
+        "uses: actions/checkout@v6",
         "repository: ${{ inputs.consumer_repository }}",
         "ref: ${{ inputs.head_sha }}",
         "token: ${{ steps.auth.outputs.github_pat }}",
