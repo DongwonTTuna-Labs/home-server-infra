@@ -72,6 +72,84 @@ def run_helper(script: Path, args: list[str], expected: set[int], env: dict[str,
     return result
 
 
+def write_executable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def live_review_env(workspace: Path, opencode_script: str | None) -> dict[str, str]:
+    bin_dir = rel_path(workspace, "runtime-bin")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_link = bin_dir / "python3"
+    if not python_link.exists():
+        python_link.symlink_to(sys.executable)
+    if opencode_script is not None:
+        write_executable(bin_dir / "opencode", opencode_script)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": str(bin_dir),
+            "AI_RELAY_API_KEY": "relay-fixture",
+            "CF_ACCESS_CLIENT_ID": "cf-id-fixture",
+            "CF_ACCESS_CLIENT_SECRET": "cf-secret-fixture",
+        }
+    )
+    return env
+
+
+def opencode_setup_env(workspace: Path, name: str, npm_script: str | None, opencode_script: str | None = None) -> dict[str, str]:
+    bin_dir = rel_path(workspace, f"setup-bin-{name}")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_link = bin_dir / "python3"
+    if not python_link.exists():
+        python_link.symlink_to(sys.executable)
+    if npm_script is not None:
+        write_executable(bin_dir / "npm", npm_script)
+    if opencode_script is not None:
+        write_executable(bin_dir / "opencode", opencode_script)
+    runner_temp = rel_path(workspace, f"runner-temp-{name}")
+    runner_temp.mkdir(parents=True, exist_ok=True)
+    github_output = rel_path(workspace, f".omo/ci/setup-opencode-{name}.out")
+    github_path = rel_path(workspace, f".omo/ci/setup-opencode-{name}.path")
+    github_output.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": str(bin_dir) + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(github_output),
+            "GITHUB_PATH": str(github_path),
+        }
+    )
+    return env
+
+
+def setup_output_paths(env: dict[str, str]) -> tuple[Path, Path]:
+    return Path(env["GITHUB_OUTPUT"]), Path(env["GITHUB_PATH"])
+
+
+
+def run_live_review_case(script: Path, workspace: Path, name: str, env: dict[str, str], expected: set[int]) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], str]:
+    output = f".omo/ci/review-{name}.json"
+    github_output_path = rel_path(workspace, f".omo/ci/review-{name}.out")
+    result = run_helper(script, ["--consumer-workspace", str(workspace), "--output", output, "--github-output", str(github_output_path)], expected, env=env)
+    payload = read_json(workspace, output)
+    github_text = github_output_path.read_text(encoding="utf-8")
+    return result, payload, github_text
+
+
+def assert_blocked_category(result: subprocess.CompletedProcess[str], payload: dict[str, Any], github_output: str, category: str) -> None:
+    require(payload["status"] == "blocked", f"live review must block with {category}")
+    require(payload.get("blocked_reason_category") == category, f"blocked payload must expose sanitized category {category}")
+    require(category in result.stdout, f"review summary must expose sanitized category {category}")
+    require(f"blocked_reason_category={category}" in github_output, f"GitHub output must expose sanitized category {category}")
+    serialized = json.dumps(payload, sort_keys=True) + result.stdout + result.stderr + github_output
+    forbidden = ("RAW_COMMAND_STDOUT_SENTINEL", "RAW_COMMAND_STDERR_SENTINEL")
+    for marker in forbidden:
+        require(marker not in serialized, f"blocked diagnostics leaked raw command output marker {marker}")
+
+
 def finding(title: str, path: str = "src/lib.rs", *, out_of_scope: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "file": path,
@@ -165,6 +243,91 @@ def write_verdict(workspace: Path, relative: str, approved: bool) -> Path:
     )
 
 
+def assert_setup_opencode(actions_root: Path, workspace: Path) -> None:
+    script = helper(actions_root, "cast", "setup_opencode.py")
+    existing_env = opencode_setup_env(
+        workspace,
+        "existing",
+        None,
+        """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'opencode 1.17.7-existing-fixture'
+  exit 0
+fi
+exit 2
+""",
+    )
+    existing_result = run_helper(script, [], {0}, env=existing_env)
+    existing_output, existing_path = setup_output_paths(existing_env)
+    require("source=existing" in existing_result.stdout, "setup-opencode must accept an already valid opencode runtime")
+    require("status=ok" in existing_output.read_text(encoding="utf-8"), "setup-opencode existing path must emit ok status")
+    require(not existing_path.exists() or existing_path.read_text(encoding="utf-8") == "", "setup-opencode must not rewrite PATH for existing runtime")
+
+    installing_npm = """#!/bin/sh
+prefix=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--prefix" ]; then
+    shift
+    prefix="$1"
+  fi
+  shift || true
+done
+if [ -z "$prefix" ]; then
+  exit 2
+fi
+mkdir -p "$prefix/bin"
+cat > "$prefix/bin/opencode" <<'OPENCODE_EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'opencode 1.17.7-installed-fixture'
+  exit 0
+fi
+printf '%s\n' '{"status":"approved","findings":[]}'
+OPENCODE_EOF
+chmod 0755 "$prefix/bin/opencode"
+"""
+    broken_existing_env = opencode_setup_env(
+        workspace,
+        "broken-existing",
+        installing_npm,
+        """#!/bin/sh
+printf '%s\n' 'BROKEN_EXISTING_OPENCODE_SENTINEL' >&2
+exit 42
+""",
+    )
+    broken_existing_result = run_helper(script, [], {0}, env=broken_existing_env)
+    broken_existing_output, broken_existing_path = setup_output_paths(broken_existing_env)
+    broken_existing_serialized = broken_existing_result.stdout + broken_existing_result.stderr + broken_existing_output.read_text(encoding="utf-8") + broken_existing_path.read_text(encoding="utf-8")
+    require("source=npm" in broken_existing_result.stdout, "setup-opencode must replace an invalid preinstalled opencode runtime")
+    require("BROKEN_EXISTING_OPENCODE_SENTINEL" not in broken_existing_serialized, "setup-opencode must not leak raw broken runtime diagnostics while replacing it")
+
+    install_env = opencode_setup_env(workspace, "install", installing_npm)
+    install_result = run_helper(script, [], {0}, env=install_env)
+    install_output, install_path = setup_output_paths(install_env)
+    install_output_text = install_output.read_text(encoding="utf-8")
+    install_path_text = install_path.read_text(encoding="utf-8")
+    require("source=npm" in install_result.stdout, "setup-opencode must provision opencode through npm when missing")
+    require("package=opencode-ai" in install_output_text, "setup-opencode must identify the trusted npm package")
+    require("package_version=1.17.7" in install_output_text, "setup-opencode must pin the opencode npm package version")
+    require("grimoire-opencode-runtime/opencode-ai@1.17.7/bin" in install_path_text, "setup-opencode must add the provisioned opencode bin directory to later workflow steps")
+
+    failing_npm = """#!/bin/sh
+printf '%s\n' 'RAW_COMMAND_STDOUT_SENTINEL'
+printf '%s\n' 'RAW_COMMAND_STDERR_SENTINEL' >&2
+exit 42
+"""
+    failure_env = opencode_setup_env(workspace, "npm-failure", failing_npm)
+    failure_result = run_helper(script, [], {1}, env=failure_env)
+    failure_output, failure_path = setup_output_paths(failure_env)
+    serialized = failure_result.stdout + failure_result.stderr + failure_output.read_text(encoding="utf-8")
+    if failure_path.exists():
+        serialized += failure_path.read_text(encoding="utf-8")
+    require("runtime-failed:opencode-install-failed" in serialized, "setup-opencode must categorize npm installation failure")
+    for marker in ("RAW_COMMAND_STDOUT_SENTINEL", "RAW_COMMAND_STDERR_SENTINEL"):
+        require(marker not in serialized, f"setup-opencode leaked raw installer output marker {marker}")
+
+
+
 def assert_review(actions_root: Path, workspace: Path) -> None:
     script = helper(actions_root, "review", "review.py")
     run_helper(script, ["--consumer-workspace", str(workspace), "--output", ".omo/ci/review-clean.json", "--fixture", "clean"], {0})
@@ -183,6 +346,36 @@ def assert_review(actions_root: Path, workspace: Path) -> None:
     defect = read_json(workspace, ".omo/ci/review-defect.json")
     require(defect["status"] == "findings" and defect["findings_count"] == 1, "defect review fixture must emit one finding")
     require(defect["read_only"] is True and defect["mutation_allowed"] is False, "defect review must still be read-only")
+
+
+def assert_live_review_diagnostics(actions_root: Path, workspace: Path) -> None:
+    script = helper(actions_root, "review", "review.py")
+    missing_result, missing_payload, missing_output = run_live_review_case(script, workspace, "missing-opencode", live_review_env(workspace, None), {1})
+    assert_blocked_category(missing_result, missing_payload, missing_output, "missing-runtime:opencode-unavailable")
+
+    failing_opencode = """#!/bin/sh
+printf '%s\n' 'RAW_COMMAND_STDOUT_SENTINEL'
+printf '%s\n' 'RAW_COMMAND_STDERR_SENTINEL' >&2
+exit 42
+"""
+    failure_result, failure_payload, failure_output = run_live_review_case(script, workspace, "opencode-failed", live_review_env(workspace, failing_opencode), {1})
+    assert_blocked_category(failure_result, failure_payload, failure_output, "runtime-failed:opencode-command-failed")
+
+    invalid_json_opencode = """#!/bin/sh
+printf '%s\n' 'not-json-from-opencode'
+"""
+    invalid_result, invalid_payload, invalid_output = run_live_review_case(script, workspace, "invalid-json", live_review_env(workspace, invalid_json_opencode), {1})
+    assert_blocked_category(invalid_result, invalid_payload, invalid_output, "contract-invalid:review-json-invalid")
+
+    approved_opencode = """#!/bin/sh
+printf '%s\n' '{"status":"approved","findings":[]}'
+"""
+    approved_result, approved_payload, approved_output = run_live_review_case(script, workspace, "approved-empty", live_review_env(workspace, approved_opencode), {0})
+    require(approved_payload["status"] == "approved", "live empty findings must approve")
+    require(approved_payload["findings_count"] == 0, "live empty findings must keep zero finding count")
+    require("blocked_reason_category" not in approved_payload, "approved live review must not emit a blocked category")
+    require("status=approved findings=0" in approved_result.stdout, "approved summary must show empty-finding approval")
+    require("status=approved" in approved_output, "GitHub output must expose approved status")
 
 
 def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
@@ -521,12 +714,19 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
 
 def assert_stage_contract(actions_root: Path) -> None:
     workspace = make_workspace("stage-contract")
+    assert_setup_opencode(actions_root, workspace)
     assert_review(actions_root, workspace)
+    assert_live_review_diagnostics(actions_root, workspace)
     assert_design_and_issues(actions_root, workspace)
     assert_spec_gap(actions_root, workspace)
     clear_fix, fixed_fix = assert_fix(actions_root, workspace)
     approve_verdict = assert_verify(actions_root, workspace)
     assert_cast(actions_root, workspace, clear_fix, fixed_fix, approve_verdict)
+
+
+def test_grimoire_stage_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert_stage_contract(repo_root / "actions" / "grimoire")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

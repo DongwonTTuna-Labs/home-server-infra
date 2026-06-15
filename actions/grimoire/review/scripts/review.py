@@ -136,10 +136,12 @@ def scan_fixture(path: pathlib.Path) -> list[dict[str, object]]:
     return findings
 
 
-def blocked_payload(reasons: list[str]) -> dict[str, object]:
+def blocked_payload(reasons: list[str], category: str = "") -> dict[str, object]:
     payload = base_payload("blocked", "GRIMOIRE_REVIEW_BLOCKED", [], "live")
     payload["blocked_reason"] = "; ".join(reasons)
     payload["blockers"] = reasons
+    if category:
+        payload["blocked_reason_category"] = category
     payload["real_mode_attempted"] = True
     return payload
 
@@ -248,10 +250,12 @@ def run_live_review(workspace: pathlib.Path, output: pathlib.Path, root: pathlib
     if not omo_config.is_file():
         blockers.append(f"controller-owned OMO config missing: {omo_config}")
     opencode_path = shutil.which("opencode")
+    blocked_category = ""
     if opencode_path is None:
-        blockers.append("opencode executable is not available on the runner")
+        blockers.append("opencode executable is not available on PATH")
+        blocked_category = "missing-runtime:opencode-unavailable"
     if blockers:
-        return blocked_payload(blockers), 1
+        return blocked_payload(blockers, blocked_category), 1
     assert opencode_path is not None
 
     prompt_path = resolve_path(".omo/ci/review-live-prompt.md", workspace)
@@ -275,11 +279,11 @@ def run_live_review(workspace: pathlib.Path, output: pathlib.Path, root: pathlib
     ]
     completed = subprocess.run(command, cwd=str(workspace), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800, check=False)
     if completed.returncode != 0:
-        return blocked_payload(["opencode review command failed before producing a valid review artifact"]), 1
+        return blocked_payload(["opencode review command failed before producing a valid review artifact"], "runtime-failed:opencode-command-failed"), 1
     try:
         payload = normalize_live_payload(extract_json(completed.stdout))
-    except ContractError as exc:
-        return blocked_payload([str(exc)]), 1
+    except ContractError:
+        return blocked_payload(["opencode review output did not satisfy the review JSON contract"], "contract-invalid:review-json-invalid"), 1
     payload["prompt_path"] = rel(prompt_path, workspace)
     payload["controller_config"] = rel(opencode_config, root)
     payload["consumer_pr_head_config_trusted"] = False
@@ -315,18 +319,20 @@ def run(args: argparse.Namespace) -> int:
         payload, exit_code = run_live_review(workspace, output, control_plane_root(args.control_plane_root))
 
     write_json(output, payload)
-    write_github_output(
-        args.github_output,
-        {
-            "status": payload["status"],
-            "approval_signal": payload["approval_signal"],
-            "read_only": True,
-            "mutation_allowed": False,
-            "findings_count": payload["findings_count"],
-            "output_path": str(output),
-        },
-    )
-    print(f"{STAGE}: status={payload['status']} findings={payload['findings_count']} output={output}")
+    outputs = {
+        "status": payload["status"],
+        "approval_signal": payload["approval_signal"],
+        "read_only": True,
+        "mutation_allowed": False,
+        "findings_count": payload["findings_count"],
+        "output_path": str(output),
+    }
+    blocked_reason_category = payload.get("blocked_reason_category")
+    if isinstance(blocked_reason_category, str) and blocked_reason_category:
+        outputs["blocked_reason_category"] = blocked_reason_category
+    write_github_output(args.github_output, outputs)
+    reason = f" reason={blocked_reason_category}" if isinstance(blocked_reason_category, str) and blocked_reason_category else ""
+    print(f"{STAGE}: status={payload['status']} findings={payload['findings_count']}{reason} output={output}")
     return exit_code
 
 
