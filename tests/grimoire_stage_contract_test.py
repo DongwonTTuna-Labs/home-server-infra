@@ -361,11 +361,66 @@ exit 42
     failure_result, failure_payload, failure_output = run_live_review_case(script, workspace, "opencode-failed", live_review_env(workspace, failing_opencode), {1})
     assert_blocked_category(failure_result, failure_payload, failure_output, "runtime-failed:opencode-command-failed")
 
-    invalid_json_opencode = """#!/bin/sh
-printf '%s\n' 'not-json-from-opencode'
+    invalid_json_opencode = """#!/usr/bin/env python3
+import json
+import sys
+print(json.dumps({"type":"text","timestamp":1,"sessionID":"s","part":{"type":"text","text":"RAW_COMMAND_STDOUT_SENTINEL","time":{"end":1}}}))
+print("RAW_COMMAND_STDERR_SENTINEL", file=sys.stderr)
 """
     invalid_result, invalid_payload, invalid_output = run_live_review_case(script, workspace, "invalid-json", live_review_env(workspace, invalid_json_opencode), {1})
     assert_blocked_category(invalid_result, invalid_payload, invalid_output, "contract-invalid:review-json-invalid")
+
+    jsonl_approved_opencode = """#!/usr/bin/env python3
+import json
+print(json.dumps({"type":"step_start","timestamp":1,"sessionID":"s","part":{"type":"step-start"}}))
+print(json.dumps({"type":"text","timestamp":2,"sessionID":"s","part":{"type":"text","text":json.dumps({"status":"approved","findings":[]}),"time":{"end":2}}}))
+print(json.dumps({"type":"step_finish","timestamp":3,"sessionID":"s","part":{"type":"step-finish"}}))
+"""
+    jsonl_approved_result, jsonl_approved_payload, jsonl_approved_output = run_live_review_case(script, workspace, "jsonl-approved", live_review_env(workspace, jsonl_approved_opencode), {0})
+    require(jsonl_approved_payload["status"] == "approved", "OpenCode JSONL text event with empty findings must approve")
+    require(jsonl_approved_payload["findings_count"] == 0, "OpenCode JSONL approved event must keep zero findings")
+    require("status=approved findings=0" in jsonl_approved_result.stdout, "OpenCode JSONL approved summary must show approval")
+    require("status=approved" in jsonl_approved_output, "OpenCode JSONL approved GitHub output must expose approved status")
+
+    jsonl_findings_opencode = """#!/usr/bin/env python3
+import json
+finding = {
+  "file":"src/lib.rs",
+  "line":7,
+  "severity":"medium",
+  "lens":"correctness",
+  "title":"OpenCode JSONL finding",
+  "what":"The OpenCode JSONL fixture emitted a review finding.",
+  "why":"The parser must normalize assistant text events into Grimoire review artifacts.",
+  "suggested_fix":"Parse the final assistant text event conservatively.",
+  "evidence":"src/lib.rs:7 deterministic JSONL fixture evidence"
+}
+print(json.dumps({"type":"text","timestamp":2,"sessionID":"s","part":{"type":"text","text":json.dumps({"status":"findings","findings":[finding]}),"time":{"end":2}}}))
+"""
+    jsonl_findings_result, jsonl_findings_payload, jsonl_findings_output = run_live_review_case(script, workspace, "jsonl-findings", live_review_env(workspace, jsonl_findings_opencode), {0})
+    require(jsonl_findings_payload["status"] == "findings", "OpenCode JSONL text event with findings must emit findings status")
+    require(jsonl_findings_payload["findings_count"] == 1, "OpenCode JSONL findings event must preserve one finding")
+    require("status=findings findings=1" in jsonl_findings_result.stdout, "OpenCode JSONL findings summary must show one finding")
+    require("findings_count=1" in jsonl_findings_output, "OpenCode JSONL findings GitHub output must expose finding count")
+
+    ambiguous_jsonl_opencode = """#!/usr/bin/env python3
+import json
+finding = {
+  "file":"src/lib.rs",
+  "line":7,
+  "severity":"medium",
+  "lens":"correctness",
+  "title":"Ambiguous JSONL finding",
+  "what":"The fixture emitted a second distinct review payload.",
+  "why":"Multiple distinct review payloads must fail closed.",
+  "suggested_fix":"Emit exactly one final review JSON payload.",
+  "evidence":"src/lib.rs:7 deterministic ambiguous fixture evidence"
+}
+print(json.dumps({"type":"text","timestamp":1,"sessionID":"s","part":{"type":"text","text":json.dumps({"status":"approved","findings":[]}),"time":{"end":1}}}))
+print(json.dumps({"type":"text","timestamp":2,"sessionID":"s","part":{"type":"text","text":json.dumps({"status":"findings","findings":[finding]}),"time":{"end":2}}}))
+"""
+    ambiguous_result, ambiguous_payload, ambiguous_output = run_live_review_case(script, workspace, "jsonl-ambiguous", live_review_env(workspace, ambiguous_jsonl_opencode), {1})
+    assert_blocked_category(ambiguous_result, ambiguous_payload, ambiguous_output, "contract-invalid:review-json-invalid")
 
     approved_opencode = """#!/bin/sh
 python3 - "$OPENCODE_CONFIG" <<'PY'
