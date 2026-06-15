@@ -115,20 +115,23 @@ def cited_paths(spec_sufficiency: dict[str, object]) -> list[str]:
     return paths
 
 
-def spec_target_paths(spec_sufficiency: dict[str, object]) -> tuple[list[str], list[str]]:
+def allowed_write_paths(spec_sufficiency: dict[str, object]) -> tuple[list[str], list[str]]:
     paths: list[str] = []
     invalid: list[str] = []
     seen: set[str] = set()
     values: list[object] = []
-    top_level = spec_sufficiency.get("target_paths")
+    top_level = spec_sufficiency.get("allowed_write_paths")
     if isinstance(top_level, list):
         values.extend(top_level)
+    legacy_top_level = spec_sufficiency.get("target_paths")
+    if isinstance(legacy_top_level, list):
+        values.extend(legacy_top_level)
     bindings_raw = spec_sufficiency.get("bindings")
     if isinstance(bindings_raw, list):
         for binding in bindings_raw:
             if not isinstance(binding, dict):
                 continue
-            for key in ("target_path", "target_paths", "allowed_path", "allowed_paths"):
+            for key in ("allowed_write_path", "allowed_write_paths", "target_path", "target_paths", "allowed_path", "allowed_paths"):
                 value = binding.get(key)
                 if isinstance(value, list):
                     values.extend(value)
@@ -342,8 +345,8 @@ def run(args: argparse.Namespace) -> int:
             direct_extra, invalid_extra_files = read_list(args.direct_extra, workspace)
             invalid_direct = sorted(path for path in direct_extra if not direct_extra_allowed(path))
             cited = cited_paths(spec)
-            spec_targets, invalid_spec_targets = spec_target_paths(spec)
-            allowed = sorted(set(pr_touched + direct_extra + cited + spec_targets))
+            write_targets, invalid_write_targets = allowed_write_paths(spec)
+            allowed = sorted(set(pr_touched + direct_extra + cited + write_targets))
             live_fix_attempted = False
             if args.changed_files:
                 changed, invalid_changed = read_list(args.changed_files, workspace)
@@ -356,7 +359,7 @@ def run(args: argparse.Namespace) -> int:
                 changed = []
                 invalid_changed = []
             violations = sorted(path for path in changed if path not in set(allowed))
-            scope_ok = not invalid_pr and not invalid_extra_files and not invalid_changed and not invalid_direct and not invalid_spec_targets and not violations
+            scope_ok = not invalid_pr and not invalid_extra_files and not invalid_changed and not invalid_direct and not invalid_write_targets and not violations
             status = "clear-noop" if not changed and scope_ok else "fixed" if scope_ok else "scope-violation"
             payload: dict[str, object] = {
                 "schema_version": 1,
@@ -373,14 +376,16 @@ def run(args: argparse.Namespace) -> int:
                 "pr_touched_paths": pr_touched,
                 "direct_extra_paths": direct_extra,
                 "cited_openspec_paths": cited,
-                "spec_target_paths": spec_targets,
+                "spec_target_paths": write_targets,
+                "allowed_write_paths": write_targets,
                 "allowed_paths": allowed,
                 "violations": violations,
                 "invalid_pr_touched_inputs": invalid_pr,
                 "invalid_direct_extra_inputs": invalid_extra_files,
                 "invalid_changed_inputs": invalid_changed,
                 "invalid_direct_extras": invalid_direct,
-                "invalid_spec_target_paths": invalid_spec_targets,
+                "invalid_spec_target_paths": invalid_write_targets,
+                "invalid_allowed_write_paths": invalid_write_targets,
                 "live_fix_attempted": live_fix_attempted,
                 "post_fix_detection": "git status --porcelain excluding .omo/** runtime artifacts" if live_fix_attempted else "changed-files input" if args.changed_files else "no in-scope work",
                 "output_path": rel(output, workspace),
