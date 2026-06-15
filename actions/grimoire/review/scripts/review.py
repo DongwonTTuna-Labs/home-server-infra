@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Any
+from typing import cast
 
 STAGE = "grimoire-review"
 LENSES = ["security", "correctness", "maintainability", "repo-policy"]
@@ -146,7 +146,22 @@ def blocked_payload(reasons: list[str], category: str = "") -> dict[str, object]
     return payload
 
 
-def extract_json(text: str) -> dict[str, object]:
+def _review_payload_key(payload: dict[str, object]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _choose_review_payload(payloads: list[dict[str, object]]) -> dict[str, object] | None:
+    if not payloads:
+        return None
+    unique: dict[str, dict[str, object]] = {}
+    for payload in payloads:
+        unique[_review_payload_key(payload)] = payload
+    if len(unique) > 1:
+        raise ContractError("live review output contained multiple distinct review JSON payloads")
+    return payloads[-1]
+
+
+def _review_payload_from_text(text: str) -> dict[str, object] | None:
     candidates = [text.strip()]
     for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE):
         candidates.append(match.group(1))
@@ -154,36 +169,99 @@ def extract_json(text: str) -> dict[str, object]:
     last = text.rfind("}")
     if first != -1 and last > first:
         candidates.append(text[first : last + 1])
+    payloads: list[dict[str, object]] = []
     for candidate in candidates:
         if not candidate:
             continue
         try:
-            loaded = json.loads(candidate)
+            loaded: object = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(loaded, dict):
-            if isinstance(loaded.get("findings"), list) or isinstance(loaded.get("message"), str):
-                message = loaded.get("message")
-                if isinstance(message, str) and "findings" not in loaded:
-                    try:
-                        nested = json.loads(message)
-                    except json.JSONDecodeError:
-                        nested = None
-                    if isinstance(nested, dict):
-                        return nested
-                return loaded
-        if isinstance(loaded, list):
-            for item in reversed(loaded):
-                if isinstance(item, dict):
-                    content = item.get("message") or item.get("content") or item.get("text")
-                    if isinstance(content, str):
-                        try:
-                            nested = json.loads(content)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(nested, dict):
-                            return nested
-    raise ContractError("live review output did not contain schema-valid JSON")
+        payload = _review_payload_from_value(cast(dict[str, object], loaded))
+        if payload is not None:
+            payloads.append(payload)
+    return _choose_review_payload(payloads)
+
+
+def _review_payload_from_content(value: object) -> dict[str, object] | None:
+    if isinstance(value, str):
+        return _review_payload_from_text(value)
+    if isinstance(value, list):
+        payloads: list[dict[str, object]] = []
+        for item in cast(list[object], value):
+            payload = _review_payload_from_value(item)
+            if payload is not None:
+                payloads.append(payload)
+        return _choose_review_payload(payloads)
+    if isinstance(value, dict):
+        return _review_payload_from_value(value)
+    return None
+
+
+def _review_payload_from_value(value: object) -> dict[str, object] | None:
+    if isinstance(value, list):
+        payloads: list[dict[str, object]] = []
+        for item in cast(list[object], value):
+            payload = _review_payload_from_value(item)
+            if payload is not None:
+                payloads.append(payload)
+        return _choose_review_payload(payloads)
+    if not isinstance(value, dict):
+        return None
+    payload = cast(dict[str, object], value)
+    status = payload.get("status")
+    if isinstance(payload.get("findings"), list) or status in {"approved", "findings"}:
+        return dict(payload)
+    for key in ("message", "content", "text"):
+        payload_from_key = _review_payload_from_content(payload.get(key))
+        if payload_from_key is not None:
+            return payload_from_key
+    part = payload.get("part")
+    if isinstance(part, dict):
+        part_payload = cast(dict[str, object], part)
+        if payload.get("type") == "text" or part_payload.get("type") == "text":
+            return _review_payload_from_value(part_payload)
+    properties = payload.get("properties")
+    if isinstance(properties, dict):
+        properties_payload = cast(dict[str, object], properties)
+        info = properties_payload.get("info")
+        role = cast(dict[str, object], info).get("role") if isinstance(info, dict) else None
+        if role == "assistant":
+            for key in ("message", "content", "text", "part"):
+                payload_from_key = _review_payload_from_content(properties_payload.get(key))
+                if payload_from_key is not None:
+                    return payload_from_key
+    return None
+
+
+def _review_payloads_from_jsonl(text: str) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            loaded: object = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(loaded, dict) or "type" not in loaded:
+            continue
+        payload = _review_payload_from_value(loaded)
+        if payload is not None:
+            payloads.append(payload)
+    return payloads
+
+
+def extract_json(text: str) -> dict[str, object]:
+    payloads: list[dict[str, object]] = []
+    direct = _review_payload_from_text(text)
+    if direct is not None:
+        payloads.append(direct)
+    payloads.extend(_review_payloads_from_jsonl(text))
+    payload = _choose_review_payload(payloads)
+    if payload is None:
+        raise ContractError("live review output did not contain schema-valid JSON")
+    return payload
 
 
 def normalize_live_payload(raw: dict[str, object]) -> dict[str, object]:
