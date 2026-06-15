@@ -26,7 +26,7 @@ REQUIRED_INPUTS: dict[str, set[str]] = {
     "spec-gap": {"consumer-workspace", "input-path", "comment-path", "status-path"},
     "fix": {"consumer-workspace", "control-plane-root", "spec-sufficiency", "spec-gap-status", "pr-touched", "direct-extra", "changed-files", "output-path", "handoff-path"},
     "verify": {"consumer-workspace", "spec-sufficiency", "spec-gap-status", "fix-status", "output-path"},
-    "labels": {"consumer-workspace", "transition", "state-file", "state-output", "status-path", "repository", "pr-number"},
+    "labels": {"consumer-workspace", "transition", "state-file", "state-output", "status-path", "repository", "pr-number", "remote-apply", "token", "github-api-url"},
     "cast": {
         "consumer-workspace",
         "control-plane-root",
@@ -58,7 +58,7 @@ REQUIRED_OUTPUTS: dict[str, set[str]] = {
     "spec-gap": {"status", "should_comment", "should_halt", "comment_path", "status_path"},
     "fix": {"status", "scope_ok", "noop", "should_commit", "should_push", "output_path", "handoff_path"},
     "verify": {"approved", "output_path", "jq_predicate"},
-    "labels": {"changed", "operation_count", "status_path", "state_output"},
+    "labels": {"changed", "operation_count", "status_path", "state_output", "github_pr_label_mutation_attempted", "remote_apply_status"},
     "cast": {"status", "decision", "terminal", "final_status_path"},
 }
 
