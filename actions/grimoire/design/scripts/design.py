@@ -50,6 +50,38 @@ def norm_component(value: object) -> str:
     return text or "unknown"
 
 
+def normalize_path(raw: object) -> str | None:
+    text = str(raw or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    if not text:
+        return ""
+    if text.startswith("/"):
+        return None
+    normalized = posixpath.normpath(text)
+    if normalized == ".":
+        return ""
+    if ".." in pathlib.PurePosixPath(normalized).parts:
+        return None
+    return normalized
+
+
+def direct_extra_allowed(path: str) -> bool:
+    if path.startswith(("tests/", "docs/", "openspec/", "spec/", "schemas/")):
+        return True
+    name = pathlib.PurePosixPath(path).name
+    return name.endswith(("_test.py", "_test.rs", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+
+
+def append_target_path(raw: object, paths: list[str], seen: set[str]) -> list[str]:
+    normalized = normalize_path(raw)
+    if normalized and direct_extra_allowed(normalized) and normalized not in seen:
+        paths.append(normalized)
+        seen.add(normalized)
+        return [normalized]
+    return []
+
+
 def fingerprint(repo: str, title: str, path: str) -> str:
     material = "|".join((norm_component(repo), norm_component(title), norm_component(path)))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
@@ -210,6 +242,8 @@ def run(args: argparse.Namespace) -> int:
         missing: list[dict[str, object]] = []
         safety_default_gaps: list[dict[str, object]] = []
         citation = spec_citation(spec_files[0], workspace) if spec_files else None
+        target_paths: list[str] = []
+        target_seen: set[str] = set()
         findings = cast(list[dict[str, object]], review["findings"])
         for index, raw_finding in enumerate(findings):
             finding = dict(raw_finding)  # type: ignore[arg-type]
@@ -232,6 +266,9 @@ def run(args: argparse.Namespace) -> int:
                 )
                 continue
             scoped: dict[str, object] = {"finding_index": index, "title": title, "path": path, "location": location, "finding": finding}
+            finding_target_paths = append_target_path(path, target_paths, target_seen)
+            if finding_target_paths:
+                scoped["target_paths"] = finding_target_paths
             in_scope.append(scoped)
             if citation is None:
                 missing_item: dict[str, object] = {
@@ -262,6 +299,7 @@ def run(args: argparse.Namespace) -> int:
                         "citation": f"{citation['path']}:{citation['line']}",
                         "citations": [f"{citation['path']}:{citation['line']}"],
                         "evidence": citation["text"],
+                        "target_paths": finding_target_paths,
                     }
                 )
         spec_sufficient = not missing and not missing_spec_inputs
@@ -286,6 +324,7 @@ def run(args: argparse.Namespace) -> int:
             "out_of_scope_issue_write_only": True,
             "out_of_scope_dedup_key": "repo + normalized title/path sha256",
             "bindings": bindings,
+            "target_paths": target_paths,
             "missing": missing,
             "safety_default_gaps": safety_default_gaps,
             "suggested_spec_patch": suggested_spec_patch,
@@ -322,6 +361,7 @@ def run(args: argparse.Namespace) -> int:
             "in_scope": [],
             "out_of_scope": [],
             "bindings": [],
+            "target_paths": [],
             "missing": [],
             "safety_default_gaps": [],
             "suggested_spec_patch": "",

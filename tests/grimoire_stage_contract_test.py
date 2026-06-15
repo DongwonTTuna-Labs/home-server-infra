@@ -592,6 +592,100 @@ def assert_fix(actions_root: Path, workspace: Path) -> tuple[str, str]:
     require(fixed["status"] == "fixed" and fixed["scope_ok"] is True, "fix must distinguish fixed in-scope changes")
     require(fixed["should_commit"] is True and fixed["should_push"] is True, "fixed status must request later commit and push")
 
+    smoke_spec = rel_path(workspace, "openspec/changes/grimoire-push-smoke/specs/grimoire-push-smoke/spec.md")
+    smoke_spec.parent.mkdir(parents=True, exist_ok=True)
+    smoke_spec.write_text(
+        """## ADDED Requirements
+
+### Requirement: Grimoire push smoke marker
+The repository SHALL contain `docs/GRIMOIRE_PUSH_SMOKE.md` with the exact canonical Markdown content specified in `docs/GRIMOIRE_PUSH_SMOKE.spec.md`.
+
+#### Scenario: Grimoire recreates the missing marker
+- **THEN** Grimoire creates exactly `docs/GRIMOIRE_PUSH_SMOKE.md` with the canonical content from `docs/GRIMOIRE_PUSH_SMOKE.spec.md`
+""",
+        encoding="utf-8",
+    )
+    write_review_artifact(workspace, ".omo/ci/review-smoke.json", [finding("Missing Grimoire push smoke marker", "docs/GRIMOIRE_PUSH_SMOKE.md")])
+    run_helper(
+        design_script,
+        ["--consumer-workspace", str(workspace), "--repository", "local-consumer", "--review-input", ".omo/ci/review-smoke.json", "--output", ".omo/ci/spec-smoke.json", "--plan", ".omo/ci/design-smoke.md"],
+        {0},
+    )
+    smoke_design = read_json(workspace, ".omo/ci/spec-smoke.json")
+    require("docs/GRIMOIRE_PUSH_SMOKE.md" in smoke_design.get("target_paths", []), "design must derive spec-bound docs marker target paths from OpenSpec evidence")
+    rel_path(workspace, "changed-smoke-marker.txt").write_text("docs/GRIMOIRE_PUSH_SMOKE.md\n", encoding="utf-8")
+    run_helper(
+        script,
+        [
+            "--consumer-workspace",
+            str(workspace),
+            "--spec-sufficiency",
+            ".omo/ci/spec-smoke.json",
+            "--spec-gap-status",
+            ".omo/ci/spec-gap-clear.json",
+            "--pr-touched",
+            "pr-touched.txt",
+            "--changed-files",
+            "changed-smoke-marker.txt",
+            "--output",
+            ".omo/ci/fix-smoke-marker.json",
+            "--handoff-output",
+            ".omo/ci/fix-smoke-marker.md",
+        ],
+        {0},
+    )
+    smoke_fix = read_json(workspace, ".omo/ci/fix-smoke-marker.json")
+    require(smoke_fix["status"] == "fixed" and smoke_fix["scope_ok"] is True, "fix must allow a spec-bound docs marker target")
+    require("docs/GRIMOIRE_PUSH_SMOKE.md" in smoke_fix["allowed_paths"], "fix allowed paths must record the spec-bound docs marker")
+    require(smoke_fix["spec_target_paths"] == ["docs/GRIMOIRE_PUSH_SMOKE.md"], "fix must expose normalized spec target paths")
+
+    rel_path(workspace, "changed-smoke-source.txt").write_text("src/unscoped.rs\n", encoding="utf-8")
+    run_helper(
+        script,
+        [
+            "--consumer-workspace",
+            str(workspace),
+            "--spec-sufficiency",
+            ".omo/ci/spec-smoke.json",
+            "--spec-gap-status",
+            ".omo/ci/spec-gap-clear.json",
+            "--pr-touched",
+            "pr-touched.txt",
+            "--changed-files",
+            "changed-smoke-source.txt",
+            "--output",
+            ".omo/ci/fix-smoke-source-violation.json",
+            "--handoff-output",
+            ".omo/ci/fix-smoke-source-violation.md",
+        ],
+        {1},
+    )
+    smoke_source_violation = read_json(workspace, ".omo/ci/fix-smoke-source-violation.json")
+    require(smoke_source_violation["status"] == "scope-violation" and "src/unscoped.rs" in smoke_source_violation["violations"], "spec-bound docs target must not allow arbitrary source edits")
+
+    write_design_artifact(workspace, ".omo/ci/spec-traversal-target.json", sufficient=True, in_scope=[{"path": "docs/authorized.md"}], bindings=[{"target_paths": ["../escape.md", "docs/authorized.md"]}])
+    rel_path(workspace, "changed-authorized-doc.txt").write_text("docs/authorized.md\n", encoding="utf-8")
+    run_helper(
+        script,
+        [
+            "--consumer-workspace",
+            str(workspace),
+            "--spec-sufficiency",
+            ".omo/ci/spec-traversal-target.json",
+            "--spec-gap-status",
+            ".omo/ci/spec-gap-clear.json",
+            "--changed-files",
+            "changed-authorized-doc.txt",
+            "--output",
+            ".omo/ci/fix-traversal-target.json",
+            "--handoff-output",
+            ".omo/ci/fix-traversal-target.md",
+        ],
+        {1},
+    )
+    traversal_target = read_json(workspace, ".omo/ci/fix-traversal-target.json")
+    require(traversal_target["status"] == "scope-violation" and traversal_target["invalid_spec_target_paths"] == ["../escape.md"], "fix must fail closed on traversal in spec target metadata")
+
     rel_path(workspace, "changed-violation.txt").write_text("unscoped/outside.rs\n", encoding="utf-8")
     run_helper(
         script,
