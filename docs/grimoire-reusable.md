@@ -287,7 +287,7 @@ There is no runtime simulation input and no separate manual Grimoire workflow. T
 7. Wall-clock boulder liveness guard
 8. Scoped push filter that excludes `.omo/**`
 
-Local deterministic contract tests provide pre-rollout evidence. A real cross-repo pull request event is a later task after `home-server-infra` is merged and private reusable workflow access is enabled. Task 9 is the first place to claim observed real cross-repo PR-event execution.
+Local deterministic contract tests provide pre-rollout evidence. Before consumer PR-head data is checked out, the trusted control-plane workflow provisions a pinned `opencode-ai` CLI through the controller-owned helper, then validates `opencode --version` before any model stage can run. A real cross-repo pull request event is a later task after `home-server-infra` is merged and private reusable workflow access is enabled. Task 9 is the first place to claim observed real cross-repo PR-event execution.
 
 ## Release Notes
 
