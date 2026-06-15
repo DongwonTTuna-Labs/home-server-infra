@@ -100,6 +100,13 @@ jobs:
           path: control-plane
           persist-credentials: false
 
+      - id: setup-opencode
+        name: Provision opencode runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 control-plane/actions/grimoire/cast/scripts/setup_opencode.py
+
       - name: Checkout consumer repository as data
         uses: actions/checkout@v4
         with:

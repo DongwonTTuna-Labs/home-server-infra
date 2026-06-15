@@ -658,6 +658,29 @@ def workflow_step_block(text: str, name: str) -> str:
     return ""
 
 
+def opencode_runtime_setup_errors(text: str) -> list[str]:
+    errors: list[str] = []
+    setup = workflow_step_block(text, "Provision opencode runtime")
+    if not setup:
+        return ["workflow missing opencode runtime provisioning step: Provision opencode runtime"]
+    setup_index = text.find("name: Provision opencode runtime")
+    preflight_index = text.find("name: Validate opencode runtime")
+    if preflight_index == -1:
+        errors.append("workflow missing opencode runtime preflight step: Validate opencode runtime")
+    elif setup_index > preflight_index:
+        errors.append("workflow opencode runtime provisioning must run before Validate opencode runtime")
+    for snippet in (
+        "id: setup-opencode",
+        "python3 control-plane/actions/grimoire/cast/scripts/setup_opencode.py",
+    ):
+        if snippet not in setup:
+            errors.append(f"workflow opencode runtime provisioning missing required snippet: {snippet}")
+    for snippet in ("pull_request_target", "secrets: inherit", "ubuntu-latest", "secrets.", "steps.auth.outputs", "GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
+        if snippet in setup:
+            errors.append(f"workflow opencode runtime provisioning contains forbidden snippet: {snippet}")
+    return errors
+
+
 def opencode_runtime_preflight_errors(text: str) -> list[str]:
     errors: list[str] = []
     preflight = workflow_step_block(text, "Validate opencode runtime")
@@ -709,6 +732,7 @@ def run_validate_workflow(args: argparse.Namespace) -> int:
     for name in FORBIDDEN_INPUTS:
         if re.search(rf"(?im)^\s{{6,}}{re.escape(name)}\s*:", inputs_text):
             errors.append("Grimoire must not expose runtime toggles")
+    errors.extend(opencode_runtime_setup_errors(text))
     errors.extend(opencode_runtime_preflight_errors(text))
     required_snippets = (
         "permissions: {}",
@@ -732,6 +756,8 @@ def run_validate_workflow(args: argparse.Namespace) -> int:
         "persist-credentials: false",
         "./control-plane/actions/grimoire/trusted-controller",
         "./control-plane/actions/grimoire/cast",
+        "Provision opencode runtime",
+        "control-plane/actions/grimoire/cast/scripts/setup_opencode.py",
         "Settings -> Actions -> General -> Access",
     )
     for snippet in required_snippets:

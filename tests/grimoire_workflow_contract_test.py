@@ -195,6 +195,28 @@ def assert_stage_paths(text: str, repo_root: Path) -> None:
     require("./actions/grimoire" not in text, "bare ./actions/grimoire paths are forbidden")
 
 
+def assert_opencode_runtime_provisioning(text: str, repo_root: Path) -> None:
+    setup = step_block(text, "Provision opencode runtime")
+    setup_index = text.find("name: Provision opencode runtime")
+    trusted_checkout_index = text.find("name: Checkout trusted control plane")
+    consumer_checkout_index = text.find("name: Checkout consumer repository as data")
+    preflight_index = text.find("name: Validate opencode runtime")
+    require(trusted_checkout_index < setup_index < consumer_checkout_index, "opencode runtime provisioning must use the trusted control-plane checkout before consumer PR-head data checkout")
+    require(setup_index < preflight_index, "opencode runtime provisioning must run before opencode validation")
+    required_snippets = (
+        "id: setup-opencode",
+        "python3 control-plane/actions/grimoire/cast/scripts/setup_opencode.py",
+    )
+    for snippet in required_snippets:
+        require(snippet in setup, f"opencode runtime provisioning missing {snippet}")
+    forbidden_snippets = ("secrets.", "steps.auth.outputs", "GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "pull_request_target", "secrets: inherit", "ubuntu-latest")
+    for snippet in forbidden_snippets:
+        require(snippet not in setup, f"opencode runtime provisioning contains forbidden snippet {snippet}")
+    setup_helper = repo_root / "actions" / "grimoire" / "cast" / "scripts" / "setup_opencode.py"
+    require(setup_helper.is_file(), "opencode runtime provisioning helper is missing")
+    require(setup_helper.stat().st_mode & 0o111 != 0, "opencode runtime provisioning helper must be executable")
+
+
 def assert_opencode_runtime_preflight(text: str) -> None:
     preflight = step_block(text, "Validate opencode runtime")
     require(text.find("name: Validate opencode runtime") < text.find("name: Run cast driver"), "opencode runtime validation must run before cast driver")
@@ -256,6 +278,7 @@ def assert_workflow_contract(workflow_path: Path, repo_root: Path) -> None:
     assert_inputs_and_secrets(text)
     assert_runner_and_checkouts(text)
     assert_stage_paths(text, repo_root)
+    assert_opencode_runtime_provisioning(text, repo_root)
     assert_opencode_runtime_preflight(text)
     assert_auth_and_inline_shell(text)
     assert_opencode_provider_headers(repo_root)
@@ -289,6 +312,12 @@ def assert_cast_workflow_validator_contract(workflow_path: Path, repo_root: Path
     require(valid.returncode == 0, f"cast validator rejected valid workflow: stdout={valid.stdout} stderr={valid.stderr}")
 
     target_dir = Path(tempfile.mkdtemp(prefix="grimoire-cast-validator-negative-", dir=str(TEMP_ROOT)))
+    missing_setup = target_dir / "missing-opencode-runtime-provisioning.yml"
+    missing_setup.write_text(remove_step(read_text(workflow_path), "Provision opencode runtime"), encoding="utf-8")
+    missing_setup_result = run_cast_workflow_validator(repo_root, missing_setup)
+    require(missing_setup_result.returncode != 0, "cast validator accepted workflow missing Provision opencode runtime")
+    require("opencode runtime provisioning" in missing_setup_result.stderr, f"cast validator missing clear opencode provisioning error: {missing_setup_result.stderr}")
+
     missing_preflight = target_dir / "missing-opencode-runtime-preflight.yml"
     missing_preflight.write_text(remove_step(read_text(workflow_path), "Validate opencode runtime"), encoding="utf-8")
     invalid = run_cast_workflow_validator(repo_root, missing_preflight)
@@ -334,6 +363,7 @@ def assert_negative_fixtures(workflow_path: Path, repo_root: Path) -> None:
             repo_root,
         ),
         ("evidence-runtime-coupling", lambda text: replace_once(text, "mkdir -p consumer/.omo/ci", "mkdir -p consumer/.omo/ci\n          touch consumer/.omo/evidence/runtime.txt"), repo_root),
+        ("missing-opencode-runtime-provisioning", lambda text: remove_step(text, "Provision opencode runtime"), repo_root),
         ("missing-opencode-runtime-preflight", lambda text: remove_step(text, "Validate opencode runtime"), repo_root),
     ]
     for name, mutate, case_root in cases:
