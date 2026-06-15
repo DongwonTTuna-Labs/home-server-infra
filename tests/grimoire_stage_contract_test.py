@@ -98,6 +98,38 @@ def live_review_env(workspace: Path, opencode_script: str | None) -> dict[str, s
     return env
 
 
+def opencode_setup_env(workspace: Path, name: str, npm_script: str | None, opencode_script: str | None = None) -> dict[str, str]:
+    bin_dir = rel_path(workspace, f"setup-bin-{name}")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_link = bin_dir / "python3"
+    if not python_link.exists():
+        python_link.symlink_to(sys.executable)
+    if npm_script is not None:
+        write_executable(bin_dir / "npm", npm_script)
+    if opencode_script is not None:
+        write_executable(bin_dir / "opencode", opencode_script)
+    runner_temp = rel_path(workspace, f"runner-temp-{name}")
+    runner_temp.mkdir(parents=True, exist_ok=True)
+    github_output = rel_path(workspace, f".omo/ci/setup-opencode-{name}.out")
+    github_path = rel_path(workspace, f".omo/ci/setup-opencode-{name}.path")
+    github_output.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": str(bin_dir) + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(github_output),
+            "GITHUB_PATH": str(github_path),
+        }
+    )
+    return env
+
+
+def setup_output_paths(env: dict[str, str]) -> tuple[Path, Path]:
+    return Path(env["GITHUB_OUTPUT"]), Path(env["GITHUB_PATH"])
+
+
+
 def run_live_review_case(script: Path, workspace: Path, name: str, env: dict[str, str], expected: set[int]) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], str]:
     output = f".omo/ci/review-{name}.json"
     github_output_path = rel_path(workspace, f".omo/ci/review-{name}.out")
@@ -209,6 +241,91 @@ def write_verdict(workspace: Path, relative: str, approved: bool) -> Path:
             "notes": {lens: {"status": statuses[lens], "summary": "fixture", "evidence": ["fixture"]} for lens in APPROVE_LENSES},
         },
     )
+
+
+def assert_setup_opencode(actions_root: Path, workspace: Path) -> None:
+    script = helper(actions_root, "cast", "setup_opencode.py")
+    existing_env = opencode_setup_env(
+        workspace,
+        "existing",
+        None,
+        """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'opencode 1.17.7-existing-fixture'
+  exit 0
+fi
+exit 2
+""",
+    )
+    existing_result = run_helper(script, [], {0}, env=existing_env)
+    existing_output, existing_path = setup_output_paths(existing_env)
+    require("source=existing" in existing_result.stdout, "setup-opencode must accept an already valid opencode runtime")
+    require("status=ok" in existing_output.read_text(encoding="utf-8"), "setup-opencode existing path must emit ok status")
+    require(not existing_path.exists() or existing_path.read_text(encoding="utf-8") == "", "setup-opencode must not rewrite PATH for existing runtime")
+
+    installing_npm = """#!/bin/sh
+prefix=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--prefix" ]; then
+    shift
+    prefix="$1"
+  fi
+  shift || true
+done
+if [ -z "$prefix" ]; then
+  exit 2
+fi
+mkdir -p "$prefix/bin"
+cat > "$prefix/bin/opencode" <<'OPENCODE_EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'opencode 1.17.7-installed-fixture'
+  exit 0
+fi
+printf '%s\n' '{"status":"approved","findings":[]}'
+OPENCODE_EOF
+chmod 0755 "$prefix/bin/opencode"
+"""
+    broken_existing_env = opencode_setup_env(
+        workspace,
+        "broken-existing",
+        installing_npm,
+        """#!/bin/sh
+printf '%s\n' 'BROKEN_EXISTING_OPENCODE_SENTINEL' >&2
+exit 42
+""",
+    )
+    broken_existing_result = run_helper(script, [], {0}, env=broken_existing_env)
+    broken_existing_output, broken_existing_path = setup_output_paths(broken_existing_env)
+    broken_existing_serialized = broken_existing_result.stdout + broken_existing_result.stderr + broken_existing_output.read_text(encoding="utf-8") + broken_existing_path.read_text(encoding="utf-8")
+    require("source=npm" in broken_existing_result.stdout, "setup-opencode must replace an invalid preinstalled opencode runtime")
+    require("BROKEN_EXISTING_OPENCODE_SENTINEL" not in broken_existing_serialized, "setup-opencode must not leak raw broken runtime diagnostics while replacing it")
+
+    install_env = opencode_setup_env(workspace, "install", installing_npm)
+    install_result = run_helper(script, [], {0}, env=install_env)
+    install_output, install_path = setup_output_paths(install_env)
+    install_output_text = install_output.read_text(encoding="utf-8")
+    install_path_text = install_path.read_text(encoding="utf-8")
+    require("source=npm" in install_result.stdout, "setup-opencode must provision opencode through npm when missing")
+    require("package=opencode-ai" in install_output_text, "setup-opencode must identify the trusted npm package")
+    require("package_version=1.17.7" in install_output_text, "setup-opencode must pin the opencode npm package version")
+    require("grimoire-opencode-runtime/opencode-ai@1.17.7/bin" in install_path_text, "setup-opencode must add the provisioned opencode bin directory to later workflow steps")
+
+    failing_npm = """#!/bin/sh
+printf '%s\n' 'RAW_COMMAND_STDOUT_SENTINEL'
+printf '%s\n' 'RAW_COMMAND_STDERR_SENTINEL' >&2
+exit 42
+"""
+    failure_env = opencode_setup_env(workspace, "npm-failure", failing_npm)
+    failure_result = run_helper(script, [], {1}, env=failure_env)
+    failure_output, failure_path = setup_output_paths(failure_env)
+    serialized = failure_result.stdout + failure_result.stderr + failure_output.read_text(encoding="utf-8")
+    if failure_path.exists():
+        serialized += failure_path.read_text(encoding="utf-8")
+    require("runtime-failed:opencode-install-failed" in serialized, "setup-opencode must categorize npm installation failure")
+    for marker in ("RAW_COMMAND_STDOUT_SENTINEL", "RAW_COMMAND_STDERR_SENTINEL"):
+        require(marker not in serialized, f"setup-opencode leaked raw installer output marker {marker}")
+
 
 
 def assert_review(actions_root: Path, workspace: Path) -> None:
@@ -597,6 +714,7 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
 
 def assert_stage_contract(actions_root: Path) -> None:
     workspace = make_workspace("stage-contract")
+    assert_setup_opencode(actions_root, workspace)
     assert_review(actions_root, workspace)
     assert_live_review_diagnostics(actions_root, workspace)
     assert_design_and_issues(actions_root, workspace)
