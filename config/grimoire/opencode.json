@@ -9,13 +9,6 @@
     "opencode-claude-auth@1.5.4",
     "oh-my-openagent@latest"
   ],
-  "grimoire_policy": {
-    "controller_owned": true,
-    "consumer_pr_head_config_trusted": false,
-    "runtime_simulation_inputs_allowed": false,
-    "credential_source": "AI_RELAY_API_KEY plus CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET environment only",
-    "privileged_github_auth": "GRIMOIRE_PAT named secret, with CODEX_LOOP_PAT runner-env fallback resolved by the reusable workflow task"
-  },
   "provider": {
     "ai-relay": {
       "npm": "@ai-sdk/openai",

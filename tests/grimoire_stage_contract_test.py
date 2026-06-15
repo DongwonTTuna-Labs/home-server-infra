@@ -368,6 +368,16 @@ printf '%s\n' 'not-json-from-opencode'
     assert_blocked_category(invalid_result, invalid_payload, invalid_output, "contract-invalid:review-json-invalid")
 
     approved_opencode = """#!/bin/sh
+python3 - "$OPENCODE_CONFIG" <<'PY'
+import json
+import pathlib
+import sys
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if "grimoire_policy" in payload:
+    print("RAW_COMMAND_STDOUT_SENTINEL")
+    print("RAW_COMMAND_STDERR_SENTINEL", file=sys.stderr)
+    raise SystemExit(42)
+PY
 printf '%s\n' '{"status":"approved","findings":[]}'
 """
     approved_result, approved_payload, approved_output = run_live_review_case(script, workspace, "approved-empty", live_review_env(workspace, approved_opencode), {0})
