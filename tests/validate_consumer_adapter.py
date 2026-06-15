@@ -12,6 +12,7 @@ EXPECTED_WITH_KEYS = {"consumer_repository", "consumer_ref", "pull_request_numbe
 EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"}
 FORBIDDEN_EVENTS = {"workflow_dispatch", "pull_request_target", "push"}
 FORBIDDEN_RUNTIME_KEYS = {"mode", "dry_run", "dry-run", "allow_live", "allow-live", "simulate", "simulation"}
+STOP_LABEL = "grimoire:disabled"
 
 
 class ContractError(AssertionError):
@@ -105,10 +106,11 @@ def find_reusable_job_block(text: str, expected_reusable_repo: str) -> tuple[str
 
 def assert_job_guard(job_block: str) -> None:
     guard_match = re.search(r"(?m)^    if\s*:\s*(.+?)\s*$", job_block)
-    require(guard_match is not None, "consumer job must have a job-level Ready/non-LGTM guard")
+    require(guard_match is not None, f"consumer job must have a job-level Ready/non-{STOP_LABEL} guard")
     guard = guard_match.group(1) if guard_match else ""
     require("pull_request" in guard and "draft" in guard and "false" in guard, "consumer guard must skip draft PRs")
-    require("LGTM" in guard and "contains" in guard and "!" in guard, "consumer guard must skip the LGTM stop label")
+    require(STOP_LABEL in guard and "contains" in guard and "!" in guard, f"consumer guard must skip the {STOP_LABEL} stop label")
+    require("LGTM" not in guard and "codex:lgtm" not in guard, "consumer guard must not use legacy Codex/LGTM stop labels")
 
 
 def assert_reusable_call(job_block: str, ref: str, expected_ref: str) -> None:
