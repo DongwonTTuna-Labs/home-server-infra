@@ -233,6 +233,10 @@ def run_git(args: list[str], workspace: pathlib.Path) -> subprocess.CompletedPro
     return subprocess.run(["git", *args], cwd=str(workspace), check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def runtime_artifact_path(path: str) -> bool:
+    return path == ".omo" or path.startswith(".omo/")
+
+
 def git_changed_paths(workspace: pathlib.Path) -> list[str]:
     result = run_git(["status", "--porcelain"], workspace)
     if result.returncode != 0:
@@ -246,13 +250,13 @@ def git_changed_paths(workspace: pathlib.Path) -> list[str]:
         if " -> " in raw_path:
             raw_path = raw_path.split(" -> ", 1)[1]
         normalized = normalize_path(raw_path)
-        if normalized and not normalized.startswith(".omo/") and normalized not in seen:
+        if normalized and not runtime_artifact_path(normalized) and normalized not in seen:
             values.append(normalized)
             seen.add(normalized)
     return values
 
 
-def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pathlib.Path) -> str:
+def render_live_prompt(spec: dict[str, object], allowed: list[str], write_targets: list[str], handoff: pathlib.Path) -> str:
     return "\n".join(
         [
             "# Grimoire Fix Stage",
@@ -264,6 +268,11 @@ def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pat
             "## Allowed Paths",
             *(f"- `{path}`" for path in allowed),
             "",
+            "## Write-Authorized Target Paths",
+            *(f"- `{path}`" for path in write_targets),
+            "",
+            "Create or modify files only when they appear in the write-authorized target path list. Evidence paths in findings are not write authority unless they also appear above.",
+            "",
             "## In-Scope Findings",
             json.dumps(spec.get("in_scope", []), indent=2, sort_keys=True),
             "",
@@ -272,7 +281,7 @@ def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pat
     ) + "\n"
 
 
-def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, object], allowed: list[str], prompt_output: pathlib.Path) -> None:
+def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, object], allowed: list[str], write_targets: list[str], prompt_output: pathlib.Path) -> None:
     blockers: list[str] = []
     for required_env in ("AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
         if not os.environ.get(required_env):
@@ -289,7 +298,7 @@ def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, ob
     if blockers:
         raise ContractError("; ".join(blockers))
     assert opencode_path is not None
-    write_text(prompt_output, render_live_prompt(spec, allowed, prompt_output))
+    write_text(prompt_output, render_live_prompt(spec, allowed, write_targets, prompt_output))
     env = os.environ.copy()
     env["OPENCODE_CONFIG"] = str(opencode_config)
     env.setdefault("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
@@ -352,7 +361,7 @@ def run(args: argparse.Namespace) -> int:
                 changed, invalid_changed = read_list(args.changed_files, workspace)
             elif in_scope_work_exists(spec):
                 live_fix_attempted = True
-                run_live_fix(workspace, control_plane_root(args.control_plane_root), spec, allowed, live_prompt)
+                run_live_fix(workspace, control_plane_root(args.control_plane_root), spec, allowed, write_targets, live_prompt)
                 changed = git_changed_paths(workspace)
                 invalid_changed = []
             else:

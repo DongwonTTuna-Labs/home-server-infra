@@ -524,6 +524,11 @@ def run_git(args: list[str], cwd: pathlib.Path, token: str | None = None) -> sub
     return subprocess.run(command, cwd=str(cwd), check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def runtime_artifact_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized == ".omo" or normalized.startswith(".omo/")
+
+
 def changed_paths(workspace: pathlib.Path) -> list[str]:
     result = run_git(["status", "--porcelain"], workspace)
     if result.returncode != 0:
@@ -535,8 +540,9 @@ def changed_paths(workspace: pathlib.Path) -> list[str]:
         path = line[3:].strip()
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        if path and not path.startswith(".omo/"):
-            paths.append(path)
+        normalized = path.replace("\\", "/").rstrip("/")
+        if normalized and not runtime_artifact_path(normalized):
+            paths.append(normalized)
     return paths
 
 

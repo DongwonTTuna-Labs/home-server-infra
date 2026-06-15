@@ -42,6 +42,11 @@ def run_git(args: list[str], workspace: pathlib.Path) -> subprocess.CompletedPro
     return subprocess.run(["git", *args], cwd=str(workspace), check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def runtime_artifact_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized == ".omo" or normalized.startswith(".omo/")
+
+
 def git_changed_paths(workspace: pathlib.Path) -> list[str]:
     result = run_git(["status", "--porcelain", "--untracked-files=all"], workspace)
     if result.returncode != 0:
@@ -54,9 +59,10 @@ def git_changed_paths(workspace: pathlib.Path) -> list[str]:
         raw = line[3:].strip()
         if " -> " in raw:
             raw = raw.split(" -> ", 1)[1]
-        if raw and not raw.startswith(".omo/") and raw not in seen:
-            paths.append(raw)
-            seen.add(raw)
+        normalized = raw.replace("\\", "/").rstrip("/")
+        if normalized and not runtime_artifact_path(normalized) and normalized not in seen:
+            paths.append(normalized)
+            seen.add(normalized)
     return paths
 
 

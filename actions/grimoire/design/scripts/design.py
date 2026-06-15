@@ -14,6 +14,7 @@ from typing import cast
 
 STAGE = "grimoire-design"
 SUPPORTED_SPEC_SUFFIXES = {".md", ".txt", ".yaml", ".yml", ".json"}
+TARGET_PATH_FIELDS = ("target_path", "target_paths", "allowed_write_path", "allowed_write_paths", "allowed_path", "allowed_paths")
 REQUIRED_REVIEW_FIELDS = ("status", "approval_signal", "read_only", "mutation_allowed", "findings")
 REQUIRED_FINDING_FIELDS = ("file", "line", "severity", "lens", "title", "what", "why", "suggested_fix", "evidence")
 
@@ -80,6 +81,32 @@ def append_target_path(raw: object, paths: list[str], seen: set[str]) -> list[st
         seen.add(normalized)
         return [normalized]
     return []
+
+
+def extract_finding_target_paths(finding: dict[str, object], paths: list[str], seen: set[str]) -> tuple[bool, list[str], list[str]]:
+    raw_values: list[object] = []
+    explicit = False
+    for field in TARGET_PATH_FIELDS:
+        if field not in finding:
+            continue
+        explicit = True
+        value = finding.get(field)
+        if isinstance(value, list):
+            raw_values.extend(value)
+        elif value:
+            raw_values.append(value)
+    valid: list[str] = []
+    invalid: list[str] = []
+    for value in raw_values:
+        raw = str(value or "").strip()
+        normalized = normalize_path(raw)
+        if normalized and direct_extra_allowed(normalized):
+            added = append_target_path(normalized, paths, seen)
+            if added:
+                valid.extend(added)
+        elif raw:
+            invalid.append(raw)
+    return explicit, valid, sorted(set(invalid))
 
 
 def fingerprint(repo: str, title: str, path: str) -> str:
@@ -241,6 +268,7 @@ def run(args: argparse.Namespace) -> int:
         bindings: list[dict[str, object]] = []
         missing: list[dict[str, object]] = []
         safety_default_gaps: list[dict[str, object]] = []
+        invalid_allowed_write_paths: list[str] = []
         citation = spec_citation(spec_files[0], workspace) if spec_files else None
         target_paths: list[str] = []
         target_seen: set[str] = set()
@@ -266,9 +294,22 @@ def run(args: argparse.Namespace) -> int:
                 )
                 continue
             scoped: dict[str, object] = {"finding_index": index, "title": title, "path": path, "location": location, "finding": finding}
-            finding_target_paths = append_target_path(path, target_paths, target_seen)
+            has_explicit_targets, finding_target_paths, invalid_finding_targets = extract_finding_target_paths(finding, target_paths, target_seen)
+            if not has_explicit_targets:
+                finding_target_paths = append_target_path(path, target_paths, target_seen)
             if finding_target_paths:
                 scoped["target_paths"] = finding_target_paths
+            if invalid_finding_targets:
+                scoped["invalid_target_paths"] = invalid_finding_targets
+                invalid_allowed_write_paths.extend(invalid_finding_targets)
+                safety_default_gaps.append(
+                    {
+                        "scope": location,
+                        "gap": "Review finding declared unsafe target paths.",
+                        "invalid_target_paths": invalid_finding_targets,
+                        "required_default": "Halt before authorizing fix writes for this finding.",
+                    }
+                )
             in_scope.append(scoped)
             if citation is None:
                 missing_item: dict[str, object] = {
@@ -300,9 +341,11 @@ def run(args: argparse.Namespace) -> int:
                         "citations": [f"{citation['path']}:{citation['line']}"],
                         "evidence": citation["text"],
                         "target_paths": finding_target_paths,
+                        "invalid_target_paths": invalid_finding_targets,
                     }
                 )
-        spec_sufficient = not missing and not missing_spec_inputs
+        invalid_allowed_write_paths = sorted(set(invalid_allowed_write_paths))
+        spec_sufficient = not missing and not missing_spec_inputs and not invalid_allowed_write_paths
         suggested_spec_patch = ""
         if missing or missing_spec_inputs:
             suggested = [item["suggested_spec_section"] for item in missing]
@@ -316,7 +359,7 @@ def run(args: argparse.Namespace) -> int:
             "status": "sufficient" if spec_sufficient else "insufficient",
             "spec_sufficient": spec_sufficient,
             "should_halt": not spec_sufficient,
-            "halt_reason": "" if spec_sufficient else "one or more in-scope review findings lack OpenSpec evidence",
+            "halt_reason": "" if spec_sufficient else "one or more in-scope review findings lack OpenSpec evidence or safe target paths",
             "scope_authority": "OpenSpec and OMO",
             "review_findings_count": len(findings),
             "in_scope": in_scope,
@@ -326,6 +369,7 @@ def run(args: argparse.Namespace) -> int:
             "bindings": bindings,
             "target_paths": target_paths,
             "allowed_write_paths": target_paths,
+            "invalid_allowed_write_paths": invalid_allowed_write_paths,
             "missing": missing,
             "safety_default_gaps": safety_default_gaps,
             "suggested_spec_patch": suggested_spec_patch,
@@ -364,6 +408,7 @@ def run(args: argparse.Namespace) -> int:
             "bindings": [],
             "target_paths": [],
             "allowed_write_paths": [],
+            "invalid_allowed_write_paths": [],
             "missing": [],
             "safety_default_gaps": [],
             "suggested_spec_patch": "",
