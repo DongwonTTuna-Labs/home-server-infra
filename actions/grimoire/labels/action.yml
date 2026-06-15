@@ -1,11 +1,11 @@
 name: Grimoire Labels
-description: Compute idempotent display-only Grimoire label transitions while preserving unrelated labels.
+description: Compute idempotent Grimoire label transitions and optionally apply managed labels to a trusted PR.
 inputs:
   consumer-workspace:
     description: Consumer repository workspace treated as PR-head data.
     required: true
   transition:
-    description: "Display transition to apply: running, done, or fizzled."
+    description: "Label transition to apply: running, done, or fizzled."
     required: true
   state-file:
     description: Newline-delimited local label state file.
@@ -20,19 +20,31 @@ inputs:
     required: false
     default: .omo/ci/grimoire-label-status.json
   repository:
-    description: Repository metadata for the status artifact.
+    description: Repository metadata and remote label target in owner/name form.
     required: false
     default: local-consumer
   pr-number:
-    description: Pull request number metadata for the status artifact.
+    description: Pull request number metadata and remote label target.
     required: false
     default: "0"
+  remote-apply:
+    description: Apply managed-label operations through the GitHub Issues labels API when true and token is present.
+    required: false
+    default: "false"
+  token:
+    description: Resolved Grimoire PAT used only for optional GitHub Issues label mutation.
+    required: false
+    default: ""
+  github-api-url:
+    description: GitHub API base URL for optional remote label mutation.
+    required: false
+    default: https://api.github.com
 outputs:
   changed:
     description: Whether the transition changed managed display labels.
     value: ${{ steps.stage.outputs.changed }}
   operation_count:
-    description: Count of managed label operations.
+    description: Count of managed local label operations.
     value: ${{ steps.stage.outputs.operation_count }}
   status_path:
     description: Absolute path to label status JSON.
@@ -40,11 +52,19 @@ outputs:
   state_output:
     description: Absolute path to final local label state file.
     value: ${{ steps.stage.outputs.state_output }}
+  github_pr_label_mutation_attempted:
+    description: Whether the helper attempted remote GitHub PR label mutation.
+    value: ${{ steps.stage.outputs.github_pr_label_mutation_attempted }}
+  remote_apply_status:
+    description: "Remote label apply status: applied, failed, or skipped reason."
+    value: ${{ steps.stage.outputs.remote_apply_status }}
 runs:
   using: composite
   steps:
     - id: stage
       shell: bash
+      env:
+        GRIMOIRE_LABEL_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
         python3 "$GITHUB_ACTION_PATH/scripts/labels.py" "${{ inputs.transition }}" \
@@ -54,4 +74,6 @@ runs:
           --status-output "${{ inputs.status-path }}" \
           --repository "${{ inputs.repository }}" \
           --pr-number "${{ inputs.pr-number }}" \
+          --remote-apply "${{ inputs.remote-apply }}" \
+          --github-api-url "${{ inputs.github-api-url }}" \
           --github-output "$GITHUB_OUTPUT"

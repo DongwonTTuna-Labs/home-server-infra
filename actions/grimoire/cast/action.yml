@@ -107,6 +107,9 @@ runs:
         transition: running
         repository: ${{ inputs.repository }}
         pr-number: ${{ inputs.pr-number }}
+        remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}
+        token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}
+        github-api-url: ${{ github.api_url }}
 
     - id: review
       if: ${{ steps.preflight.outputs.can_continue == 'true' }}
@@ -209,6 +212,9 @@ runs:
         transition: done
         repository: ${{ inputs.repository }}
         pr-number: ${{ inputs.pr-number }}
+        remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}
+        token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}
+        github-api-url: ${{ github.api_url }}
 
     - id: labels-fizzled
       if: ${{ steps.decide.outputs.label_transition == 'fizzled' }}
@@ -218,6 +224,9 @@ runs:
         transition: fizzled
         repository: ${{ inputs.repository }}
         pr-number: ${{ inputs.pr-number }}
+        remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}
+        token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}
+        github-api-url: ${{ github.api_url }}
 
     - id: push
       if: ${{ steps.decide.outputs.should_push == 'true' }}
