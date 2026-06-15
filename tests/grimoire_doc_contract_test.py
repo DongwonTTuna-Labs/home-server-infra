@@ -224,7 +224,7 @@ def assert_recommended_consumer_snippet(docs_text: str) -> None:
         "types: [opened, ready_for_review, synchronize, reopened]",
         "permissions: {}",
         "github.event.pull_request.draft == false",
-        "!contains(github.event.pull_request.labels.*.name, 'LGTM')",
+        "!contains(github.event.pull_request.labels.*.name, 'grimoire:disabled')",
         "uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main",
         "consumer_repository: ${{ github.repository }}",
         "consumer_ref: ${{ github.event.pull_request.head.ref }}",
