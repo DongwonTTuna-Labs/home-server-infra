@@ -49,17 +49,17 @@ def control_plane_root(raw: str) -> pathlib.Path:
 
 
 def write_json(path: pathlib.Path, payload: dict[str, object]) -> None:
-    payload.setdefault("schema_version", 1)
-    payload.setdefault("stage", STAGE)
-    payload.setdefault("generated_at", utc_now())
-    payload.setdefault("lenses", LENSES)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _ = payload.setdefault("schema_version", 1)
+    _ = payload.setdefault("stage", STAGE)
+    _ = payload.setdefault("generated_at", utc_now())
+    _ = payload.setdefault("lenses", LENSES)
+    _ = path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def write_text(path: pathlib.Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    _ = path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_text(text, encoding="utf-8")
 
 
 def write_github_output(path: str | None, values: dict[str, object]) -> None:
@@ -71,7 +71,7 @@ def write_github_output(path: str | None, values: dict[str, object]) -> None:
                 text = "true" if value else "false"
             else:
                 text = str(value)
-            handle.write(f"{key}={text}\n")
+            _ = handle.write(f"{key}={text}\n")
 
 
 def base_payload(status: str, approval_signal: str, findings: list[dict[str, object]], mode: str) -> dict[str, object]:
@@ -146,6 +146,10 @@ def blocked_payload(reasons: list[str], category: str = "") -> dict[str, object]
     return payload
 
 
+def load_json_value(text: str) -> object:
+    return cast(object, json.loads(text))
+
+
 def _review_payload_key(payload: dict[str, object]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -174,7 +178,7 @@ def _review_payload_from_text(text: str) -> dict[str, object] | None:
         if not candidate:
             continue
         try:
-            loaded: object = json.loads(candidate)
+            loaded = load_json_value(candidate)
         except json.JSONDecodeError:
             continue
         payload = _review_payload_from_value(cast(dict[str, object], loaded))
@@ -194,7 +198,7 @@ def _review_payload_from_content(value: object) -> dict[str, object] | None:
                 payloads.append(payload)
         return _choose_review_payload(payloads)
     if isinstance(value, dict):
-        return _review_payload_from_value(value)
+        return _review_payload_from_value(cast(dict[str, object], value))
     return None
 
 
@@ -241,12 +245,12 @@ def _review_payloads_from_jsonl(text: str) -> list[dict[str, object]]:
         if not line.startswith("{"):
             continue
         try:
-            loaded: object = json.loads(line)
+            loaded = load_json_value(line)
         except json.JSONDecodeError:
             continue
         if not isinstance(loaded, dict) or "type" not in loaded:
             continue
-        payload = _review_payload_from_value(loaded)
+        payload = _review_payload_from_value(cast(dict[str, object], loaded))
         if payload is not None:
             payloads.append(payload)
     return payloads
@@ -271,13 +275,13 @@ def normalize_live_payload(raw: dict[str, object]) -> dict[str, object]:
     if not isinstance(findings_raw, list):
         raise ContractError("live review JSON field findings must be an array")
     findings: list[dict[str, object]] = []
-    for index, item in enumerate(findings_raw):
+    for index, item in enumerate(cast(list[object], findings_raw)):
         if not isinstance(item, dict):
             raise ContractError(f"live review finding {index} must be an object")
-        missing = [field for field in REQUIRED_FINDING_FIELDS if field not in item]
+        finding = dict(cast(dict[str, object], item))
+        missing = [field for field in REQUIRED_FINDING_FIELDS if field not in finding]
         if missing:
             raise ContractError(f"live review finding {index} missing fields: {', '.join(missing)}")
-        finding = dict(item)
         lens = str(finding.get("lens") or "")
         if lens not in LENSES:
             raise ContractError(f"live review finding {index} has unsupported lens: {lens}")
@@ -340,8 +344,8 @@ def run_live_review(workspace: pathlib.Path, output: pathlib.Path, root: pathlib
     write_text(prompt_path, render_live_prompt(output))
     env = os.environ.copy()
     env["OPENCODE_CONFIG"] = str(opencode_config)
-    env.setdefault("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
-    env.setdefault("OPENCODE_PURE", "1")
+    _ = env.setdefault("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+    _ = env.setdefault("OPENCODE_PURE", "1")
     command = [
         opencode_path,
         "run",
@@ -369,19 +373,19 @@ def run_live_review(workspace: pathlib.Path, output: pathlib.Path, root: pathlib
 
 
 def run(args: argparse.Namespace) -> int:
-    workspace = pathlib.Path(args.consumer_workspace).resolve()
-    output = resolve_path(args.output, workspace)
-    fixture = args.fixture
+    workspace = pathlib.Path(cast(str, args.consumer_workspace)).resolve()
+    output = resolve_path(cast(str, args.output), workspace)
+    fixture = cast(str, args.fixture)
     exit_code = 0
     if fixture == "clean":
         payload = base_payload("approved", "GRIMOIRE_REVIEW_APPROVED", [], "clean")
         payload["real_mode_attempted"] = False
     elif fixture == "defect":
-        if not args.fixture_input:
+        if not cast(str, args.fixture_input):
             payload = blocked_payload(["--fixture-input is required for defect review fixture"])
             exit_code = 1
         else:
-            fixture_path = resolve_path(args.fixture_input, workspace)
+            fixture_path = resolve_path(cast(str, args.fixture_input), workspace)
             if not fixture_path.exists():
                 payload = blocked_payload([f"fixture input does not exist: {fixture_path}"])
                 exit_code = 1
@@ -394,7 +398,7 @@ def run(args: argparse.Namespace) -> int:
                     payload = base_payload("findings", "GRIMOIRE_REVIEW_FINDINGS_PRESENT", findings, "defect")
                     payload["real_mode_attempted"] = False
     else:
-        payload, exit_code = run_live_review(workspace, output, control_plane_root(args.control_plane_root))
+        payload, exit_code = run_live_review(workspace, output, control_plane_root(cast(str, args.control_plane_root)))
 
     write_json(output, payload)
     outputs = {
@@ -408,7 +412,7 @@ def run(args: argparse.Namespace) -> int:
     blocked_reason_category = payload.get("blocked_reason_category")
     if isinstance(blocked_reason_category, str) and blocked_reason_category:
         outputs["blocked_reason_category"] = blocked_reason_category
-    write_github_output(args.github_output, outputs)
+    write_github_output(cast(str | None, args.github_output), outputs)
     reason = f" reason={blocked_reason_category}" if isinstance(blocked_reason_category, str) and blocked_reason_category else ""
     print(f"{STAGE}: status={payload['status']} findings={payload['findings_count']}{reason} output={output}")
     return exit_code
@@ -416,12 +420,12 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the read-only Grimoire review stage.")
-    parser.add_argument("--consumer-workspace", default=os.environ.get("GITHUB_WORKSPACE", "."))
-    parser.add_argument("--control-plane-root", default="")
-    parser.add_argument("--output", default=".omo/ci/review-findings.json")
-    parser.add_argument("--fixture", choices=["clean", "defect"], default="")
-    parser.add_argument("--fixture-input", default="")
-    parser.add_argument("--github-output", default="")
+    _ = parser.add_argument("--consumer-workspace", default=os.environ.get("GITHUB_WORKSPACE", "."))
+    _ = parser.add_argument("--control-plane-root", default="")
+    _ = parser.add_argument("--output", default=".omo/ci/review-findings.json")
+    _ = parser.add_argument("--fixture", choices=["clean", "defect"], default="")
+    _ = parser.add_argument("--fixture-input", default="")
+    _ = parser.add_argument("--github-output", default="")
     return parser.parse_args(argv)
 
 
