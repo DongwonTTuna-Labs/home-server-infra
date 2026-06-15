@@ -92,7 +92,7 @@ jobs:
           resolve_required cf_access_client_secret "Grimoire CF Access client secret unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET:-}" CF_ACCESS_CLIENT_SECRET CF_ACCESS_CLIENT_SECRET "model-capable stages"
 
       - name: Checkout trusted control plane
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: DongwonTTuna-Labs/home-server-infra
           ref: main
@@ -108,7 +108,7 @@ jobs:
           python3 control-plane/actions/grimoire/cast/scripts/setup_opencode.py
 
       - name: Checkout consumer repository as data
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.consumer_repository }}
           ref: ${{ inputs.head_sha }}
