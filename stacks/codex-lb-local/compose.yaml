@@ -1,0 +1,97 @@
+name: codex-lb-local
+
+services:
+  codex-lb-local:
+    image: ghcr.io/soju06/codex-lb:latest
+    container_name: codex-lb-local
+    pull_policy: always
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      CODEX_LB_CONNECT_ADDRESS: relay-ai.dongwontuna.net
+      CODEX_LB_DATABASE_URL: postgresql+asyncpg://codex_lb:${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb-local/.env}@postgres:5432/codex_lb
+      CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"
+      # Request-path pool (max 100 conns) + separate background pool (max 20) so
+      # background jobs can't starve request connections. Must stay under the PG
+      # server's max_connections (set to 200 below).
+      CODEX_LB_DATABASE_POOL_SIZE: "50"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "50"
+      CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE: "10"
+      CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW: "10"
+      CODEX_LB_DASHBOARD_AUTH_MODE: standard
+      CODEX_LB_LOG_FORMAT: text
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:2455:2455"
+    networks:
+      - codex-lb-local
+    volumes:
+      - codex-lb-local-data:/var/lib/codex-lb
+
+  postgres:
+    image: postgres:18
+    container_name: codex-lb-local-postgres
+    restart: unless-stopped
+    # Headroom above the app pools (main 100 + background 20 = 120 max clients).
+    command: ["postgres", "-c", "max_connections=200"]
+    labels:
+      # Pin the DB engine: never let watchtower auto-jump a Postgres major.
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      POSTGRES_DB: codex_lb
+      POSTGRES_USER: codex_lb
+      POSTGRES_PASSWORD: ${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb-local/.env}
+    networks:
+      - codex-lb-local
+    volumes:
+      # PG18+ official image requires the mount at the parent dir; it stores data
+      # in a major-version subdir (enables pg_upgrade --link). NOT /data.
+      - codex-lb-local-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codex_lb -d codex_lb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  cloudflared-codex-lb-local:
+    image: cloudflare/cloudflared:2026.5.0
+    container_name: cloudflared-codex-lb-local
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    # Reach codex-lb over the shared bridge by container name. Kept separate
+    # from codex-lb's lifecycle (not network_mode: service:) so a watchtower
+    # recreate of codex-lb-local does not tear down the tunnel — cloudflared
+    # just re-resolves the origin and reconnects. Remote+API-key requests are
+    # accepted because API Key Auth is enabled in the dashboard settings.
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/codex-lb-local.yml", "run"]
+    depends_on:
+      - codex-lb-local
+    networks:
+      - codex-lb-local
+    volumes:
+      - ./cloudflared/codex-lb-local.yml:/etc/cloudflared/codex-lb-local.yml:ro
+      - ${HOME}/.cloudflared/bbc484d5-7aa8-4caf-9ec5-15f64c6f5610.json:/etc/cloudflared/codex-lb-local.json:ro
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower-codex-lb-local
+    restart: unless-stopped
+    command: ["--api-version", "1.40"]
+    environment:
+      TZ: Asia/Seoul
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_SCHEDULE: "0 0 9 * * *"
+      WATCHTOWER_CLEANUP: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+networks:
+  codex-lb-local:
+
+volumes:
+  codex-lb-local-data:
+  codex-lb-local-postgres-data:
