@@ -130,6 +130,26 @@ jobs:
           changed-files: ${{ github.workspace }}/consumer/.omo/ci/changed-files.txt
           output-path: .omo/ci/trusted-controller-status.json
 
+      - id: opencode
+        name: Validate opencode runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          opencode_path="$(command -v opencode || true)"
+          if [ -z "$opencode_path" ]; then
+            echo "::error title=OpenCode runtime unavailable::missing-runtime:opencode-unavailable"
+            exit 1
+          fi
+          if ! opencode_version="$("$opencode_path" --version 2>/dev/null)"; then
+            echo "::error title=OpenCode runtime failed::runtime-failed:opencode-command-failed"
+            exit 1
+          fi
+          if [ -z "$opencode_version" ]; then
+            echo "::error title=OpenCode runtime failed::runtime-failed:opencode-command-failed"
+            exit 1
+          fi
+          echo "opencode runtime: path=${opencode_path} version=${opencode_version}"
+
       - id: cast
         name: Run cast driver
         uses: ./control-plane/actions/grimoire/cast

@@ -72,6 +72,52 @@ def run_helper(script: Path, args: list[str], expected: set[int], env: dict[str,
     return result
 
 
+def write_executable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def live_review_env(workspace: Path, opencode_script: str | None) -> dict[str, str]:
+    bin_dir = rel_path(workspace, "runtime-bin")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_link = bin_dir / "python3"
+    if not python_link.exists():
+        python_link.symlink_to(sys.executable)
+    if opencode_script is not None:
+        write_executable(bin_dir / "opencode", opencode_script)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": str(bin_dir),
+            "AI_RELAY_API_KEY": "relay-fixture",
+            "CF_ACCESS_CLIENT_ID": "cf-id-fixture",
+            "CF_ACCESS_CLIENT_SECRET": "cf-secret-fixture",
+        }
+    )
+    return env
+
+
+def run_live_review_case(script: Path, workspace: Path, name: str, env: dict[str, str], expected: set[int]) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], str]:
+    output = f".omo/ci/review-{name}.json"
+    github_output_path = rel_path(workspace, f".omo/ci/review-{name}.out")
+    result = run_helper(script, ["--consumer-workspace", str(workspace), "--output", output, "--github-output", str(github_output_path)], expected, env=env)
+    payload = read_json(workspace, output)
+    github_text = github_output_path.read_text(encoding="utf-8")
+    return result, payload, github_text
+
+
+def assert_blocked_category(result: subprocess.CompletedProcess[str], payload: dict[str, Any], github_output: str, category: str) -> None:
+    require(payload["status"] == "blocked", f"live review must block with {category}")
+    require(payload.get("blocked_reason_category") == category, f"blocked payload must expose sanitized category {category}")
+    require(category in result.stdout, f"review summary must expose sanitized category {category}")
+    require(f"blocked_reason_category={category}" in github_output, f"GitHub output must expose sanitized category {category}")
+    serialized = json.dumps(payload, sort_keys=True) + result.stdout + result.stderr + github_output
+    forbidden = ("RAW_COMMAND_STDOUT_SENTINEL", "RAW_COMMAND_STDERR_SENTINEL")
+    for marker in forbidden:
+        require(marker not in serialized, f"blocked diagnostics leaked raw command output marker {marker}")
+
+
 def finding(title: str, path: str = "src/lib.rs", *, out_of_scope: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "file": path,
@@ -183,6 +229,36 @@ def assert_review(actions_root: Path, workspace: Path) -> None:
     defect = read_json(workspace, ".omo/ci/review-defect.json")
     require(defect["status"] == "findings" and defect["findings_count"] == 1, "defect review fixture must emit one finding")
     require(defect["read_only"] is True and defect["mutation_allowed"] is False, "defect review must still be read-only")
+
+
+def assert_live_review_diagnostics(actions_root: Path, workspace: Path) -> None:
+    script = helper(actions_root, "review", "review.py")
+    missing_result, missing_payload, missing_output = run_live_review_case(script, workspace, "missing-opencode", live_review_env(workspace, None), {1})
+    assert_blocked_category(missing_result, missing_payload, missing_output, "missing-runtime:opencode-unavailable")
+
+    failing_opencode = """#!/bin/sh
+printf '%s\n' 'RAW_COMMAND_STDOUT_SENTINEL'
+printf '%s\n' 'RAW_COMMAND_STDERR_SENTINEL' >&2
+exit 42
+"""
+    failure_result, failure_payload, failure_output = run_live_review_case(script, workspace, "opencode-failed", live_review_env(workspace, failing_opencode), {1})
+    assert_blocked_category(failure_result, failure_payload, failure_output, "runtime-failed:opencode-command-failed")
+
+    invalid_json_opencode = """#!/bin/sh
+printf '%s\n' 'not-json-from-opencode'
+"""
+    invalid_result, invalid_payload, invalid_output = run_live_review_case(script, workspace, "invalid-json", live_review_env(workspace, invalid_json_opencode), {1})
+    assert_blocked_category(invalid_result, invalid_payload, invalid_output, "contract-invalid:review-json-invalid")
+
+    approved_opencode = """#!/bin/sh
+printf '%s\n' '{"status":"approved","findings":[]}'
+"""
+    approved_result, approved_payload, approved_output = run_live_review_case(script, workspace, "approved-empty", live_review_env(workspace, approved_opencode), {0})
+    require(approved_payload["status"] == "approved", "live empty findings must approve")
+    require(approved_payload["findings_count"] == 0, "live empty findings must keep zero finding count")
+    require("blocked_reason_category" not in approved_payload, "approved live review must not emit a blocked category")
+    require("status=approved findings=0" in approved_result.stdout, "approved summary must show empty-finding approval")
+    require("status=approved" in approved_output, "GitHub output must expose approved status")
 
 
 def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
@@ -522,11 +598,17 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
 def assert_stage_contract(actions_root: Path) -> None:
     workspace = make_workspace("stage-contract")
     assert_review(actions_root, workspace)
+    assert_live_review_diagnostics(actions_root, workspace)
     assert_design_and_issues(actions_root, workspace)
     assert_spec_gap(actions_root, workspace)
     clear_fix, fixed_fix = assert_fix(actions_root, workspace)
     approve_verdict = assert_verify(actions_root, workspace)
     assert_cast(actions_root, workspace, clear_fix, fixed_fix, approve_verdict)
+
+
+def test_grimoire_stage_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert_stage_contract(repo_root / "actions" / "grimoire")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
