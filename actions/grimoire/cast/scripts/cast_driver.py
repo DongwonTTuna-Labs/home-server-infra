@@ -635,6 +635,55 @@ def workflow_input_block(text: str) -> str:
     return match.group(1)
 
 
+def indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def workflow_step_block(text: str, name: str) -> str:
+    lines = text.splitlines()
+    name_pattern = re.compile(rf"^\s+(?:-\s*)?name\s*:\s*{re.escape(name)}\s*$")
+    for index, line in enumerate(lines):
+        if not name_pattern.match(line):
+            continue
+        start = index
+        while start > 0 and not re.match(r"^\s*-\s+", lines[start]):
+            start -= 1
+        base_indent = indent_of(lines[start])
+        body = [lines[start]]
+        for child in lines[start + 1 :]:
+            if re.match(rf"^ {{{base_indent}}}-\s+", child):
+                break
+            body.append(child)
+        return "\n".join(body)
+    return ""
+
+
+def opencode_runtime_preflight_errors(text: str) -> list[str]:
+    errors: list[str] = []
+    preflight = workflow_step_block(text, "Validate opencode runtime")
+    if not preflight:
+        return ["workflow missing opencode runtime preflight step: Validate opencode runtime"]
+    preflight_index = text.find("name: Validate opencode runtime")
+    cast_index = text.find("name: Run cast driver")
+    if cast_index == -1:
+        errors.append("workflow missing Run cast driver step")
+    elif preflight_index > cast_index:
+        errors.append("workflow opencode runtime preflight must run before Run cast driver")
+    for snippet in (
+        "id: opencode",
+        "command -v opencode",
+        "--version",
+        "missing-runtime:opencode-unavailable",
+        "runtime-failed:opencode-command-failed",
+    ):
+        if snippet not in preflight:
+            errors.append(f"workflow opencode runtime preflight missing required snippet: {snippet}")
+    for snippet in ("GITHUB_PATH", "pull_request_target", "secrets: inherit", "ubuntu-latest"):
+        if snippet in preflight:
+            errors.append(f"workflow opencode runtime preflight contains forbidden snippet: {snippet}")
+    return errors
+
+
 def run_validate_workflow(args: argparse.Namespace) -> int:
     path = pathlib.Path(args.workflow)
     text = path.read_text(encoding="utf-8")
@@ -660,6 +709,7 @@ def run_validate_workflow(args: argparse.Namespace) -> int:
     for name in FORBIDDEN_INPUTS:
         if re.search(rf"(?im)^\s{{6,}}{re.escape(name)}\s*:", inputs_text):
             errors.append("Grimoire must not expose runtime toggles")
+    errors.extend(opencode_runtime_preflight_errors(text))
     required_snippets = (
         "permissions: {}",
         "workflow_call:",

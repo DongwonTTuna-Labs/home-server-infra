@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -194,6 +195,23 @@ def assert_stage_paths(text: str, repo_root: Path) -> None:
     require("./actions/grimoire" not in text, "bare ./actions/grimoire paths are forbidden")
 
 
+def assert_opencode_runtime_preflight(text: str) -> None:
+    preflight = step_block(text, "Validate opencode runtime")
+    require(text.find("name: Validate opencode runtime") < text.find("name: Run cast driver"), "opencode runtime validation must run before cast driver")
+    required_snippets = (
+        "id: opencode",
+        "command -v opencode",
+        "--version",
+        "missing-runtime:opencode-unavailable",
+        "runtime-failed:opencode-command-failed",
+    )
+    for snippet in required_snippets:
+        require(snippet in preflight, f"opencode runtime validation missing {snippet}")
+    forbidden_snippets = ("GITHUB_PATH", "pull_request_target", "secrets: inherit", "ubuntu-latest")
+    for snippet in forbidden_snippets:
+        require(snippet not in preflight, f"opencode runtime validation contains forbidden snippet {snippet}")
+
+
 def assert_auth_and_inline_shell(text: str) -> None:
     forbidden_auth = ("GITHUB_TOKEN", "github.token", "create-github-app-token", "github-app-token", "app-id:", "private-key:")
     for marker in forbidden_auth:
@@ -238,6 +256,7 @@ def assert_workflow_contract(workflow_path: Path, repo_root: Path) -> None:
     assert_inputs_and_secrets(text)
     assert_runner_and_checkouts(text)
     assert_stage_paths(text, repo_root)
+    assert_opencode_runtime_preflight(text)
     assert_auth_and_inline_shell(text)
     assert_opencode_provider_headers(repo_root)
 
@@ -254,6 +273,27 @@ def insert_before_permissions(text: str, insertion: str) -> str:
 def large_inline_shell(text: str) -> str:
     lines = "\n".join(f"          echo contract-line-{index}" for index in range(40))
     return text + "\n      - name: Large inline workflow shell fixture\n        shell: bash\n        run: |\n" + lines + "\n"
+
+
+def remove_step(text: str, name: str) -> str:
+    return replace_once(text, step_block(text, name), "")
+
+
+def run_cast_workflow_validator(repo_root: Path, workflow_path: Path) -> subprocess.CompletedProcess[str]:
+    script = repo_root / "actions" / "grimoire" / "cast" / "scripts" / "cast_driver.py"
+    return subprocess.run(["python3", str(script), "validate-workflow", "--workflow", str(workflow_path)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+
+def assert_cast_workflow_validator_contract(workflow_path: Path, repo_root: Path) -> None:
+    valid = run_cast_workflow_validator(repo_root, workflow_path)
+    require(valid.returncode == 0, f"cast validator rejected valid workflow: stdout={valid.stdout} stderr={valid.stderr}")
+
+    target_dir = Path(tempfile.mkdtemp(prefix="grimoire-cast-validator-negative-", dir=str(TEMP_ROOT)))
+    missing_preflight = target_dir / "missing-opencode-runtime-preflight.yml"
+    missing_preflight.write_text(remove_step(read_text(workflow_path), "Validate opencode runtime"), encoding="utf-8")
+    invalid = run_cast_workflow_validator(repo_root, missing_preflight)
+    require(invalid.returncode != 0, "cast validator accepted workflow missing Validate opencode runtime")
+    require("opencode runtime preflight" in invalid.stderr, f"cast validator missing clear opencode preflight error: {invalid.stderr}")
 
 
 def make_missing_stage_root() -> Path:
@@ -294,6 +334,7 @@ def assert_negative_fixtures(workflow_path: Path, repo_root: Path) -> None:
             repo_root,
         ),
         ("evidence-runtime-coupling", lambda text: replace_once(text, "mkdir -p consumer/.omo/ci", "mkdir -p consumer/.omo/ci\n          touch consumer/.omo/evidence/runtime.txt"), repo_root),
+        ("missing-opencode-runtime-preflight", lambda text: remove_step(text, "Validate opencode runtime"), repo_root),
     ]
     for name, mutate, case_root in cases:
         target = target_dir / f"{name}.yml"
@@ -316,6 +357,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate Grimoire reusable workflow contract.")
     parser.add_argument("--workflow", required=True, type=Path)
     return parser.parse_args(argv)
+
+
+def test_grimoire_workflow_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow_path = repo_root / ".github" / "workflows" / "grimoire-control-plane.yml"
+    assert_workflow_contract(workflow_path, repo_root)
+    assert_negative_fixtures(workflow_path, repo_root)
+    assert_cast_workflow_validator_contract(workflow_path, repo_root)
 
 
 def main(argv: list[str]) -> int:
