@@ -306,11 +306,12 @@ Return one JSON object only. The object schema is:
 {{
   "status": "approved" or "findings",
   "findings": [
-    {{"file": "relative/path", "line": 1, "severity": "low|medium|high|critical", "lens": "security|correctness|maintainability|repo-policy", "title": "short title", "what": "problem", "why": "impact", "suggested_fix": "bounded suggestion", "evidence": "specific file/line evidence"}}
+    {{"file": "relative/evidence/path", "line": 1, "severity": "low|medium|high|critical", "lens": "security|correctness|maintainability|repo-policy", "title": "short title", "what": "problem", "why": "impact", "suggested_fix": "bounded suggestion", "evidence": "specific file/line evidence", "target_paths": ["relative/file/to/create-or-modify"]}}
   ]
 }}
 
 Every finding must include these fields: {fields}.
+When the file to create or modify is different from the evidence file, include optional `target_paths` with the exact relative file path(s) that must be created or modified to resolve the finding. For a missing required file, `file` is the evidence path that proves the requirement and `target_paths` is the missing file that must exist.
 If no actionable findings exist, return {{"status":"approved","findings":[]}}.
 The controller will write the normalized artifact to {output}.
 """

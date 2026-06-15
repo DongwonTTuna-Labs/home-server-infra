@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -78,6 +79,15 @@ def write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def load_script_module(path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    if spec is None or spec.loader is None:
+        raise ContractError(f"unable to load script module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def live_review_env(workspace: Path, opencode_script: str | None) -> dict[str, str]:
     bin_dir = rel_path(workspace, "runtime-bin")
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +160,7 @@ def assert_blocked_category(result: subprocess.CompletedProcess[str], payload: d
         require(marker not in serialized, f"blocked diagnostics leaked raw command output marker {marker}")
 
 
-def finding(title: str, path: str = "src/lib.rs", *, out_of_scope: bool = False) -> dict[str, Any]:
+def finding(title: str, path: str = "src/lib.rs", *, out_of_scope: bool = False, target_paths: list[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "file": path,
         "line": 7,
@@ -162,6 +172,8 @@ def finding(title: str, path: str = "src/lib.rs", *, out_of_scope: bool = False)
         "suggested_fix": "Bind the finding to OpenSpec or track it outside the loop.",
         "evidence": f"{path}:7 deterministic fixture evidence",
     }
+    if target_paths is not None:
+        payload["target_paths"] = target_paths
     if out_of_scope:
         payload["out_of_scope"] = True
         payload["scope"] = "out_of_scope"
@@ -442,6 +454,31 @@ printf '%s\n' '{"status":"approved","findings":[]}'
     require("status=approved findings=0" in approved_result.stdout, "approved summary must show empty-finding approval")
     require("status=approved" in approved_output, "GitHub output must expose approved status")
 
+    target_prompt_opencode = """#!/usr/bin/env python3
+import json
+import sys
+prompt = sys.argv[-1]
+if "target_paths" not in prompt or "file to create or modify" not in prompt:
+    raise SystemExit(42)
+finding = {
+  "file":"docs/GRIMOIRE_PUSH_SMOKE.spec.md",
+  "line":1,
+  "severity":"medium",
+  "lens":"correctness",
+  "title":"Required smoke marker is missing",
+  "what":"The required marker file is absent.",
+  "why":"The smoke fixture requires the marker file to exist.",
+  "suggested_fix":"Create the required marker file from the spec.",
+  "evidence":"docs/GRIMOIRE_PUSH_SMOKE.spec.md:1 names the required marker.",
+  "target_paths":["docs/GRIMOIRE_PUSH_SMOKE.md"]
+}
+print(json.dumps({"status":"findings","findings":[finding]}))
+"""
+    target_result, target_payload, _ = run_live_review_case(script, workspace, "target-path", live_review_env(workspace, target_prompt_opencode), {0})
+    target_finding = target_payload["findings"][0]
+    require(target_finding["target_paths"] == ["docs/GRIMOIRE_PUSH_SMOKE.md"], "live review must preserve explicit finding target_paths")
+    require("status=findings findings=1" in target_result.stdout, "target-path review summary must show one finding")
+
 
 def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
     design_script = helper(actions_root, "design", "design.py")
@@ -592,6 +629,110 @@ def assert_fix(actions_root: Path, workspace: Path) -> tuple[str, str]:
     require(fixed["status"] == "fixed" and fixed["scope_ok"] is True, "fix must distinguish fixed in-scope changes")
     require(fixed["should_commit"] is True and fixed["should_push"] is True, "fixed status must request later commit and push")
 
+    smoke_spec = rel_path(workspace, "openspec/changes/grimoire-push-smoke/specs/grimoire-push-smoke/spec.md")
+    smoke_spec.parent.mkdir(parents=True, exist_ok=True)
+    smoke_spec.write_text(
+        """## ADDED Requirements
+
+### Requirement: Grimoire push smoke marker
+The repository SHALL contain `docs/GRIMOIRE_PUSH_SMOKE.md` with the exact canonical Markdown content specified in `docs/GRIMOIRE_PUSH_SMOKE.spec.md`.
+
+#### Scenario: Grimoire recreates the missing marker
+- **THEN** Grimoire creates exactly `docs/GRIMOIRE_PUSH_SMOKE.md` with the canonical content from `docs/GRIMOIRE_PUSH_SMOKE.spec.md`
+""",
+        encoding="utf-8",
+    )
+    write_review_artifact(workspace, ".omo/ci/review-smoke.json", [finding("Missing Grimoire push smoke marker", "docs/GRIMOIRE_PUSH_SMOKE.spec.md", target_paths=["docs/GRIMOIRE_PUSH_SMOKE.md"])])
+    run_helper(
+        design_script,
+        ["--consumer-workspace", str(workspace), "--repository", "local-consumer", "--review-input", ".omo/ci/review-smoke.json", "--output", ".omo/ci/spec-smoke.json", "--plan", ".omo/ci/design-smoke.md"],
+        {0},
+    )
+    smoke_design = read_json(workspace, ".omo/ci/spec-smoke.json")
+    require("docs/GRIMOIRE_PUSH_SMOKE.md" in smoke_design.get("allowed_write_paths", []), "design must emit explicit finding target_paths as allowed write paths")
+    require("docs/GRIMOIRE_PUSH_SMOKE.spec.md" not in smoke_design.get("allowed_write_paths", []), "design must not conflate evidence file with explicit write target")
+    rel_path(workspace, "changed-smoke-marker.txt").write_text("docs/GRIMOIRE_PUSH_SMOKE.md\n", encoding="utf-8")
+    run_helper(
+        script,
+        [
+            "--consumer-workspace",
+            str(workspace),
+            "--spec-sufficiency",
+            ".omo/ci/spec-smoke.json",
+            "--spec-gap-status",
+            ".omo/ci/spec-gap-clear.json",
+            "--pr-touched",
+            "pr-touched.txt",
+            "--changed-files",
+            "changed-smoke-marker.txt",
+            "--output",
+            ".omo/ci/fix-smoke-marker.json",
+            "--handoff-output",
+            ".omo/ci/fix-smoke-marker.md",
+        ],
+        {0},
+    )
+    smoke_fix = read_json(workspace, ".omo/ci/fix-smoke-marker.json")
+    require(smoke_fix["status"] == "fixed" and smoke_fix["scope_ok"] is True, "fix must allow a spec-bound docs marker target")
+    require("docs/GRIMOIRE_PUSH_SMOKE.md" in smoke_fix["allowed_paths"], "fix allowed paths must record the spec-bound docs marker")
+    require(smoke_fix["allowed_write_paths"] == ["docs/GRIMOIRE_PUSH_SMOKE.md"], "fix must expose normalized allowed write paths")
+
+    rel_path(workspace, "changed-smoke-source.txt").write_text("src/unscoped.rs\n", encoding="utf-8")
+    run_helper(
+        script,
+        [
+            "--consumer-workspace",
+            str(workspace),
+            "--spec-sufficiency",
+            ".omo/ci/spec-smoke.json",
+            "--spec-gap-status",
+            ".omo/ci/spec-gap-clear.json",
+            "--pr-touched",
+            "pr-touched.txt",
+            "--changed-files",
+            "changed-smoke-source.txt",
+            "--output",
+            ".omo/ci/fix-smoke-source-violation.json",
+            "--handoff-output",
+            ".omo/ci/fix-smoke-source-violation.md",
+        ],
+        {1},
+    )
+    smoke_source_violation = read_json(workspace, ".omo/ci/fix-smoke-source-violation.json")
+    require(smoke_source_violation["status"] == "scope-violation" and "src/unscoped.rs" in smoke_source_violation["violations"], "spec-bound docs target must not allow arbitrary source edits")
+
+    write_review_artifact(workspace, ".omo/ci/review-invalid-target.json", [finding("Invalid target path", "docs/evidence.md", target_paths=["../escape.md"])])
+    run_helper(
+        design_script,
+        ["--consumer-workspace", str(workspace), "--repository", "local-consumer", "--review-input", ".omo/ci/review-invalid-target.json", "--output", ".omo/ci/spec-invalid-target.json", "--plan", ".omo/ci/design-invalid-target.md"],
+        {1},
+    )
+    invalid_target_design = read_json(workspace, ".omo/ci/spec-invalid-target.json")
+    require(invalid_target_design["status"] == "insufficient" and "../escape.md" in invalid_target_design.get("invalid_allowed_write_paths", []), "design must fail closed on traversal finding target paths")
+
+    write_design_artifact(workspace, ".omo/ci/spec-traversal-target.json", sufficient=True, in_scope=[{"path": "docs/authorized.md"}], bindings=[{"target_paths": ["../escape.md", "docs/authorized.md"]}])
+    rel_path(workspace, "changed-authorized-doc.txt").write_text("docs/authorized.md\n", encoding="utf-8")
+    run_helper(
+        script,
+        [
+            "--consumer-workspace",
+            str(workspace),
+            "--spec-sufficiency",
+            ".omo/ci/spec-traversal-target.json",
+            "--spec-gap-status",
+            ".omo/ci/spec-gap-clear.json",
+            "--changed-files",
+            "changed-authorized-doc.txt",
+            "--output",
+            ".omo/ci/fix-traversal-target.json",
+            "--handoff-output",
+            ".omo/ci/fix-traversal-target.md",
+        ],
+        {1},
+    )
+    traversal_target = read_json(workspace, ".omo/ci/fix-traversal-target.json")
+    require(traversal_target["status"] == "scope-violation" and traversal_target["invalid_spec_target_paths"] == ["../escape.md"], "fix must fail closed on traversal in spec target metadata")
+
     rel_path(workspace, "changed-violation.txt").write_text("unscoped/outside.rs\n", encoding="utf-8")
     run_helper(
         script,
@@ -632,6 +773,66 @@ def assert_verify(actions_root: Path, workspace: Path) -> str:
     run_helper(script, ["--consumer-workspace", str(workspace), "--validate", ".omo/grimoire/verdict-reject.json"], {1})
     run_helper(script, ["--consumer-workspace", str(workspace), "--fixture", "invalid", "--output", ".omo/grimoire/verdict-invalid.json"], {1})
     run_helper(script, ["--consumer-workspace", str(workspace), "--validate", ".omo/grimoire/verdict-invalid.json"], {1})
+
+    verify_workspace = make_workspace("verify-live")
+    subprocess.run(["git", "init"], cwd=str(verify_workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    marker_spec = rel_path(verify_workspace, "docs/GRIMOIRE_PUSH_SMOKE.spec.md")
+    marker_spec.parent.mkdir(parents=True, exist_ok=True)
+    marker_spec.write_text(
+        """# Grimoire Push Smoke Spec
+
+## Canonical Markdown
+
+```markdown
+# Grimoire Push Smoke
+
+This file documents the Grimoire reusable control-plane push smoke for the OpenSpec-backed `grimoire-push-smoke` change.
+```
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "config", "user.name", "grimoire-verify-test"], cwd=str(verify_workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "grimoire-verify-test@dongwontuna-labs.invalid"], cwd=str(verify_workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "add", "docs/GRIMOIRE_PUSH_SMOKE.spec.md"], cwd=str(verify_workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "commit", "-m", "test: add marker spec baseline"], cwd=str(verify_workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    marker = rel_path(verify_workspace, "docs/GRIMOIRE_PUSH_SMOKE.md")
+    marker.write_text(
+        "# Grimoire Push Smoke\n\n"
+        "This file documents the Grimoire reusable control-plane push smoke for the OpenSpec-backed `grimoire-push-smoke` change.\n",
+        encoding="utf-8",
+    )
+    write_design_artifact(verify_workspace, ".omo/ci/spec-verify-live.json", sufficient=True, in_scope=[{"path": "docs/GRIMOIRE_PUSH_SMOKE.md"}], bindings=[{"allowed_write_paths": ["docs/GRIMOIRE_PUSH_SMOKE.md"]}])
+    write_json(verify_workspace, ".omo/ci/spec-gap-clear-verify.json", {"schema_version": 1, "stage": "grimoire-spec-gap", "status": "clear", "should_halt": False})
+    write_json(
+        verify_workspace,
+        ".omo/ci/fix-verify-live.json",
+        {
+            "schema_version": 1,
+            "stage": "grimoire-fix",
+            "status": "fixed",
+            "scope_ok": True,
+            "changed_files": ["docs/GRIMOIRE_PUSH_SMOKE.md"],
+            "allowed_paths": ["docs/GRIMOIRE_PUSH_SMOKE.md"],
+            "allowed_write_paths": ["docs/GRIMOIRE_PUSH_SMOKE.md"],
+            "violations": [],
+        },
+    )
+    run_helper(
+        script,
+        ["--consumer-workspace", str(verify_workspace), "--spec-sufficiency", ".omo/ci/spec-verify-live.json", "--spec-gap-status", ".omo/ci/spec-gap-clear-verify.json", "--fix-status", ".omo/ci/fix-verify-live.json", "--output", ".omo/grimoire/verdict-live-approve.json"],
+        {0},
+    )
+    live_approve = read_json(verify_workspace, ".omo/grimoire/verdict-live-approve.json")
+    require(live_approve["approved"] is True and live_approve["f4_scope"] == "APPROVE", "verify live path must approve the authorized marker-only fix")
+
+    marker.write_text("# Grimoire Push Smoke\n\nUnexpected modified content.\n", encoding="utf-8")
+    run_helper(
+        script,
+        ["--consumer-workspace", str(verify_workspace), "--spec-sufficiency", ".omo/ci/spec-verify-live.json", "--spec-gap-status", ".omo/ci/spec-gap-clear-verify.json", "--fix-status", ".omo/ci/fix-verify-live.json", "--output", ".omo/grimoire/verdict-live-reject.json"],
+        {1},
+    )
+    live_reject = read_json(verify_workspace, ".omo/grimoire/verdict-live-reject.json")
+    require(live_reject["approved"] is False and live_reject["f2_quality"] == "REJECT", "verify live path must reject marker content drift")
     return ".omo/grimoire/verdict-approve.json"
 
 
@@ -777,6 +978,27 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
     require(push_status["status"] == "blocked" and "empty commit" in push_status["blocked_reason"], "scoped push must refuse empty commits")
 
 
+def assert_runtime_artifact_exclusions(actions_root: Path) -> None:
+    fix_module = load_script_module(helper(actions_root, "fix", "fix.py"))
+    verify_module = load_script_module(helper(actions_root, "verify", "verify.py"))
+    cast_module = load_script_module(helper(actions_root, "cast", "cast_driver.py"))
+    for module_name, module in (("fix", fix_module), ("verify", verify_module), ("cast", cast_module)):
+        workspace = make_workspace(f"{module_name}-omo-filter")
+        subprocess.run(["git", "init"], cwd=str(workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        rel_path(workspace, "docs/real-change.md").parent.mkdir(parents=True, exist_ok=True)
+        rel_path(workspace, "docs/real-change.md").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "config", "user.name", "grimoire-test"], cwd=str(workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(["git", "config", "user.email", "grimoire-test@dongwontuna-labs.invalid"], cwd=str(workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(["git", "add", "docs/real-change.md"], cwd=str(workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(["git", "commit", "-m", "test: baseline"], cwd=str(workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        rel_path(workspace, ".omo/ci/runtime.json").parent.mkdir(parents=True, exist_ok=True)
+        rel_path(workspace, ".omo/ci/runtime.json").write_text("{}\n", encoding="utf-8")
+        rel_path(workspace, "docs/real-change.md").write_text("real change\n", encoding="utf-8")
+        paths = module.git_changed_paths(workspace) if module_name in {"fix", "verify"} else module.changed_paths(workspace)
+        require(".omo" not in paths and all(not str(path).startswith(".omo/") for path in paths), f"{module_name} scanner must exclude .omo runtime artifacts")
+        require("docs/real-change.md" in paths, f"{module_name} scanner must keep real changed files")
+
+
 def assert_stage_contract(actions_root: Path) -> None:
     workspace = make_workspace("stage-contract")
     assert_setup_opencode(actions_root, workspace)
@@ -784,6 +1006,7 @@ def assert_stage_contract(actions_root: Path) -> None:
     assert_live_review_diagnostics(actions_root, workspace)
     assert_design_and_issues(actions_root, workspace)
     assert_spec_gap(actions_root, workspace)
+    assert_runtime_artifact_exclusions(actions_root)
     clear_fix, fixed_fix = assert_fix(actions_root, workspace)
     approve_verdict = assert_verify(actions_root, workspace)
     assert_cast(actions_root, workspace, clear_fix, fixed_fix, approve_verdict)

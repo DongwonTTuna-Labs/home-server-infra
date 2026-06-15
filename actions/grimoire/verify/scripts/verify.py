@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 import pathlib
+import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -12,6 +14,147 @@ STAGE = "grimoire-verify"
 LENSES = ("f1_oracle", "f2_quality", "f3_real_qa", "f4_scope")
 ENUM_VALUES = {"APPROVE", "REJECT"}
 JQ_APPROVE_EXPR = 'type == "object" and .schema_version == 1 and .stage == "grimoire-verify" and (.notes | type == "object") and (.notes.f1_oracle | type == "object") and (.notes.f2_quality | type == "object") and (.notes.f3_real_qa | type == "object") and (.notes.f4_scope | type == "object") and .f1_oracle == "APPROVE" and .f2_quality == "APPROVE" and .f3_real_qa == "APPROVE" and .f4_scope == "APPROVE" and .approved == true'
+
+
+class ContractError(Exception):
+    pass
+
+
+MARKER_PATH = "docs/GRIMOIRE_PUSH_SMOKE.md"
+MARKER_SPEC_PATH = "docs/GRIMOIRE_PUSH_SMOKE.spec.md"
+FORBIDDEN_PATH_PREFIXES = (".github/", ".opencode/", "src/")
+FORBIDDEN_PATHS = {"Cargo.toml", "Cargo.lock", "opencode.json"}
+
+
+def load_json(path: pathlib.Path, label: str) -> dict[str, object]:
+    if not path.exists():
+        raise ContractError(f"{label} does not exist: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ContractError(f"{label} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ContractError(f"{label} must be a JSON object")
+    return payload
+
+
+def run_git(args: list[str], workspace: pathlib.Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=str(workspace), check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def runtime_artifact_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized == ".omo" or normalized.startswith(".omo/")
+
+
+def git_changed_paths(workspace: pathlib.Path) -> list[str]:
+    result = run_git(["status", "--porcelain", "--untracked-files=all"], workspace)
+    if result.returncode != 0:
+        raise ContractError("git status failed while verifying fix result")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        raw = line[3:].strip()
+        if " -> " in raw:
+            raw = raw.split(" -> ", 1)[1]
+        normalized = raw.replace("\\", "/").rstrip("/")
+        if normalized and not runtime_artifact_path(normalized) and normalized not in seen:
+            paths.append(normalized)
+            seen.add(normalized)
+    return paths
+
+
+def canonical_marker_from_spec(path: pathlib.Path) -> str | None:
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"```markdown\n(.*?)\n```", text, flags=re.DOTALL)
+    if match is None:
+        return None
+    return match.group(1).rstrip() + "\n"
+
+
+def status(value: bool) -> str:
+    return "APPROVE" if value else "REJECT"
+
+
+def evidence_note(verdict: str, summary: str, evidence: list[str]) -> dict[str, object]:
+    return note(verdict, summary, evidence)
+
+
+def real_payload(workspace: pathlib.Path, output: pathlib.Path, spec_path: pathlib.Path, gap_path: pathlib.Path, fix_path: pathlib.Path) -> tuple[dict[str, object], int]:
+    spec = load_json(spec_path, "spec sufficiency artifact")
+    gap = load_json(gap_path, "spec-gap status artifact") if gap_path.exists() else {"should_halt": False}
+    fix = load_json(fix_path, "fix status artifact")
+    changed = git_changed_paths(workspace)
+    fix_changed_raw = fix.get("changed_files")
+    allowed_raw = fix.get("allowed_paths")
+    allowed_writes_raw = fix.get("allowed_write_paths")
+    if not isinstance(allowed_writes_raw, list):
+        allowed_writes_raw = fix.get("spec_target_paths")
+    fix_changed = [str(item) for item in fix_changed_raw] if isinstance(fix_changed_raw, list) else []
+    allowed = [str(item) for item in allowed_raw] if isinstance(allowed_raw, list) else []
+    allowed_writes = [str(item) for item in allowed_writes_raw] if isinstance(allowed_writes_raw, list) else []
+
+    prereq_ok = spec.get("spec_sufficient") is True and gap.get("should_halt") is not True and fix.get("scope_ok") is True and fix.get("status") in {"clear-noop", "fixed"}
+    changed_match = sorted(changed) == sorted(fix_changed)
+    allowed_exact = all(path in allowed for path in changed)
+    forbidden_paths = [path for path in changed if path in FORBIDDEN_PATHS or path.startswith(FORBIDDEN_PATH_PREFIXES)]
+    write_authorized = fix.get("status") == "clear-noop" or bool(changed) and all(path in allowed_writes for path in changed)
+
+    marker_ok = True
+    marker_evidence = "no marker change required"
+    if MARKER_PATH in changed:
+        canonical = canonical_marker_from_spec(workspace / MARKER_SPEC_PATH)
+        actual_path = workspace / MARKER_PATH
+        if canonical is None:
+            marker_ok = False
+            marker_evidence = f"{MARKER_SPEC_PATH} missing canonical markdown block"
+        elif not actual_path.exists():
+            marker_ok = False
+            marker_evidence = f"{MARKER_PATH} missing after fix"
+        else:
+            actual = actual_path.read_text(encoding="utf-8", errors="replace")
+            marker_ok = actual == canonical
+            marker_evidence = f"{MARKER_PATH} {'matches' if marker_ok else 'does not match'} canonical markdown"
+
+    f1 = prereq_ok and changed_match
+    f2 = marker_ok and (fix.get("status") == "clear-noop" or bool(changed))
+    f3 = changed_match and all((workspace / path).exists() for path in changed)
+    f4 = allowed_exact and write_authorized and not forbidden_paths and not fix.get("violations")
+    statuses = {
+        "f1_oracle": status(f1),
+        "f2_quality": status(f2),
+        "f3_real_qa": status(f3),
+        "f4_scope": status(f4),
+    }
+    notes = {
+        "f1_oracle": evidence_note(statuses["f1_oracle"], "Spec, gap, fix, and git status artifacts are mutually consistent.", [f"spec_sufficient={spec.get('spec_sufficient')}", f"fix_status={fix.get('status')}", f"changed_match={changed_match}"]),
+        "f2_quality": evidence_note(statuses["f2_quality"], "Changed marker content matches the canonical directive and non-noop fixes are non-empty.", [marker_evidence, f"changed_files={changed}"]),
+        "f3_real_qa": evidence_note(statuses["f3_real_qa"], "Verification inspected the actual post-fix working tree paths.", [f"git_status_paths={changed}"]),
+        "f4_scope": evidence_note(statuses["f4_scope"], "Every changed path is explicitly allowed and write-authorized by design/fix scope metadata.", [f"allowed_write_paths={allowed_writes}", f"forbidden_paths={forbidden_paths}"]),
+    }
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "stage": STAGE,
+        "generated_at": utc_now(),
+        "fixture": "none",
+        "approved": approved(statuses),
+        "f1_oracle": statuses["f1_oracle"],
+        "f2_quality": statuses["f2_quality"],
+        "f3_real_qa": statuses["f3_real_qa"],
+        "f4_scope": statuses["f4_scope"],
+        "notes": notes,
+        "prerequisites": {"spec_sufficiency": rel(spec_path, workspace), "spec_gap_status": rel(gap_path, workspace), "fix_status": rel(fix_path, workspace)},
+        "changed_files": changed,
+        "allowed_write_paths": allowed_writes,
+        "jq_all_approve_predicate": JQ_APPROVE_EXPR,
+        "output_path": rel(output, workspace),
+        "real_verification_attempted": True,
+    }
+    return payload, 0 if payload["approved"] is True else 1
 
 
 def utc_now() -> str:
@@ -136,11 +279,23 @@ def run(args: argparse.Namespace) -> int:
         print(f"{STAGE}: wrote invalid fixture to {output}", file=sys.stderr)
         return 1
     else:
-        statuses = {lens: "REJECT" for lens in LENSES}
-        exit_code = 1
+        try:
+            payload, exit_code = real_payload(workspace, output, spec, gap, fix)
+        except ContractError as exc:
+            statuses = {lens: "REJECT" for lens in LENSES}
+            payload = payload_for("blocked", statuses, workspace, output, spec, gap, fix)
+            payload["blocked_reason"] = str(exc)
+            payload["real_verification_attempted"] = True
+            exit_code = 1
+            write_json(output, payload)
+            write_github_output(args.github_output, {"approved": payload["approved"], "output_path": str(output), "jq_predicate": JQ_APPROVE_EXPR})
+            print(f"{STAGE}: approved={str(payload['approved']).lower()} output={output}")
+            return exit_code
+        write_json(output, payload)
+        write_github_output(args.github_output, {"approved": payload["approved"], "output_path": str(output), "jq_predicate": JQ_APPROVE_EXPR})
+        print(f"{STAGE}: approved={str(payload['approved']).lower()} output={output}")
+        return exit_code
     payload = payload_for(args.fixture or "blocked", statuses, workspace, output, spec, gap, fix)
-    if not args.fixture:
-        payload["blocked_reason"] = "live verification is wired by later workflow tasks; default action path fails closed"
     write_json(output, payload)
     write_github_output(args.github_output, {"approved": payload["approved"], "output_path": str(output), "jq_predicate": JQ_APPROVE_EXPR})
     print(f"{STAGE}: approved={str(payload['approved']).lower()} output={output}")

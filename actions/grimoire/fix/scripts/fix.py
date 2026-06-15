@@ -115,6 +115,41 @@ def cited_paths(spec_sufficiency: dict[str, object]) -> list[str]:
     return paths
 
 
+def allowed_write_paths(spec_sufficiency: dict[str, object]) -> tuple[list[str], list[str]]:
+    paths: list[str] = []
+    invalid: list[str] = []
+    seen: set[str] = set()
+    values: list[object] = []
+    top_level = spec_sufficiency.get("allowed_write_paths")
+    if isinstance(top_level, list):
+        values.extend(top_level)
+    legacy_top_level = spec_sufficiency.get("target_paths")
+    if isinstance(legacy_top_level, list):
+        values.extend(legacy_top_level)
+    bindings_raw = spec_sufficiency.get("bindings")
+    if isinstance(bindings_raw, list):
+        for binding in bindings_raw:
+            if not isinstance(binding, dict):
+                continue
+            for key in ("allowed_write_path", "allowed_write_paths", "target_path", "target_paths", "allowed_path", "allowed_paths"):
+                value = binding.get(key)
+                if isinstance(value, list):
+                    values.extend(value)
+                elif value:
+                    values.append(value)
+    for value in values:
+        raw = str(value or "").strip()
+        normalized = normalize_path(raw)
+        if not normalized or not direct_extra_allowed(normalized):
+            if raw:
+                invalid.append(raw)
+            continue
+        if normalized not in seen:
+            paths.append(normalized)
+            seen.add(normalized)
+    return paths, sorted(set(invalid))
+
+
 def direct_extra_allowed(path: str) -> bool:
     if path.startswith(("tests/", "docs/", "openspec/", "spec/", "schemas/")):
         return True
@@ -198,6 +233,10 @@ def run_git(args: list[str], workspace: pathlib.Path) -> subprocess.CompletedPro
     return subprocess.run(["git", *args], cwd=str(workspace), check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def runtime_artifact_path(path: str) -> bool:
+    return path == ".omo" or path.startswith(".omo/")
+
+
 def git_changed_paths(workspace: pathlib.Path) -> list[str]:
     result = run_git(["status", "--porcelain"], workspace)
     if result.returncode != 0:
@@ -211,13 +250,13 @@ def git_changed_paths(workspace: pathlib.Path) -> list[str]:
         if " -> " in raw_path:
             raw_path = raw_path.split(" -> ", 1)[1]
         normalized = normalize_path(raw_path)
-        if normalized and not normalized.startswith(".omo/") and normalized not in seen:
+        if normalized and not runtime_artifact_path(normalized) and normalized not in seen:
             values.append(normalized)
             seen.add(normalized)
     return values
 
 
-def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pathlib.Path) -> str:
+def render_live_prompt(spec: dict[str, object], allowed: list[str], write_targets: list[str], handoff: pathlib.Path) -> str:
     return "\n".join(
         [
             "# Grimoire Fix Stage",
@@ -229,6 +268,11 @@ def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pat
             "## Allowed Paths",
             *(f"- `{path}`" for path in allowed),
             "",
+            "## Write-Authorized Target Paths",
+            *(f"- `{path}`" for path in write_targets),
+            "",
+            "Create or modify files only when they appear in the write-authorized target path list. Evidence paths in findings are not write authority unless they also appear above.",
+            "",
             "## In-Scope Findings",
             json.dumps(spec.get("in_scope", []), indent=2, sort_keys=True),
             "",
@@ -237,7 +281,7 @@ def render_live_prompt(spec: dict[str, object], allowed: list[str], handoff: pat
     ) + "\n"
 
 
-def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, object], allowed: list[str], prompt_output: pathlib.Path) -> None:
+def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, object], allowed: list[str], write_targets: list[str], prompt_output: pathlib.Path) -> None:
     blockers: list[str] = []
     for required_env in ("AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
         if not os.environ.get(required_env):
@@ -254,7 +298,7 @@ def run_live_fix(workspace: pathlib.Path, root: pathlib.Path, spec: dict[str, ob
     if blockers:
         raise ContractError("; ".join(blockers))
     assert opencode_path is not None
-    write_text(prompt_output, render_live_prompt(spec, allowed, prompt_output))
+    write_text(prompt_output, render_live_prompt(spec, allowed, write_targets, prompt_output))
     env = os.environ.copy()
     env["OPENCODE_CONFIG"] = str(opencode_config)
     env.setdefault("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
@@ -310,20 +354,21 @@ def run(args: argparse.Namespace) -> int:
             direct_extra, invalid_extra_files = read_list(args.direct_extra, workspace)
             invalid_direct = sorted(path for path in direct_extra if not direct_extra_allowed(path))
             cited = cited_paths(spec)
-            allowed = sorted(set(pr_touched + direct_extra + cited))
+            write_targets, invalid_write_targets = allowed_write_paths(spec)
+            allowed = sorted(set(pr_touched + direct_extra + cited + write_targets))
             live_fix_attempted = False
             if args.changed_files:
                 changed, invalid_changed = read_list(args.changed_files, workspace)
             elif in_scope_work_exists(spec):
                 live_fix_attempted = True
-                run_live_fix(workspace, control_plane_root(args.control_plane_root), spec, allowed, live_prompt)
+                run_live_fix(workspace, control_plane_root(args.control_plane_root), spec, allowed, write_targets, live_prompt)
                 changed = git_changed_paths(workspace)
                 invalid_changed = []
             else:
                 changed = []
                 invalid_changed = []
             violations = sorted(path for path in changed if path not in set(allowed))
-            scope_ok = not invalid_pr and not invalid_extra_files and not invalid_changed and not invalid_direct and not violations
+            scope_ok = not invalid_pr and not invalid_extra_files and not invalid_changed and not invalid_direct and not invalid_write_targets and not violations
             status = "clear-noop" if not changed and scope_ok else "fixed" if scope_ok else "scope-violation"
             payload: dict[str, object] = {
                 "schema_version": 1,
@@ -340,12 +385,16 @@ def run(args: argparse.Namespace) -> int:
                 "pr_touched_paths": pr_touched,
                 "direct_extra_paths": direct_extra,
                 "cited_openspec_paths": cited,
+                "spec_target_paths": write_targets,
+                "allowed_write_paths": write_targets,
                 "allowed_paths": allowed,
                 "violations": violations,
                 "invalid_pr_touched_inputs": invalid_pr,
                 "invalid_direct_extra_inputs": invalid_extra_files,
                 "invalid_changed_inputs": invalid_changed,
                 "invalid_direct_extras": invalid_direct,
+                "invalid_spec_target_paths": invalid_write_targets,
+                "invalid_allowed_write_paths": invalid_write_targets,
                 "live_fix_attempted": live_fix_attempted,
                 "post_fix_detection": "git status --porcelain excluding .omo/** runtime artifacts" if live_fix_attempted else "changed-files input" if args.changed_files else "no in-scope work",
                 "output_path": rel(output, workspace),
