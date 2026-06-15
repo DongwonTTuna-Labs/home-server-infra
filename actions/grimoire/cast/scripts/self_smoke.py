@@ -118,6 +118,80 @@ def load_json(path: pathlib.Path) -> dict[str, object]:
     return payload
 
 
+def diag(label: str, payload: object) -> None:
+    print(f"self-smoke-diag: {label}={json.dumps(payload, sort_keys=True)}")
+
+
+def dump_review_diagnostics(payload: dict[str, object]) -> None:
+    findings = payload.get("findings")
+    summary: list[dict[str, object]] = []
+    if isinstance(findings, list):
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            item: dict[str, object] = {
+                "file": finding.get("file"),
+                "title": finding.get("title"),
+            }
+            for key in ("scope", "classification", "disposition", "out_of_scope", "lens"):
+                if key in finding:
+                    item[key] = finding.get(key)
+            summary.append(item)
+    diag("review_findings", summary)
+
+
+def dump_design_diagnostics(payload: dict[str, object]) -> None:
+    bindings = payload.get("bindings")
+    binding_summary: list[dict[str, object]] = []
+    if isinstance(bindings, list):
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            binding_summary.append(
+                {
+                    "finding_location": binding.get("finding_location"),
+                    "target_paths": binding.get("target_paths"),
+                    "citation": binding.get("citation"),
+                }
+            )
+    in_scope = payload.get("in_scope")
+    in_scope_paths: list[object] = []
+    if isinstance(in_scope, list):
+        for item in in_scope:
+            if isinstance(item, dict):
+                in_scope_paths.append(
+                    {
+                        "path": item.get("path"),
+                        "target_paths": item.get("target_paths"),
+                        "location": item.get("location"),
+                    }
+                )
+    diag("design_allowed_write_paths", payload.get("allowed_write_paths"))
+    diag("design_target_paths", payload.get("target_paths"))
+    diag("design_bindings", binding_summary)
+    diag("design_in_scope_paths", in_scope_paths)
+
+
+def dump_fix_diagnostics(path: pathlib.Path) -> None:
+    if not path.exists():
+        diag("fix_status", {"artifact_missing": str(path)})
+        return
+    payload = load_json(path)
+    summary = {
+        "status": payload.get("status"),
+        "scope_ok": payload.get("scope_ok"),
+        "changed_files": payload.get("changed_files"),
+        "allowed_paths": payload.get("allowed_paths"),
+        "allowed_write_paths": payload.get("allowed_write_paths"),
+        "spec_target_paths": payload.get("spec_target_paths"),
+        "violations": payload.get("violations"),
+    }
+    for key, value in sorted(payload.items()):
+        if key.startswith("invalid_"):
+            summary[key] = value
+    diag("fix_status", summary)
+
+
 def prepare_workspace(root: pathlib.Path) -> pathlib.Path:
     workspace = root / "consumer"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -171,16 +245,25 @@ def main(argv: list[str]) -> int:
     run(["python3", str(helper(root, "trusted-controller", "trusted_controller.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--changed-files", str(changed), "--output", str(trusted)], root, env=env)
     review = workspace / ".omo/ci/review-findings.json"
     run(["python3", str(helper(root, "review", "review.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--output", str(review)], root, env=env)
-    if load_json(review).get("status") != "findings":
+    review_payload = load_json(review)
+    dump_review_diagnostics(review_payload)
+    if review_payload.get("status") != "findings":
         raise SmokeError("self-smoke review must produce an in-scope missing-marker finding")
     design = workspace / ".omo/ci/spec-sufficiency.json"
     run(["python3", str(helper(root, "design", "design.py")), "--consumer-workspace", str(workspace), "--repository", "DongwonTTuna-Labs/rs-builder-relayer-client", "--review-input", str(review), "--output", str(design), "--plan", ".omo/ci/design-plan.md"], root, env=env)
+    design_payload = load_json(design)
+    dump_design_diagnostics(design_payload)
     issues = workspace / ".omo/ci/out-of-scope-issues-status.json"
     run(["python3", str(helper(root, "cast", "cast_driver.py")), "file-issues", "--consumer-workspace", str(workspace), "--design-path", str(design), "--repository", "local-consumer", "--pr-number", "0", "--output", str(issues), "--ledger", ".omo/ci/out-of-scope-issues-ledger.json"], root, env=env)
     gap = workspace / ".omo/ci/spec-gap-status.json"
     write_json(gap, {"schema_version": 1, "stage": "grimoire-spec-gap", "status": "clear", "should_halt": False})
     fix = workspace / ".omo/ci/fix-status.json"
-    run(["python3", str(helper(root, "fix", "fix.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--spec-sufficiency", str(design), "--spec-gap-status", str(gap), "--pr-touched", str(changed), "--output", str(fix), "--handoff-output", ".omo/ci/fix-handoff-prompt.md"], root, env=env)
+    try:
+        run(["python3", str(helper(root, "fix", "fix.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--spec-sufficiency", str(design), "--spec-gap-status", str(gap), "--pr-touched", str(changed), "--output", str(fix), "--handoff-output", ".omo/ci/fix-handoff-prompt.md"], root, env=env)
+    except SmokeError:
+        dump_fix_diagnostics(fix)
+        raise
+    dump_fix_diagnostics(fix)
     fix_payload = load_json(fix)
     if fix_payload.get("status") != "fixed" or fix_payload.get("changed_files") != ["docs/GRIMOIRE_PUSH_SMOKE.md"]:
         raise SmokeError("self-smoke fix must create exactly docs/GRIMOIRE_PUSH_SMOKE.md")
