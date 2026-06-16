@@ -10,15 +10,47 @@ services:
       com.centurylinklabs.watchtower.enable: "false"
     environment:
       CODEX_LB_CONNECT_ADDRESS: relay-ai.dongwontuna.net
+      CODEX_LB_DATABASE_URL: postgresql+asyncpg://codex_lb:${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb/.env}@postgres:5432/codex_lb
       CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"
-      CODEX_LB_DATABASE_SQLITE_PRE_MIGRATE_BACKUP_ENABLED: "true"
-      CODEX_LB_DATABASE_SQLITE_PRE_MIGRATE_BACKUP_MAX_FILES: "5"
+      # Request-path pool (max 100 conns) + separate background pool (max 20) so
+      # background jobs can't starve request connections. Must stay under the PG
+      # server's max_connections (set to 200 below).
+      CODEX_LB_DATABASE_POOL_SIZE: "50"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "50"
+      CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE: "10"
+      CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW: "10"
       CODEX_LB_DASHBOARD_AUTH_MODE: standard
       CODEX_LB_LOG_FORMAT: text
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:2455:2455"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
+
+  postgres:
+    image: postgres:18
+    container_name: codex-lb-postgres
+    restart: unless-stopped
+    # Headroom above the app pools (main 100 + background 20 = 120 max clients).
+    command: ["postgres", "-c", "max_connections=200"]
+    labels:
+      # Pin the DB engine: never let watchtower auto-jump a Postgres major.
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      POSTGRES_DB: codex_lb
+      POSTGRES_USER: codex_lb
+      POSTGRES_PASSWORD: ${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb/.env}
+    volumes:
+      # PG18+ official image requires the mount at the parent dir; it stores data
+      # in a major-version subdir (enables pg_upgrade --link). NOT /data.
+      - codex-lb-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codex_lb -d codex_lb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   cloudflared-codex-lb:
     image: cloudflare/cloudflared:2026.5.0
@@ -50,3 +82,4 @@ volumes:
   codex-lb-data:
     external: true
     name: codex-lb-data
+  codex-lb-postgres-data:
