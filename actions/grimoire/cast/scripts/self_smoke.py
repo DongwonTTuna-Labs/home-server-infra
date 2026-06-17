@@ -240,9 +240,9 @@ def run_case(helper: ModuleType, artifact_root: pathlib.Path, case: dict[str, An
 
 def run_signal_smoke(root: pathlib.Path, artifact_root: pathlib.Path) -> dict[str, Any]:
     helper = load_fixture_helper(root)
-    temp_root = getattr(helper, "TEMP_ROOT", None)
-    if isinstance(temp_root, pathlib.Path):
-        temp_root.mkdir(parents=True, exist_ok=True)
+    helper_temp_root = artifact_root / "fixture-temp"
+    setattr(helper, "TEMP_ROOT", helper_temp_root)
+    helper_temp_root.mkdir(parents=True, exist_ok=True)
     cases_by_name = {str(case["name"]): case for case in getattr(helper, "load_decide_fixture_cases")()}
     missing = [name for name in DEFAULT_CASES if name not in cases_by_name]
     if missing:
