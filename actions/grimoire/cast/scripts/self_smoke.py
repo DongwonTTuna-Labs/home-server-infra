@@ -59,9 +59,12 @@ def write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
 def default_artifact_root() -> pathlib.Path:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if runner_temp:
-        root = pathlib.Path(runner_temp)
-        root.mkdir(parents=True, exist_ok=True)
-        return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-", dir=str(root)))
+        try:
+            root = pathlib.Path(runner_temp)
+            root.mkdir(parents=True, exist_ok=True)
+            return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-", dir=str(root)))
+        except OSError:
+            pass
     return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-"))
 
 
