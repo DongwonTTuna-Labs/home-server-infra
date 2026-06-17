@@ -56,16 +56,40 @@ def write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def artifact_parent_candidates() -> list[pathlib.Path]:
+    raw_candidates = [
+        os.environ.get("RUNNER_TEMP"),
+        os.environ.get("TMPDIR"),
+        os.environ.get("TEMP"),
+        os.environ.get("TMP"),
+        tempfile.gettempdir(),
+        "/tmp",
+        "/var/tmp",
+        str(pathlib.Path.cwd() / ".grimoire-self-smoke-tmp"),
+    ]
+    candidates: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        if not raw:
+            continue
+        path = pathlib.Path(raw).expanduser()
+        key = str(path)
+        if key in seen:
+            continue
+        candidates.append(path)
+        seen.add(key)
+    return candidates
+
+
 def default_artifact_root() -> pathlib.Path:
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    if runner_temp:
+    failures: list[str] = []
+    for root in artifact_parent_candidates():
         try:
-            root = pathlib.Path(runner_temp)
             root.mkdir(parents=True, exist_ok=True)
             return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-", dir=str(root)))
-        except OSError:
-            pass
-    return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-"))
+        except OSError as exc:
+            failures.append(f"{root}: {exc}")
+    raise SmokeError("unable to create artifact root under any candidate temp parent: " + "; ".join(failures))
 
 
 def prepare_artifact_root(raw: str) -> pathlib.Path:
