@@ -37,7 +37,7 @@ The recovered stage list is exact and ordered:
 
 The control flow is `trusted-controller -> review -> design -> file deduped out-of-scope Issues -> spec-gap or fix -> boulder -> verify -> terminate or loop`. `cast` is the driver that sequences the stages, runs the boulder continuation, applies label transitions, and decides terminal or re-review behavior from machine-readable artifacts.
 
-`review` is read-only. `design` is the OpenSpec and OMO scope authority. `spec-gap` halts with a five-section comment when evidence is insufficient. `fix` may prepare and run Atlas work only inside the active scope. `verify` emits the F1-F4 verdict, and all four fields must approve before either terminal cast or one scoped bot push.
+`review` is read-only. `design` is the OpenSpec and OMO scope authority. `spec-gap` renders a five-section OpenSpec guidance comment when evidence is insufficient; `docs/decisions/grimoire-advisory-failure-separation.md` records the later neutral/advisory cast semantics. `fix` may prepare and run Atlas work only inside the active scope. `verify` emits the F1-F4 verdict, and all four fields must approve before either terminal cast or one scoped bot push.
 
 ## Package Boundary
 

@@ -32,6 +32,7 @@ EXPECTED_PATHS = (
     "config/grimoire/opencode.json",
     "config/grimoire/oh-my-openagent.jsonc",
     "schemas/grimoire-workflow-call.v1.schema.json",
+    "schemas/grimoire-scope.v1.schema.json",
     "tests/grimoire_workflow_contract_test.py",
     "tests/grimoire_action_contract_test.py",
     "tests/grimoire_stage_contract_test.py",
@@ -40,6 +41,9 @@ EXPECTED_PATHS = (
     "tests/validate_consumer_adapter.py",
     "docs/grimoire-reusable.md",
     "docs/decisions/grimoire-reusable-control-plane.md",
+    "docs/decisions/grimoire-advisory-failure-separation.md",
+    "docs/releases/grimoire-reusable-control-plane-v1.md",
+    "docs/releases/grimoire-reusable-control-plane-v1-advisory-failure.md",
 )
 
 ADR_HEADINGS = (
@@ -60,17 +64,21 @@ DOC_HEADINGS = (
     "# Grimoire Reusable Control Plane",
     "## Source Of Truth",
     "## Recovered Stage Map",
+    "## Outcome Taxonomy",
     "## Visual Architecture",
     "## Package Path Map",
     "## Consumer Policy",
     "## Security And Auth",
     "## Scope Guard",
+    "## Display Labels",
     "## Runtime Policy",
     "## Release Notes",
     "## Non-Goals",
 )
 
 RELEASE_NOTES_PATH = "docs/releases/grimoire-reusable-control-plane-v1.md"
+ADVISORY_ADR_PATH = "docs/decisions/grimoire-advisory-failure-separation.md"
+ADVISORY_RELEASE_NOTES_PATH = "docs/releases/grimoire-reusable-control-plane-v1-advisory-failure.md"
 
 RELEASE_NOTES_REQUIRED_PHRASES = (
     "# Release Notes: Grimoire Reusable Control Plane v1",
@@ -81,6 +89,46 @@ RELEASE_NOTES_REQUIRED_PHRASES = (
     "Secret hygiene tests",
     "Private consumers can call the reusable workflow only after a maintainer enables access",
     "Consumer repositories should migrate to a thin caller workflow",
+)
+
+ADVISORY_ADR_HEADINGS = (
+    "# ADR: Grimoire Advisory And Failure Separation",
+    "## Status",
+    "## Context",
+    "## Decision",
+    "## Alternatives",
+    "## Backward-Safety",
+    "## Consequences",
+)
+
+ADVISORY_ADR_REQUIRED_PHRASES = (
+    "success",
+    "neutral",
+    "failure",
+    "advisory",
+    "📋 Spec Needed",
+    ".omo/grimoire/scope.yml",
+    "spec-needed",
+    "no_code_or_push_action=true",
+    "spec-gap-halt",
+    "conclusion=\"neutral\"",
+    "no separate neutral check-run",
+)
+
+ADVISORY_RELEASE_NOTES_REQUIRED_PHRASES = (
+    "# Release Notes: Grimoire Reusable Control Plane v1 Advisory Failure Separation",
+    "v1 minor behavior change",
+    "No consumer workflow action is required",
+    "success",
+    "neutral",
+    "failure",
+    "advisory",
+    "📋 Spec Needed",
+    ".omo/grimoire/scope.yml",
+    "spec-needed",
+    "no_code_or_push_action=true",
+    "cast_driver/labels/action/docs commits",
+    "No separate neutral check-run",
 )
 
 REQUIRED_PHRASES = (
@@ -120,6 +168,18 @@ REQUIRED_PHRASES = (
     "Helper files under `actions/grimoire/<stage>/scripts/` are action-local implementation details",
     "pull_request.synchronize",
     RELEASE_NOTES_PATH,
+    ADVISORY_ADR_PATH,
+    ADVISORY_RELEASE_NOTES_PATH,
+    "success",
+    "neutral",
+    "failure",
+    "advisory",
+    "📋 Spec Needed",
+    ".omo/grimoire/scope.yml",
+    "spec-needed",
+    "no_code_or_push_action=true",
+    "spec-gap-halt",
+    "conclusion=\"neutral\"",
 )
 
 NON_MAIN_REF_PATTERN = re.compile(
@@ -259,12 +319,27 @@ def assert_invalid_examples(docs_text: str) -> None:
     print("invalid examples ok")
 
 
+def assert_advisory_adr(docs_path: Path, docs_text: str) -> None:
+    advisory_adr_path = docs_path.parents[0] / "decisions" / "grimoire-advisory-failure-separation.md"
+    require(ADVISORY_ADR_PATH in docs_text, "docs must link the advisory/failure ADR path")
+    advisory_adr_text = read_text(advisory_adr_path)
+    assert_headings(advisory_adr_text, ADVISORY_ADR_HEADINGS, "advisory ADR")
+    for phrase in ADVISORY_ADR_REQUIRED_PHRASES:
+        require(phrase in advisory_adr_text, f"advisory ADR missing required phrase: {phrase}")
+    print("advisory ADR ok")
+
+
 def assert_release_notes(docs_path: Path, docs_text: str) -> None:
     release_path = docs_path.parents[0] / "releases" / "grimoire-reusable-control-plane-v1.md"
+    advisory_release_path = docs_path.parents[0] / "releases" / "grimoire-reusable-control-plane-v1-advisory-failure.md"
     require(RELEASE_NOTES_PATH in docs_text, "docs must link the release note path")
+    require(ADVISORY_RELEASE_NOTES_PATH in docs_text, "docs must link the advisory/failure release note path")
     release_text = read_text(release_path)
+    advisory_release_text = read_text(advisory_release_path)
     for phrase in RELEASE_NOTES_REQUIRED_PHRASES:
         require(phrase in release_text, f"release notes missing required phrase: {phrase}")
+    for phrase in ADVISORY_RELEASE_NOTES_REQUIRED_PHRASES:
+        require(phrase in advisory_release_text, f"advisory release notes missing required phrase: {phrase}")
     print("release notes ok")
 
 
@@ -282,6 +357,7 @@ def run_contract(adr_path: Path, docs_path: Path) -> None:
     assert_scope_guard(combined_text)
     assert_recommended_consumer_snippet(docs_text)
     assert_invalid_examples(docs_text)
+    assert_advisory_adr(docs_path, docs_text)
     assert_release_notes(docs_path, docs_text)
     print("grimoire docs contract ok")
 
@@ -302,6 +378,14 @@ def main(argv: list[str]) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     return 0
+
+
+def test_grimoire_docs_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    run_contract(
+        root / "docs" / "decisions" / "grimoire-reusable-control-plane.md",
+        root / "docs" / "grimoire-reusable.md",
+    )
 
 
 if __name__ == "__main__":
