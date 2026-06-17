@@ -56,7 +56,8 @@ __pycache__/
 !scripts/scan-secrets.sh
 !tests/grimoire_secret_hygiene_test.py
 !stacks/agent-stack/secrets/
-!stacks/agent-stack/secrets/cloudflared.env.example
+stacks/agent-stack/secrets/*
+!stacks/agent-stack/secrets/*.example
 !**/.env.example
 
 # Planned Codex loop deliverable that contains "pat" as part of dispatch text.
