@@ -9,3 +9,17 @@ services:
     command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run
     labels:
       - com.centurylinklabs.watchtower.enable=false
+
+  # The Cloudflare `ssh.dongwontuna.net` ingress targets ssh://127.0.0.1:2222
+  # (legacy port inherited from the retired gitea SSH service), but this host's
+  # sshd listens on :22. Bridge 2222 -> 22 with an unprivileged socat forwarder
+  # that shares the host netns, so it dials the same 127.0.0.1 the cloudflared
+  # connector resolves the ingress to. Image pinned by digest (socat 1.8.1.1).
+  ssh-port-forward:
+    image: alpine/socat@sha256:2b6b49e9000105672bf70648f8642801791374a24f549d30bed3c3115c13d24c
+    container_name: ssh-port-forward
+    restart: unless-stopped
+    network_mode: host
+    command: ["TCP-LISTEN:2222,fork,reuseaddr", "TCP:127.0.0.1:22"]
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
