@@ -75,6 +75,12 @@ outputs:
   terminal:
     description: Whether this run reached the clear-noop terminal.
     value: ${{ steps.complete.outputs.terminal }}
+  conclusion:
+    description: Final check conclusion emitted by the complete step.
+    value: ${{ steps.complete.outputs.conclusion }}
+  summary:
+    description: Final run summary emitted by the complete step.
+    value: ${{ steps.complete.outputs.summary }}
   final_status_path:
     description: Absolute path to the final cast status JSON artifact.
     value: ${{ steps.complete.outputs.output_path }}
@@ -222,6 +228,18 @@ runs:
       with:
         consumer-workspace: ${{ inputs.consumer-workspace }}
         transition: fizzled
+        repository: ${{ inputs.repository }}
+        pr-number: ${{ inputs.pr-number }}
+        remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}
+        token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}
+        github-api-url: ${{ github.api_url }}
+
+    - id: labels-spec-needed
+      if: ${{ steps.decide.outputs.label_transition == 'spec-needed' }}
+      uses: ./control-plane/actions/grimoire/labels
+      with:
+        consumer-workspace: ${{ inputs.consumer-workspace }}
+        transition: spec-needed
         repository: ${{ inputs.repository }}
         pr-number: ${{ inputs.pr-number }}
         remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}

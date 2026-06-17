@@ -59,7 +59,7 @@ REQUIRED_OUTPUTS: dict[str, set[str]] = {
     "fix": {"status", "scope_ok", "noop", "should_commit", "should_push", "output_path", "handoff_path"},
     "verify": {"approved", "output_path", "jq_predicate"},
     "labels": {"changed", "operation_count", "status_path", "state_output", "github_pr_label_mutation_attempted", "remote_apply_status"},
-    "cast": {"status", "decision", "terminal", "final_status_path"},
+    "cast": {"status", "decision", "terminal", "conclusion", "summary", "final_status_path"},
 }
 
 HELPERS = {

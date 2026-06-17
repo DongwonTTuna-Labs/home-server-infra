@@ -123,6 +123,14 @@ def step_block(text: str, name: str) -> str:
     raise ContractError(f"missing workflow step: {name}")
 
 
+def action_step_block(text: str, step_id: str) -> str:
+    marker = f"    - id: {step_id}\n"
+    start = text.find(marker)
+    require(start != -1, f"missing action step: {step_id}")
+    next_start = text.find("\n    - id:", start + len(marker))
+    return text[start:] if next_start == -1 else text[start:next_start]
+
+
 def assert_events(text: str) -> None:
     on_block = section_body(text, "on", 0)
     events = keys_at_indent(on_block, 2)
@@ -193,6 +201,26 @@ def assert_stage_paths(text: str, repo_root: Path) -> None:
     require(text.count("./control-plane/actions/grimoire/trusted-controller") == 1, "trusted-controller must be called exactly once")
     require(text.count("./control-plane/actions/grimoire/cast") == 1, "cast driver must be called exactly once")
     require("./actions/grimoire" not in text, "bare ./actions/grimoire paths are forbidden")
+
+
+def assert_cast_action_label_and_output_wiring(repo_root: Path) -> None:
+    cast_text = read_text(repo_root / "actions" / "grimoire" / "cast" / "action.yml")
+    require(cast_text.count("id: labels-spec-needed") == 1, "cast action must require exactly one labels-spec-needed step")
+    for output in ("conclusion", "summary"):
+        require(f"  {output}:" in cast_text and f"value: ${{{{ steps.complete.outputs.{output} }}}}" in cast_text, f"cast action must expose {output} from complete")
+    trusted_label_inputs = (
+        "remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}",
+        "token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}",
+        "github-api-url: ${{ github.api_url }}",
+    )
+    for step_id in ("labels-running", "labels-done", "labels-fizzled", "labels-spec-needed"):
+        block = action_step_block(cast_text, step_id)
+        require("uses: ./control-plane/actions/grimoire/labels" in block, f"{step_id} must use the trusted labels action")
+        for snippet in trusted_label_inputs:
+            require(snippet in block, f"{step_id} must use trusted PAT label input {snippet}")
+    spec_needed = action_step_block(cast_text, "labels-spec-needed")
+    require("if: ${{ steps.decide.outputs.label_transition == 'spec-needed' }}" in spec_needed, "labels-spec-needed must be gated on spec-needed transition")
+    require("transition: spec-needed" in spec_needed, "labels-spec-needed must pass spec-needed transition")
 
 
 def assert_opencode_runtime_provisioning(text: str, repo_root: Path) -> None:
@@ -291,6 +319,7 @@ def assert_workflow_contract(workflow_path: Path, repo_root: Path) -> None:
     assert_inputs_and_secrets(text)
     assert_runner_and_checkouts(text)
     assert_stage_paths(text, repo_root)
+    assert_cast_action_label_and_output_wiring(repo_root)
     assert_opencode_runtime_provisioning(text, repo_root)
     assert_opencode_runtime_preflight(text)
     assert_auth_and_inline_shell(text)
