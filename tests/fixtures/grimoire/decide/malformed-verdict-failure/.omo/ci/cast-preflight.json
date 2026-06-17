@@ -1,0 +1,9 @@
+{
+  "can_continue": true,
+  "does_not_rerun_trusted_controller": true,
+  "schema_version": 1,
+  "stage": "grimoire-cast",
+  "status": "ok",
+  "trusted_controller_status": "ok",
+  "trusted_status_path": ".omo/ci/trusted-controller-status.json"
+}

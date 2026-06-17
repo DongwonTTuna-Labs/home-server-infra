@@ -1,0 +1,28 @@
+{
+  "approval_signal": "GRIMOIRE_REVIEW_FINDINGS_PRESENT",
+  "findings": [
+    {
+      "evidence": "src/lib.rs:7 deterministic fixture evidence",
+      "file": "src/lib.rs",
+      "lens": "correctness",
+      "line": 7,
+      "severity": "medium",
+      "suggested_fix": "Bind the finding to OpenSpec before allowing fixes.",
+      "title": "Synthetic in-scope Grimoire decide fixture",
+      "what": "Synthetic in-scope Grimoire decide fixture was observed in the deterministic loop fixture.",
+      "why": "The fixture needs a stable finding to exercise fail-closed loop semantics."
+    }
+  ],
+  "findings_count": 1,
+  "lenses": [
+    "security",
+    "correctness",
+    "maintainability",
+    "repo-policy"
+  ],
+  "mutation_allowed": false,
+  "read_only": true,
+  "schema_version": 1,
+  "stage": "grimoire-review",
+  "status": "findings"
+}

@@ -1,0 +1,8 @@
+{
+  "boulder_required": true,
+  "continuation_state": "completed",
+  "schema_version": 1,
+  "semantic_iteration_cap": false,
+  "stage": "grimoire-cast",
+  "status": "completed"
+}
