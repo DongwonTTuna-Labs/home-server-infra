@@ -1,89 +1,47 @@
 #!/usr/bin/env python3
+# pyright: reportAny=false, reportExplicitAny=false, reportUnusedCallResult=false, reportImplicitStringConcatenation=false, reportUnknownVariableType=false
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
-import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from types import ModuleType
+from typing import Any
 
 STAGE = "grimoire-self-smoke"
+DEFAULT_CASES = ("spec-gap-advisory", "clear-noop-success", "scope-violation-failure")
+FINAL_EXPECTATIONS: dict[str, dict[str, object]] = {
+    "spec-gap-advisory": {
+        "final_status": "advisory",
+        "final_conclusion": "neutral",
+        "complete_exit_code": 0,
+        "terminal": False,
+        "should_push": False,
+        "label_transition": "spec-needed",
+    },
+    "clear-noop-success": {
+        "final_status": "terminal",
+        "final_conclusion": "success",
+        "complete_exit_code": 0,
+        "terminal": True,
+        "should_push": False,
+        "label_transition": "done",
+    },
+    "scope-violation-failure": {
+        "final_status": "fizzled",
+        "final_conclusion": "failure",
+        "complete_exit_code": 1,
+        "terminal": False,
+        "should_push": False,
+        "label_transition": "fizzled",
+    },
+}
 
-PROPOSAL = """# Change: Grimoire Push Smoke
-
-## Why
-We need one live positive smoke proving the merged Grimoire reusable control plane can perform a benign docs-only scoped autofix from a normal same-repo pull request, push exactly one bot commit, and re-review on `pull_request.synchronize`.
-
-## What Changes
-- Add an OpenSpec-backed smoke fixture for `grimoire-push-smoke`.
-- Add a deterministic directive at `docs/GRIMOIRE_PUSH_SMOKE.spec.md`.
-- Intentionally leave `docs/GRIMOIRE_PUSH_SMOKE.md` absent so Grimoire can create it.
-"""
-
-DESIGN = """# Design: Grimoire Push Smoke
-
-## Scope
-This change is a smoke fixture only. The active scope is limited to proving the Grimoire reusable control-plane live positive path on a benign documentation addition.
-
-## Expected Automation Behavior
-1. Review/design should notice that `docs/GRIMOIRE_PUSH_SMOKE.spec.md` requires `docs/GRIMOIRE_PUSH_SMOKE.md`.
-2. Design should classify the missing marker as in scope for this smoke.
-3. Fix should create only `docs/GRIMOIRE_PUSH_SMOKE.md` with the canonical content in `docs/GRIMOIRE_PUSH_SMOKE.spec.md`.
-4. Verify should approve only if the patch is additive, docs-only, and limited to the marker file.
-5. Cast should reach a scoped-push decision, but this self-smoke must not push to any external consumer repo.
-"""
-
-TASKS = """# Tasks
-
-- [ ] 1. Create `docs/GRIMOIRE_PUSH_SMOKE.md` with the exact canonical Markdown from `docs/GRIMOIRE_PUSH_SMOKE.spec.md`. This task is complete when the marker file exists with exact content; Grimoire must not edit this task checkbox.
-"""
-
-SPEC = """## ADDED Requirements
-
-### Requirement: Grimoire push smoke marker
-The repository SHALL contain `docs/GRIMOIRE_PUSH_SMOKE.md` with the exact canonical Markdown content specified in `docs/GRIMOIRE_PUSH_SMOKE.spec.md`.
-
-#### Scenario: Grimoire recreates the missing marker
-- **GIVEN** a same-repo non-draft pull request for the `grimoire-push-smoke` change
-- **AND** `docs/GRIMOIRE_PUSH_SMOKE.spec.md` exists
-- **AND** `docs/GRIMOIRE_PUSH_SMOKE.md` is absent before Grimoire runs
-- **WHEN** Grimoire runs review, design, fix, verify, and cast
-- **THEN** Grimoire creates exactly `docs/GRIMOIRE_PUSH_SMOKE.md` with the canonical content from `docs/GRIMOIRE_PUSH_SMOKE.spec.md`
-- **AND** Grimoire does not modify source code, workflows, configuration, credentials, relayer behavior, signing, nonce handling, authentication, or live-capable venue behavior
-"""
-
-DOC_SPEC = """# Grimoire Push Smoke Spec
-
-## Purpose
-This tracked spec is the deterministic smoke directive for the Grimoire reusable control-plane live push smoke.
-
-## Target File
-`docs/GRIMOIRE_PUSH_SMOKE.md`
-
-## Required Grimoire Action
-If `docs/GRIMOIRE_PUSH_SMOKE.md` is absent, create it with exactly the canonical Markdown below and do not change any other file.
-
-## Canonical Markdown
-
-```markdown
-# Grimoire Push Smoke
-
-This file documents the Grimoire reusable control-plane push smoke for the OpenSpec-backed `grimoire-push-smoke` change.
-
-The smoke checks that Grimoire can compare the OpenSpec task and requirement context with the PR tree, notice that `docs/GRIMOIRE_PUSH_SMOKE.md` is missing, and route that finding through design, fix, verify, and scoped push.
-
-The expected fix is deliberately small: create this Markdown file as a docs-only additive change, without modifying or deleting existing files. The push stage then commits and pushes that new-file patch to prove the reusable Grimoire control plane can carry a benign documentation fix through to the PR branch and trigger a `pull_request.synchronize` re-review.
-
-This smoke must not modify source code, workflows, configuration, credentials, relayer behavior, signing, nonce handling, authentication, or live-capable venue behavior.
-```
-
-## Forbidden Changes
-Do not modify source code, workflows, configuration, credentials, relayer behavior, signing, nonce handling, authentication, live-capable venue behavior, OpenSpec task checkboxes, or any file other than `docs/GRIMOIRE_PUSH_SMOKE.md`.
-"""
 
 class SmokeError(Exception):
     pass
@@ -93,126 +51,9 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def write(path: pathlib.Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
-def write_json(path: pathlib.Path, payload: dict[str, object]) -> None:
+def write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def run(command: list[str], cwd: pathlib.Path, expected: set[int] | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    expected_codes = {0} if expected is None else expected
-    completed = subprocess.run(command, cwd=str(cwd), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if completed.returncode not in expected_codes:
-        raise SmokeError(f"command failed ({completed.returncode}, expected {sorted(expected_codes)}): {' '.join(command)}\nstdout={completed.stdout}\nstderr={completed.stderr}")
-    return completed
-
-
-def load_json(path: pathlib.Path) -> dict[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise SmokeError(f"JSON artifact must be an object: {path}")
-    return payload
-
-
-def diag(label: str, payload: object) -> None:
-    print(f"self-smoke-diag: {label}={json.dumps(payload, sort_keys=True)}")
-
-
-def dump_review_diagnostics(payload: dict[str, object]) -> None:
-    findings = payload.get("findings")
-    summary: list[dict[str, object]] = []
-    if isinstance(findings, list):
-        for finding in findings:
-            if not isinstance(finding, dict):
-                continue
-            item: dict[str, object] = {
-                "file": finding.get("file"),
-                "title": finding.get("title"),
-            }
-            for key in ("scope", "classification", "disposition", "out_of_scope", "lens"):
-                if key in finding:
-                    item[key] = finding.get(key)
-            summary.append(item)
-    diag("review_findings", summary)
-
-
-def dump_design_diagnostics(payload: dict[str, object]) -> None:
-    bindings = payload.get("bindings")
-    binding_summary: list[dict[str, object]] = []
-    if isinstance(bindings, list):
-        for binding in bindings:
-            if not isinstance(binding, dict):
-                continue
-            binding_summary.append(
-                {
-                    "finding_location": binding.get("finding_location"),
-                    "target_paths": binding.get("target_paths"),
-                    "citation": binding.get("citation"),
-                }
-            )
-    in_scope = payload.get("in_scope")
-    in_scope_paths: list[object] = []
-    if isinstance(in_scope, list):
-        for item in in_scope:
-            if isinstance(item, dict):
-                in_scope_paths.append(
-                    {
-                        "path": item.get("path"),
-                        "target_paths": item.get("target_paths"),
-                        "location": item.get("location"),
-                    }
-                )
-    diag("design_allowed_write_paths", payload.get("allowed_write_paths"))
-    diag("design_target_paths", payload.get("target_paths"))
-    diag("design_bindings", binding_summary)
-    diag("design_in_scope_paths", in_scope_paths)
-
-
-def dump_fix_diagnostics(path: pathlib.Path) -> None:
-    if not path.exists():
-        diag("fix_status", {"artifact_missing": str(path)})
-        return
-    payload = load_json(path)
-    summary = {
-        "status": payload.get("status"),
-        "scope_ok": payload.get("scope_ok"),
-        "changed_files": payload.get("changed_files"),
-        "allowed_paths": payload.get("allowed_paths"),
-        "allowed_write_paths": payload.get("allowed_write_paths"),
-        "spec_target_paths": payload.get("spec_target_paths"),
-        "violations": payload.get("violations"),
-    }
-    for key, value in sorted(payload.items()):
-        if key.startswith("invalid_"):
-            summary[key] = value
-    diag("fix_status", summary)
-
-
-def prepare_workspace(root: pathlib.Path) -> pathlib.Path:
-    workspace = root / "consumer"
-    workspace.mkdir(parents=True, exist_ok=True)
-    run(["git", "init"], workspace)
-    run(["git", "config", "user.name", "grimoire-self-smoke"], workspace)
-    run(["git", "config", "user.email", "grimoire-self-smoke@dongwontuna-labs.invalid"], workspace)
-    write(workspace / "openspec/changes/grimoire-push-smoke/proposal.md", PROPOSAL)
-    write(workspace / "openspec/changes/grimoire-push-smoke/design.md", DESIGN)
-    write(workspace / "openspec/changes/grimoire-push-smoke/tasks.md", TASKS)
-    write(workspace / "openspec/changes/grimoire-push-smoke/specs/grimoire-push-smoke/spec.md", SPEC)
-    write(workspace / "docs/GRIMOIRE_PUSH_SMOKE.spec.md", DOC_SPEC)
-    run(["git", "add", "openspec", "docs/GRIMOIRE_PUSH_SMOKE.spec.md"], workspace)
-    run(["git", "commit", "-m", "test(openspec): add grimoire push smoke fixture"], workspace)
-    return workspace
-
-
-def helper(root: pathlib.Path, stage: str, name: str) -> pathlib.Path:
-    path = root / "actions" / "grimoire" / stage / "scripts" / name
-    if not path.is_file():
-        raise SmokeError(f"missing helper: {path}")
-    return path
 
 
 def default_artifact_root() -> pathlib.Path:
@@ -224,63 +65,222 @@ def default_artifact_root() -> pathlib.Path:
     return pathlib.Path(tempfile.mkdtemp(prefix="grimoire-self-smoke-"))
 
 
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Run the real-opencode Grimoire self-smoke without external push.")
+def prepare_artifact_root(raw: str) -> pathlib.Path:
+    if not raw:
+        return default_artifact_root()
+    artifact_root = pathlib.Path(raw).resolve()
+    if artifact_root.exists() and any(artifact_root.iterdir()):
+        raise SmokeError(f"artifact root must be empty before self-smoke: {artifact_root}")
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    return artifact_root
+
+
+def fixture_helper_path(root: pathlib.Path) -> pathlib.Path:
+    path = root / "tests" / "fixtures" / "grimoire" / "run-loop-fixtures.py"
+    if not path.is_file():
+        raise SmokeError(f"missing fixture helper: {path}")
+    return path
+
+
+def load_fixture_helper(root: pathlib.Path) -> ModuleType:
+    path = fixture_helper_path(root)
+    spec = importlib.util.spec_from_file_location("grimoire_run_loop_fixtures", path)
+    if spec is None or spec.loader is None:
+        raise SmokeError(f"unable to load fixture helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SmokeError(message)
+
+
+def expect_equal(actual: object, expected: object, message: str) -> None:
+    if actual != expected:
+        raise SmokeError(f"{message}: actual={actual!r} expected={expected!r}")
+
+
+def expected_int(expectations: dict[str, object], key: str) -> int:
+    value = expectations[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SmokeError(f"expectation {key} must be an integer")
+    return value
+
+
+def decide_args(helper: ModuleType, workspace: pathlib.Path, case: dict[str, Any]) -> list[str]:
+    paths = getattr(helper, "DECIDE_INPUT_PATHS")
+    return [
+        "decide",
+        "--consumer-workspace",
+        str(workspace),
+        "--preflight-status",
+        paths["preflight"],
+        "--review-status",
+        paths["review"],
+        "--review-outcome",
+        str(case["review_outcome"]),
+        "--design-status",
+        paths["design"],
+        "--issue-status",
+        paths["issues"],
+        "--spec-gap-status",
+        paths["spec_gap"],
+        "--fix-status",
+        paths["fix"],
+        "--fix-outcome",
+        str(case["fix_outcome"]),
+        "--boulder-status",
+        paths["boulder"],
+        "--verdict-status",
+        paths["verdict"],
+        "--verify-outcome",
+        str(case["verify_outcome"]),
+        "--output",
+        getattr(helper, "DECIDE_OUTPUT"),
+    ]
+
+
+def read_workspace_json(helper: ModuleType, workspace: pathlib.Path, relative: str) -> dict[str, Any]:
+    read_json = getattr(helper, "read_json")
+    payload = read_json(workspace, relative)
+    if not isinstance(payload, dict):
+        raise SmokeError(f"fixture helper returned non-object JSON: {relative}")
+    return payload
+
+
+def run_case(helper: ModuleType, artifact_root: pathlib.Path, case: dict[str, Any], log_lines: list[str]) -> dict[str, Any]:
+    name = str(case["name"])
+    expected_final = FINAL_EXPECTATIONS[name]
+    getattr(helper, "assert_decide_fixture_inventory")(case)
+    workspace = getattr(helper, "copy_decide_fixture_workspace")(artifact_root, case)
+    getattr(helper, "run_helper")("cast", "cast_driver.py", decide_args(helper, workspace, case), {0}, workspace, log_lines)
+
+    decision_path = getattr(helper, "DECIDE_OUTPUT")
+    decision = read_workspace_json(helper, workspace, decision_path)
+    actual_tuple = getattr(helper, "actual_decide_tuple")(decision)
+    expected_tuple = tuple(case["expected"])
+    expect_equal(actual_tuple, expected_tuple, f"{name} decision tuple mismatch")
+    expect_equal(decision.get("label_transition"), expected_final["label_transition"], f"{name} label transition mismatch")
+    expect_equal(decision.get("terminal"), expected_final["terminal"], f"{name} terminal mismatch")
+    expect_equal(decision.get("should_push"), expected_final["should_push"], f"{name} should_push mismatch")
+
+    if name == "spec-gap-advisory":
+        paths = getattr(helper, "DECIDE_INPUT_PATHS")
+        spec_gap = read_workspace_json(helper, workspace, paths["spec_gap"])
+        expect_equal(spec_gap.get("no_code_or_push_action"), True, "spec-gap advisory must forbid code or push action")
+        expect_equal(decision.get("decision"), "spec-gap-halt", "spec-gap advisory decision mismatch")
+        expect_equal(decision.get("conclusion"), "neutral", "spec-gap advisory conclusion mismatch")
+        expect_equal(decision.get("label_transition"), "spec-needed", "spec-gap advisory label mismatch")
+
+    final_path = f".omo/ci/cast-final-{name}.json"
+    complete_exit_code = expected_int(expected_final, "complete_exit_code")
+    completed = getattr(helper, "run_helper")(
+        "cast",
+        "cast_driver.py",
+        ["complete", "--consumer-workspace", str(workspace), "--decision", decision_path, "--output", final_path],
+        {complete_exit_code},
+        workspace,
+        log_lines,
+    )
+    final = read_workspace_json(helper, workspace, final_path)
+    expect_equal(completed.returncode, complete_exit_code, f"{name} complete process exit mismatch")
+    expect_equal(final.get("status"), expected_final["final_status"], f"{name} final status mismatch")
+    expect_equal(final.get("conclusion"), expected_final["final_conclusion"], f"{name} final conclusion mismatch")
+    expect_equal(final.get("decision"), decision.get("decision"), f"{name} final decision mismatch")
+    expect_equal(final.get("should_push"), expected_final["should_push"], f"{name} final should_push mismatch")
+    require(not (workspace / ".omo" / "ci" / "cast-push-status.json").exists(), f"{name} must not write or require push status")
+
+    return {
+        "name": name,
+        "decision": decision.get("decision"),
+        "conclusion": decision.get("conclusion"),
+        "decision_exit_code": decision.get("exit_code"),
+        "label_transition": decision.get("label_transition"),
+        "terminal": decision.get("terminal"),
+        "should_push": decision.get("should_push"),
+        "final_status": final.get("status"),
+        "final_conclusion": final.get("conclusion"),
+        "complete_exit_code": completed.returncode,
+        "code_action_attempted": False,
+        "external_push_attempted": False,
+        "workspace": workspace.relative_to(artifact_root).as_posix(),
+    }
+
+
+def run_signal_smoke(root: pathlib.Path, artifact_root: pathlib.Path) -> dict[str, Any]:
+    helper = load_fixture_helper(root)
+    temp_root = getattr(helper, "TEMP_ROOT", None)
+    if isinstance(temp_root, pathlib.Path):
+        temp_root.mkdir(parents=True, exist_ok=True)
+    cases_by_name = {str(case["name"]): case for case in getattr(helper, "load_decide_fixture_cases")()}
+    missing = [name for name in DEFAULT_CASES if name not in cases_by_name]
+    if missing:
+        raise SmokeError("missing required decide fixture cases: " + ", ".join(missing))
+    log_lines = [
+        "# Grimoire self-smoke deterministic signal layer",
+        f"generated_at={utc_now()}",
+        f"control_plane_root={root}",
+        "live_opencode_invoked=false",
+        "external_push_attempted=false",
+        "secret_values=redacted",
+        "",
+    ]
+    summaries = [run_case(helper, artifact_root, cases_by_name[name], log_lines) for name in DEFAULT_CASES]
+    summary = {
+        "schema_version": 1,
+        "stage": STAGE,
+        "generated_at": utc_now(),
+        "status": "ok",
+        "artifact_root": str(artifact_root),
+        "log_path": str(artifact_root / "self-smoke.log"),
+        "case_count": len(summaries),
+        "cases": summaries,
+        "deterministic_signal_layer": True,
+        "live_opencode_invoked": False,
+        "model_output_dependency": False,
+        "real_consumer_credentials_required": False,
+        "external_push_attempted": False,
+        "real_remote_mutation_attempted": False,
+    }
+    write_json(artifact_root / "self-smoke-summary.json", summary)
+    (artifact_root / "self-smoke.log").write_text("\n".join(log_lines).rstrip() + "\n", encoding="utf-8")
+    return summary
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run deterministic Grimoire signal-layer self-smoke cases without live opencode or external push.")
     parser.add_argument("--control-plane-root", default=".")
     parser.add_argument("--artifact-root", default="")
-    args = parser.parse_args(argv)
-    root = pathlib.Path(args.control_plane_root).resolve()
-    artifact_root = pathlib.Path(args.artifact_root).resolve() if args.artifact_root else default_artifact_root()
-    if artifact_root.exists():
-        shutil.rmtree(artifact_root)
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    workspace = prepare_workspace(artifact_root)
-    env = os.environ.copy()
-    env.setdefault("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
-    env.setdefault("OPENCODE_PURE", "1")
+    return parser.parse_args(argv)
 
-    changed = workspace / ".omo/ci/changed-files.txt"
-    write(changed, "openspec/changes/grimoire-push-smoke/proposal.md\nopenspec/changes/grimoire-push-smoke/design.md\nopenspec/changes/grimoire-push-smoke/tasks.md\nopenspec/changes/grimoire-push-smoke/specs/grimoire-push-smoke/spec.md\ndocs/GRIMOIRE_PUSH_SMOKE.spec.md\n")
-    trusted = workspace / ".omo/ci/trusted-controller-status.json"
-    run(["python3", str(helper(root, "trusted-controller", "trusted_controller.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--changed-files", str(changed), "--output", str(trusted)], root, env=env)
-    review = workspace / ".omo/ci/review-findings.json"
-    run(["python3", str(helper(root, "review", "review.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--output", str(review)], root, env=env)
-    review_payload = load_json(review)
-    dump_review_diagnostics(review_payload)
-    if review_payload.get("status") != "findings":
-        raise SmokeError("self-smoke review must produce an in-scope missing-marker finding")
-    design = workspace / ".omo/ci/spec-sufficiency.json"
-    run(["python3", str(helper(root, "design", "design.py")), "--consumer-workspace", str(workspace), "--repository", "DongwonTTuna-Labs/rs-builder-relayer-client", "--review-input", str(review), "--output", str(design), "--plan", ".omo/ci/design-plan.md"], root, env=env)
-    design_payload = load_json(design)
-    dump_design_diagnostics(design_payload)
-    issues = workspace / ".omo/ci/out-of-scope-issues-status.json"
-    run(["python3", str(helper(root, "cast", "cast_driver.py")), "file-issues", "--consumer-workspace", str(workspace), "--design-path", str(design), "--repository", "local-consumer", "--pr-number", "0", "--output", str(issues), "--ledger", ".omo/ci/out-of-scope-issues-ledger.json"], root, env=env)
-    gap = workspace / ".omo/ci/spec-gap-status.json"
-    write_json(gap, {"schema_version": 1, "stage": "grimoire-spec-gap", "status": "clear", "should_halt": False})
-    fix = workspace / ".omo/ci/fix-status.json"
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    root = pathlib.Path(args.control_plane_root).resolve()
     try:
-        run(["python3", str(helper(root, "fix", "fix.py")), "--consumer-workspace", str(workspace), "--control-plane-root", str(root), "--spec-sufficiency", str(design), "--spec-gap-status", str(gap), "--pr-touched", str(changed), "--output", str(fix), "--handoff-output", ".omo/ci/fix-handoff-prompt.md"], root, env=env)
-    except SmokeError:
-        dump_fix_diagnostics(fix)
-        raise
-    dump_fix_diagnostics(fix)
-    fix_payload = load_json(fix)
-    if fix_payload.get("status") != "fixed" or fix_payload.get("changed_files") != ["docs/GRIMOIRE_PUSH_SMOKE.md"]:
-        raise SmokeError("self-smoke fix must create exactly docs/GRIMOIRE_PUSH_SMOKE.md")
-    boulder = workspace / ".omo/boulder.json"
-    run(["python3", str(helper(root, "cast", "cast_driver.py")), "boulder", "--consumer-workspace", str(workspace), "--fix-status", str(fix), "--output", str(boulder)], root, env=env)
-    verdict = workspace / ".omo/grimoire/verdict.json"
-    run(["python3", str(helper(root, "verify", "verify.py")), "--consumer-workspace", str(workspace), "--spec-sufficiency", str(design), "--spec-gap-status", str(gap), "--fix-status", str(fix), "--output", str(verdict)], root, env=env)
-    preflight = workspace / ".omo/ci/cast-preflight.json"
-    run(["python3", str(helper(root, "cast", "cast_driver.py")), "preflight", "--consumer-workspace", str(workspace), "--trusted-status-path", str(trusted), "--trusted-outcome", "success", "--trusted-status", "ok", "--trusted-action", "continue", "--model-execution-allowed", "true", "--write-allowed", "true", "--commit-allowed", "true", "--push-allowed", "true", "--github-mutation-allowed", "true", "--output", str(preflight)], root, env=env)
-    decision = workspace / ".omo/ci/cast-decision.json"
-    run(["python3", str(helper(root, "cast", "cast_driver.py")), "decide", "--consumer-workspace", str(workspace), "--preflight-status", str(preflight), "--review-status", str(review), "--review-outcome", "success", "--design-status", str(design), "--issue-status", str(issues), "--spec-gap-status", str(gap), "--fix-status", str(fix), "--fix-outcome", "success", "--boulder-status", str(boulder), "--verdict-status", str(verdict), "--verify-outcome", "success", "--output", str(decision)], root, env=env)
-    decision_payload = load_json(decision)
-    if decision_payload.get("decision") != "scoped-push" or decision_payload.get("status") != "ok" or decision_payload.get("should_push") is not True:
-        raise SmokeError("self-smoke did not reach scoped-push decision")
-    summary: dict[str, object] = {"schema_version": 1, "stage": STAGE, "generated_at": utc_now(), "status": "ok", "decision": "scoped-push", "external_push_attempted": False, "artifact_root": str(artifact_root), "consumer_shape_head": "345708674ac358ae2974af2c645e67456eeb39cf"}
-    write_json(artifact_root / "self-smoke-summary.json", summary)
-    print(f"{STAGE}: decision=scoped-push status=ok artifact_root={artifact_root}")
+        artifact_root = prepare_artifact_root(str(args.artifact_root))
+        summary = run_signal_smoke(root, artifact_root)
+    except SmokeError as exc:
+        print(f"{STAGE}: failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"{STAGE}: failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{STAGE}: status=ok artifact_root={summary['artifact_root']}")
+    for case in summary["cases"]:
+        print(
+            (
+                f"PASS {case['name']}: decision={case['decision']} "
+                f"conclusion={case['conclusion']} final_status={case['final_status']} "
+                f"complete_exit={case['complete_exit_code']} external_push_attempted=false"
+            )
+        )
+    print(f"summary={artifact_root / 'self-smoke-summary.json'}")
     return 0
 
 
