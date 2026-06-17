@@ -429,6 +429,18 @@ def verdict_approved(payload: dict[str, Any]) -> bool:
     return all(payload.get(lens) == "APPROVE" for lens in APPROVE_LENSES) and payload.get("approved") is True
 
 
+def design_has_no_actionable_work(payload: dict[str, Any]) -> bool:
+    empty_work_fields = ("in_scope", "bindings", "target_paths", "allowed_write_paths")
+    return (
+        payload.get("schema_version") == 1
+        and payload.get("stage") == "grimoire-design"
+        and payload.get("status") == "sufficient"
+        and payload.get("spec_sufficient") is True
+        and payload.get("should_halt") is False
+        and all(isinstance(payload.get(field), list) and not payload.get(field) for field in empty_work_fields)
+    )
+
+
 def stage_blockers(args: argparse.Namespace, workspace: pathlib.Path) -> list[str]:
     blockers: list[str] = []
     preflight = read_json(resolve_path(args.preflight_status, workspace), "cast preflight")
@@ -456,6 +468,7 @@ def run_decide(args: argparse.Namespace) -> int:
     decision = "fizzled"
     terminal = False
     should_push = False
+    conclusion = "failure"
     reasons: list[str] = []
     try:
         blockers = stage_blockers(args, workspace)
@@ -466,9 +479,18 @@ def run_decide(args: argparse.Namespace) -> int:
             gap = read_json(resolve_path(args.spec_gap_status, workspace), "spec-gap status")
             if gap.get("should_halt") is True and gap.get("status") == "halt":
                 decision = "spec-gap-halt"
+                conclusion = "neutral"
+                label_transition = "spec-needed"
+                exit_code = 0
                 reasons.append("design requested spec-gap halt before code changes")
             else:
                 reasons.append("design requested halt but spec-gap artifact was not a halt")
+        if not reasons and design_has_no_actionable_work(design):
+            decision = "no-actionable-work"
+            conclusion = "neutral"
+            label_transition = "spec-needed"
+            exit_code = 0
+            reasons.append("design found no actionable in-scope work with sufficient spec")
         if not reasons:
             fix = read_json(resolve_path(args.fix_status, workspace), "fix status")
             if args.fix_outcome != "success" or fix.get("scope_ok") is not True or fix.get("status") not in {"clear-noop", "fixed"}:
@@ -483,11 +505,13 @@ def run_decide(args: argparse.Namespace) -> int:
                         reasons.append(f"verify rejected or malformed verdict: outcome={args.verify_outcome}")
                     elif fix.get("status") == "clear-noop":
                         decision = "clear-noop-terminal"
+                        conclusion = "success"
                         label_transition = "done"
                         terminal = True
                         exit_code = 0
                     elif fix.get("status") == "fixed":
                         decision = "scoped-push"
+                        conclusion = "success"
                         label_transition = "keep-running"
                         should_push = True
                         exit_code = 0
@@ -497,6 +521,7 @@ def run_decide(args: argparse.Namespace) -> int:
             {
                 "status": "ok" if exit_code == 0 else "fizzled",
                 "decision": decision,
+                "conclusion": conclusion,
                 "terminal": terminal,
                 "should_push": should_push,
                 "label_transition": label_transition,
@@ -504,11 +529,11 @@ def run_decide(args: argparse.Namespace) -> int:
                 "reasons": reasons,
                 "clear_noop_terminal_semantics": "clear-noop + all APPROVE -> Cast label, no commit, no push",
                 "fixed_push_semantics": "fixed + all APPROVE -> exactly one scoped bot commit and push, then pull_request.synchronize re-review",
-                "reject_or_halt_semantics": "REJECT, malformed, missing, protected, or halt states fail closed to Fizzled",
+                "reject_or_halt_semantics": "REJECT, malformed, missing, protected, or non-spec-gap halt states fail closed to Fizzled",
             }
         )
     except ContractError as exc:
-        payload.update({"decision": "fizzled", "terminal": False, "should_push": False, "label_transition": "fizzled", "exit_code": 1, "reasons": [str(exc)]})
+        payload.update({"decision": "fizzled", "conclusion": "failure", "terminal": False, "should_push": False, "label_transition": "fizzled", "exit_code": 1, "reasons": [str(exc)]})
     write_json(output, payload)
     write_outputs(args.github_output, {"status": payload["status"], "decision": payload["decision"], "terminal": payload["terminal"], "should_push": payload["should_push"], "label_transition": payload["label_transition"], "exit_code": payload["exit_code"], "output_path": str(output)})
     print(f"{STAGE}: decision={payload['decision']} status={payload['status']} output={output}")
@@ -604,33 +629,119 @@ def run_push(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def legacy_exit_code_is_zero(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == 0
+    if isinstance(value, str):
+        return value.strip() == "0"
+    return False
+
+
+def complete_decision_conclusion(decision: dict[str, Any]) -> tuple[str, list[str]]:
+    if "conclusion" not in decision:
+        if legacy_exit_code_is_zero(decision.get("exit_code")):
+            return "success", []
+        return "failure", ["decision conclusion is missing and legacy exit_code is not zero"]
+    conclusion = decision.get("conclusion")
+    if not isinstance(conclusion, str):
+        return "failure", ["decision conclusion must be a string"]
+    normalized = conclusion.strip().lower()
+    if normalized in {"success", "neutral", "failure"}:
+        return normalized, []
+    return "failure", [f"decision conclusion is unsupported: {sanitize(normalized, 80)}"]
+
+
+def first_reason(reasons: Any) -> str:
+    if isinstance(reasons, list):
+        for reason in reasons:
+            text = sanitize(reason, 160)
+            if text:
+                return text
+    return ""
+
+
 def run_complete(args: argparse.Namespace) -> int:
     workspace = pathlib.Path(args.consumer_workspace).resolve()
-    decision = read_json(resolve_path(args.decision, workspace), "cast decision")
     output = resolve_path(args.output, workspace)
-    final = base_payload("ok")
-    final.update({"decision": decision.get("decision"), "terminal": decision.get("terminal"), "should_push": decision.get("should_push")})
-    exit_code = int(decision.get("exit_code", 1))
-    if decision.get("decision") == "scoped-push":
-        push = read_json(resolve_path(args.push_status, workspace), "push status")
-        final["push_status"] = push.get("status")
-        final["push_count"] = push.get("push_count", 0)
-        if push.get("status") != "pushed" or push.get("push_count") != 1:
+    final = base_payload("fizzled")
+    final.update({"decision": None, "terminal": False, "should_push": False, "conclusion": "failure"})
+    exit_code = 1
+    try:
+        decision = read_json(resolve_path(args.decision, workspace), "cast decision")
+        final.update({"decision": decision.get("decision"), "terminal": decision.get("terminal"), "should_push": decision.get("should_push")})
+        conclusion, conclusion_reasons = complete_decision_conclusion(decision)
+        final["conclusion"] = conclusion
+        reasons = conclusion_reasons or decision.get("reasons", [])
+        if conclusion_reasons:
             final["status"] = "fizzled"
-            final["reasons"] = ["scoped push did not complete exactly once"]
+            final["conclusion"] = "failure"
+            final["reasons"] = conclusion_reasons
+            final["summary"] = f"cast failed closed: {first_reason(conclusion_reasons)}"
             exit_code = 1
-        else:
-            final["status"] = "awaiting-synchronize"
-            final["next_expected_event"] = "pull_request.synchronize"
+        elif conclusion == "failure":
+            final["status"] = "fizzled"
+            final["reasons"] = reasons if isinstance(reasons, list) else []
+            reason = first_reason(final["reasons"])
+            final["summary"] = f"cast failed closed: {reason}" if reason else "cast failed closed"
+            exit_code = 1
+        elif decision.get("decision") == "scoped-push":
+            if conclusion != "success":
+                final["status"] = "fizzled"
+                final["conclusion"] = "failure"
+                final["reasons"] = ["scoped-push decision conclusion must be success"]
+                final["summary"] = "cast failed closed: scoped-push decision conclusion must be success"
+                exit_code = 1
+            else:
+                push = read_json(resolve_path(args.push_status, workspace), "push status")
+                final["push_status"] = push.get("status")
+                final["push_count"] = push.get("push_count", 0)
+                if push.get("status") != "pushed" or push.get("push_count") != 1:
+                    final["status"] = "fizzled"
+                    final["conclusion"] = "failure"
+                    final["reasons"] = ["scoped push did not complete exactly once"]
+                    final["summary"] = "scoped push did not complete exactly once"
+                    exit_code = 1
+                else:
+                    final["status"] = "awaiting-synchronize"
+                    final["next_expected_event"] = "pull_request.synchronize"
+                    final["summary"] = "scoped push completed once; awaiting pull_request.synchronize"
+                    exit_code = 0
+        elif final.get("should_push") is True:
+            final["status"] = "fizzled"
+            final["conclusion"] = "failure"
+            final["reasons"] = ["non-scoped decision requested push"]
+            final["summary"] = "cast failed closed: non-scoped decision requested push"
+            exit_code = 1
+        elif conclusion == "neutral":
+            final["status"] = "advisory"
+            reason = first_reason(reasons)
+            final["summary"] = f"cast completed with advisory decision: {reason}" if reason else "cast completed with advisory decision"
             exit_code = 0
-    elif exit_code != 0:
+        else:
+            final["status"] = "terminal"
+            final["summary"] = "cast completed successfully without a push"
+            exit_code = 0
+    except ContractError as exc:
         final["status"] = "fizzled"
-        final["reasons"] = decision.get("reasons", [])
-    else:
-        final["status"] = "terminal"
+        final["conclusion"] = "failure"
+        final["reasons"] = [str(exc)]
+        final["summary"] = f"cast failed closed: {sanitize(exc, 160)}"
+        exit_code = 1
     write_json(output, final)
-    write_outputs(args.github_output, {"status": final["status"], "decision": final["decision"], "terminal": final.get("terminal", False), "output_path": str(output)})
-    print(f"{STAGE}: final status={final['status']} decision={final['decision']} output={output}")
+    write_outputs(
+        args.github_output,
+        {
+            "status": final["status"],
+            "decision": final["decision"],
+            "terminal": final.get("terminal", False),
+            "conclusion": final["conclusion"],
+            "summary": final["summary"],
+            "output_path": str(output),
+        },
+    )
+    print(f"{STAGE}: final status={final['status']} decision={final['decision']} conclusion={final['conclusion']} output={output}")
     return exit_code
 
 

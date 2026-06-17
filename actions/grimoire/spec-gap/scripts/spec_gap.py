@@ -100,11 +100,12 @@ def render_comment(payload: dict[str, object]) -> str:
     lines = [
         "<!-- grimoire-spec-gap -->",
         "## Summary",
-        f"Grimoire halted before code changes because {plain(payload.get('halt_reason'), 'OpenSpec evidence is insufficient')}.",
+        f"Grimoire paused automated code changes and recorded advisory, non-blocking guidance because {plain(payload.get('halt_reason'), 'OpenSpec evidence is insufficient')}.",
+        "OpenSpec evidence is still expected before Grimoire resumes code or push actions.",
         "",
         "## Intended Work",
         f"Design plan artifact: `{plain(payload.get('plan_path'))}`.",
-        "The fix stage must not guess at requirements or expand scope while this gap exists.",
+        "The fix stage must not guess at requirements or expand scope while this evidence gap exists.",
         "",
         "## Missing OpenSpec Evidence",
         *missing_lines,
@@ -115,7 +116,7 @@ def render_comment(payload: dict[str, object]) -> str:
         quote_block(payload.get("suggested_spec_patch"), "Add OpenSpec requirements or scenarios for the missing in-scope behavior."),
         "",
         "## How To Rerun",
-        "Add the missing OpenSpec evidence, update the PR, and let the normal pull_request synchronize event rerun Grimoire. Do not bypass the design halt with labels or local state.",
+        "Add the missing OpenSpec evidence, update the PR, and let the normal pull_request synchronize event rerun Grimoire. This spec-gap note is advisory/non-blocking guidance, not a hard red failure; do not bypass the paused code-action guard with labels or local state.",
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -160,6 +161,7 @@ def run(args: argparse.Namespace) -> int:
             "stage": STAGE,
             "generated_at": utc_now(),
             "status": "halt" if should_halt else "clear",
+            "advisory": should_halt,
             "should_comment": should_comment,
             "should_halt": should_halt,
             "github_mutation_performed": False,
@@ -170,8 +172,9 @@ def run(args: argparse.Namespace) -> int:
             "top_level_section_count": 5 if should_comment else 0,
         }
         write_json(status_path, status)
-        write_github_output(args.github_output, {"status": status["status"], "should_comment": should_comment, "should_halt": should_halt, "comment_path": str(comment_path), "status_path": str(status_path)})
-        print(f"{STAGE}: status={status['status']} should_halt={str(should_halt).lower()} status_path={status_path}")
+        write_github_output(args.github_output, {"status": status["status"], "advisory": status["advisory"], "should_comment": should_comment, "should_halt": should_halt, "comment_path": str(comment_path), "status_path": str(status_path)})
+        advisory_label = " advisory=true" if status["advisory"] is True else " advisory=false"
+        print(f"{STAGE}: status={status['status']}{advisory_label} should_halt={str(should_halt).lower()} status_path={status_path}")
         return 0
     except ContractError as exc:
         status: dict[str, object] = {
@@ -179,6 +182,7 @@ def run(args: argparse.Namespace) -> int:
             "stage": STAGE,
             "generated_at": utc_now(),
             "status": "blocked",
+            "advisory": False,
             "should_comment": False,
             "should_halt": True,
             "github_mutation_performed": False,
@@ -190,13 +194,13 @@ def run(args: argparse.Namespace) -> int:
             "top_level_section_count": 0,
         }
         write_json(status_path, status)
-        write_github_output(args.github_output, {"status": "blocked", "should_comment": False, "should_halt": True, "status_path": str(status_path)})
+        write_github_output(args.github_output, {"status": "blocked", "advisory": False, "should_comment": False, "should_halt": True, "status_path": str(status_path)})
         print(f"{STAGE}: blocked: {exc}", file=sys.stderr)
         return 1
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render the Grimoire spec-gap halt artifact.")
+    parser = argparse.ArgumentParser(description="Render the Grimoire spec-gap advisory artifact.")
     parser.add_argument("--consumer-workspace", default=os.environ.get("GITHUB_WORKSPACE", "."))
     parser.add_argument("--input", default=".omo/ci/spec-sufficiency.json")
     parser.add_argument("--comment-output", "--comment", dest="comment_output", default=".omo/ci/spec-gap-comment.md")
