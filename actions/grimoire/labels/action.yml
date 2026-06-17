@@ -5,7 +5,7 @@ inputs:
     description: Consumer repository workspace treated as PR-head data.
     required: true
   transition:
-    description: "Label transition to apply: running, done, or fizzled."
+    description: "Label transition to apply: running, done, fizzled, or spec-needed."
     required: true
   state-file:
     description: Newline-delimited local label state file.

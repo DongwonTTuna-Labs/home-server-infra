@@ -20,8 +20,9 @@ LABELS = {
     "casting": {"name": "🔮 Casting…", "color": "#7c3aed", "description": "Grimoire review/autofix loop is running."},
     "cast": {"name": "✨ Cast", "color": "#10b981", "description": "Grimoire review/autofix loop completed cleanly."},
     "fizzled": {"name": "💨 Fizzled", "color": "#6b7280", "description": "Grimoire review/autofix loop halted or failed closed."},
+    "spec_needed": {"name": "📋 Spec Needed", "color": "#0ea5e9", "description": "Grimoire needs an OpenSpec evidence item before it can act."},
 }
-MANAGED = [LABELS["casting"]["name"], LABELS["cast"]["name"], LABELS["fizzled"]["name"]]
+MANAGED = [LABELS["casting"]["name"], LABELS["cast"]["name"], LABELS["fizzled"]["name"], LABELS["spec_needed"]["name"]]
 TOKEN_PATTERNS = (
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
@@ -121,6 +122,11 @@ def transition_labels(current: list[str], transition: str) -> tuple[list[str], l
         remove(LABELS["casting"]["name"], "fizzled transition removes running label")
         remove(LABELS["cast"]["name"], "fizzled transition removes success label")
         add(LABELS["fizzled"]["name"], "fizzled transition adds Fizzled")
+    elif transition == "spec-needed":
+        remove(LABELS["casting"]["name"], "spec-needed transition removes running label")
+        remove(LABELS["fizzled"]["name"], "spec-needed transition removes halted label")
+        remove(LABELS["cast"]["name"], "spec-needed transition removes success label")
+        add(LABELS["spec_needed"]["name"], "spec-needed transition adds Spec Needed")
     else:
         raise ValueError(f"unsupported transition: {transition}")
     return final, operations, notes
@@ -148,6 +154,13 @@ def remote_transition_operations(current: list[str], transition: str) -> list[di
             remove(LABELS["casting"]["name"], "fizzled transition removes running label"),
             remove(LABELS["cast"]["name"], "fizzled transition removes success label"),
             add(LABELS["fizzled"]["name"], "fizzled transition adds Fizzled"),
+        ]
+    if transition == "spec-needed":
+        return [
+            remove(LABELS["casting"]["name"], "spec-needed transition removes running label"),
+            remove(LABELS["fizzled"]["name"], "spec-needed transition removes halted label"),
+            remove(LABELS["cast"]["name"], "spec-needed transition removes success label"),
+            add(LABELS["spec_needed"]["name"], "spec-needed transition adds Spec Needed"),
         ]
     raise ValueError(f"unsupported transition: {transition}")
 
@@ -341,7 +354,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Apply idempotent Grimoire label transitions in local state-file mode and optional trusted GitHub remote-apply mode.")
-    parser.add_argument("transition", choices=["running", "done", "fizzled"])
+    parser.add_argument("transition", choices=["running", "done", "fizzled", "spec-needed"])
     parser.add_argument("--consumer-workspace", default=os.environ.get("GITHUB_WORKSPACE", "."))
     parser.add_argument("--state-file", default=".omo/ci/grimoire-label-state.txt")
     parser.add_argument("--state-output", default="")

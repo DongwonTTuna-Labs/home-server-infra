@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import urllib.error
 import urllib.parse
 from pathlib import Path
@@ -125,6 +126,23 @@ def test_remote_remove_missing_managed_label_is_idempotent(tmp_path: Path, monke
     require(any(result.get("status") == "missing" for result in status["github_label_results"]), "status artifact must record the idempotent missing-label remove")
 
 
+def test_spec_needed_transition_removes_other_managed_labels_preserves_unrelated_and_is_idempotent(tmp_path: Path) -> None:
+    module = load_labels_module()
+    write_state(tmp_path, ["🔮 Casting…", "💨 Fizzled", "✨ Cast", "reviewer:human", "area:docs"])
+
+    require(module.run(labels_args(tmp_path, "spec-needed", remote_apply=False)) == 0, "spec-needed transition must succeed locally")
+    status = read_status(tmp_path)
+    require(status["final_labels"] == ["reviewer:human", "area:docs", "📋 Spec Needed"], "spec-needed must remove running/done/fizzled managed labels and preserve unrelated labels")
+    require([operation["action"] for operation in status["operations"]] == ["remove", "remove", "remove", "add"], "spec-needed must scope operations to the managed transition")
+    require(status["unrelated_labels_preserved"] == ["area:docs", "reviewer:human"], "spec-needed must report preserved unrelated labels")
+
+    require(module.run(labels_args(tmp_path, "spec-needed", remote_apply=False)) == 0, "second spec-needed transition must remain idempotent")
+    repeated = read_status(tmp_path)
+    require(repeated["final_labels"] == status["final_labels"], "idempotent spec-needed transition must not change final labels")
+    require(repeated["operation_count"] == 0 and repeated["changed"] is False, "idempotent spec-needed transition must emit no local operations")
+
+
+
 def test_remote_add_failure_fails_closed_with_sanitized_error(tmp_path: Path, monkeypatch: Any) -> None:
     module = load_labels_module()
     secret = "github_pat_secretsecretsecretsecret1234567890"
@@ -162,10 +180,20 @@ def test_cast_action_wires_label_remote_apply_only_through_trusted_pat_path() ->
 
     for key in ("remote-apply", "token", "github-api-url"):
         require(f"  {key}:" in labels_text, f"labels action must expose explicit {key} input")
-    for step_id in ("labels-running", "labels-done", "labels-fizzled"):
+    require(cast_text.count("id: labels-spec-needed") == 1, "cast action must define exactly one labels-spec-needed step")
+    for output in ("conclusion", "summary"):
+        require(re.search(rf"(?m)^  {output}:\n(?:^    .+\n)+?^    value: \${{{{ steps\.complete\.outputs\.{output} }}}}", cast_text) is not None, f"cast action must wire {output} output from complete")
+    trusted_label_inputs = (
+        "remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}",
+        "token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}",
+        "github-api-url: ${{ github.api_url }}",
+    )
+    for step_id in ("labels-running", "labels-done", "labels-fizzled", "labels-spec-needed"):
         block = step_block(cast_text, step_id)
-        require("remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}" in block, f"{step_id} must enable remote labels only when trusted mutation and PAT are present")
-        require("token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}" in block, f"{step_id} must pass only the resolved GRIMOIRE_GITHUB_PAT through the trusted path")
-        require("github-api-url: ${{ github.api_url }}" in block, f"{step_id} must pass the GitHub API URL explicitly")
+        for snippet in trusted_label_inputs:
+            require(snippet in block, f"{step_id} must pass trusted label input {snippet}")
+    spec_needed = step_block(cast_text, "labels-spec-needed")
+    require("if: ${{ steps.decide.outputs.label_transition == 'spec-needed' }}" in spec_needed, "labels-spec-needed must be gated only by the spec-needed transition")
+    require("transition: spec-needed" in spec_needed, "labels-spec-needed must pass the spec-needed transition")
     for forbidden in ("GITHUB_TOKEN", "github.token", "pull_request_target", "secrets: inherit"):
         require(forbidden not in labels_text + cast_text, f"label/cast actions must not introduce forbidden auth or trigger pattern: {forbidden}")
