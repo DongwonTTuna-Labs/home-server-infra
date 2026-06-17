@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DongwonTTuna-Labs/home-server-infra/schemas/grimoire-scope.v1.schema.json",
+  "title": "Grimoire scope manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["governed_paths"],
+  "anyOf": [
+    { "required": ["version"] },
+    { "required": ["schema_version"] }
+  ],
+  "properties": {
+    "version": {
+      "oneOf": [
+        { "type": "integer", "const": 1 },
+        { "type": "string", "const": "1" }
+      ],
+      "description": "Manifest schema version. Use 1 for this contract."
+    },
+    "schema_version": {
+      "oneOf": [
+        { "type": "integer", "const": 1 },
+        { "type": "string", "const": "1" }
+      ],
+      "description": "Alternate manifest schema version field. Use 1 for this contract."
+    },
+    "governed_paths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeRelativeGlob" },
+      "description": "Relative glob patterns whose findings are governed by design-stage OpenSpec binding evaluation."
+    },
+    "advisory_only_paths": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeRelativeGlob" },
+      "description": "Relative glob patterns whose findings are advisory and Issues-only, not fix-stage work authority."
+    }
+  },
+  "$defs": {
+    "safeRelativeGlob": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!/)(?!~)(?!\\.?/?$)(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/@*?\\[\\]!-]{1,255}/?$",
+      "description": "Safe relative glob using forward slashes only; absolute paths, empty paths, and parent traversal are forbidden."
+    }
+  }
+}

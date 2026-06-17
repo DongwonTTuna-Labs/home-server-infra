@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -160,11 +161,11 @@ def assert_blocked_category(result: subprocess.CompletedProcess[str], payload: d
         require(marker not in serialized, f"blocked diagnostics leaked raw command output marker {marker}")
 
 
-def finding(title: str, path: str = "src/lib.rs", *, out_of_scope: bool = False, target_paths: list[str] | None = None) -> dict[str, Any]:
+def finding(title: str, path: str = "src/lib.rs", *, severity: str = "medium", out_of_scope: bool = False, target_paths: list[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "file": path,
         "line": 7,
-        "severity": "medium",
+        "severity": severity,
         "lens": "correctness",
         "title": title,
         "what": f"{title} was observed in the deterministic contract fixture.",
@@ -220,6 +221,28 @@ def write_design_artifact(workspace: Path, relative: str, *, sufficient: bool, i
             "plan_path": ".omo/ci/design-plan.md",
         },
     )
+
+
+def run_design_artifact(actions_root: Path, workspace: Path, review_input: str, output: str, plan: str, expected: set[int]) -> dict[str, Any]:
+    script = helper(actions_root, "design", "design.py")
+    run_helper(
+        script,
+        ["--consumer-workspace", str(workspace), "--repository", "local-consumer", "--review-input", review_input, "--output", output, "--plan", plan],
+        expected,
+    )
+    return read_json(workspace, output)
+
+
+def write_scope_manifest(workspace: Path, content: str) -> None:
+    path = rel_path(workspace, ".omo/grimoire/scope.yml")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def remove_scope_manifest(workspace: Path) -> None:
+    path = rel_path(workspace, ".omo/grimoire/scope.yml")
+    if path.exists():
+        path.unlink()
 
 
 def write_fix_artifact(workspace: Path, relative: str, status: str) -> Path:
@@ -481,33 +504,27 @@ print(json.dumps({"status":"findings","findings":[finding]}))
 
 
 def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
-    design_script = helper(actions_root, "design", "design.py")
     cast_script = helper(actions_root, "cast", "cast_driver.py")
+    remove_scope_manifest(workspace)
     write_review_artifact(
         workspace,
-        ".omo/ci/review-design.json",
-        [finding("In-scope deterministic defect"), finding("[out-of-scope] Separate infra cleanup", "infra/cleanup.md", out_of_scope=True)],
+        ".omo/ci/review-design-advisory.json",
+        [
+            finding("Info severity missing spec", "src/info.rs", severity="info"),
+            finding("Low severity missing spec", "src/low.rs", severity="low"),
+            finding("Medium severity missing spec", "src/lib.rs", severity="medium"),
+            finding("[out-of-scope] Separate infra cleanup", "infra/cleanup.md", out_of_scope=True),
+        ],
     )
-    args = [
-        "--consumer-workspace",
-        str(workspace),
-        "--repository",
-        "local-consumer",
-        "--review-input",
-        ".omo/ci/review-design.json",
-        "--output",
-        ".omo/ci/spec-insufficient.json",
-        "--plan",
-        ".omo/ci/design-insufficient.md",
-    ]
-    run_helper(design_script, args, {1})
-    insufficient = read_json(workspace, ".omo/ci/spec-insufficient.json")
-    require(insufficient["status"] == "insufficient" and insufficient["should_halt"] is True, "design must halt when in-scope OpenSpec evidence is missing")
-    require(len(insufficient["in_scope"]) == 1 and len(insufficient["out_of_scope"]) == 1, "design must split in_scope and out_of_scope findings")
-    first_fingerprint = insufficient["out_of_scope"][0]["fingerprint"]
+    advisory = run_design_artifact(actions_root, workspace, ".omo/ci/review-design-advisory.json", ".omo/ci/spec-advisory.json", ".omo/ci/design-advisory.md", {0})
+    require(advisory["status"] == "sufficient" and advisory["should_halt"] is False, "medium/low/info missing OpenSpec evidence must be advisory")
+    require(advisory["gate_mode"] == "severity-threshold" and advisory["manifest_status"] == "absent", "absent scope manifest must use severity-threshold gate")
+    require(advisory["missing"] == [] and advisory["safety_default_gaps"] == [], "advisory-only severity gaps must not populate hard halt arrays")
+    require({item["severity"] for item in advisory["advisory_gaps"]} == {"info", "low", "medium"}, "info/low/medium missing spec gaps must be advisory")
+    require(len(advisory["in_scope"]) == 3 and len(advisory["out_of_scope"]) == 1, "design must split advisory in_scope and out_of_scope findings")
+    first_fingerprint = advisory["out_of_scope"][0]["fingerprint"]
     require(re.fullmatch(r"[0-9a-f]{24}", first_fingerprint) is not None, "out-of-scope fingerprint must be stable 24-char hex")
-    run_helper(design_script, args[:-4] + ["--output", ".omo/ci/spec-insufficient-repeat.json", "--plan", ".omo/ci/design-repeat.md"], {1})
-    repeated = read_json(workspace, ".omo/ci/spec-insufficient-repeat.json")
+    repeated = run_design_artifact(actions_root, workspace, ".omo/ci/review-design-advisory.json", ".omo/ci/spec-advisory-repeat.json", ".omo/ci/design-repeat.md", {0})
     require(repeated["out_of_scope"][0]["fingerprint"] == first_fingerprint, "out-of-scope fingerprint must be stable across runs")
 
     run_helper(
@@ -517,7 +534,7 @@ def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
             "--consumer-workspace",
             str(workspace),
             "--design-path",
-            ".omo/ci/spec-insufficient.json",
+            ".omo/ci/spec-advisory.json",
             "--repository",
             "local-consumer",
             "--pr-number",
@@ -540,7 +557,7 @@ def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
             "--consumer-workspace",
             str(workspace),
             "--design-path",
-            ".omo/ci/spec-insufficient.json",
+            ".omo/ci/spec-advisory.json",
             "--repository",
             "local-consumer",
             "--pr-number",
@@ -564,6 +581,46 @@ def assert_design_and_issues(actions_root: Path, workspace: Path) -> None:
     not_design = read_json(workspace, ".omo/ci/issues-not-design.json")
     require(not_design["status"] == "blocked", "out-of-scope filing must reject non-design artifacts")
 
+    write_review_artifact(
+        workspace,
+        ".omo/ci/review-hard-halt.json",
+        [finding("High severity missing spec", "src/high.rs", severity="high"), finding("Critical severity missing spec", "src/critical.rs", severity="critical")],
+    )
+    hard_halt = run_design_artifact(actions_root, workspace, ".omo/ci/review-hard-halt.json", ".omo/ci/spec-insufficient.json", ".omo/ci/design-insufficient.md", {1})
+    require(hard_halt["status"] == "insufficient" and hard_halt["should_halt"] is True, "high/critical missing OpenSpec evidence must halt")
+    require({item["severity"] for item in hard_halt["missing"]} == {"high", "critical"}, "hard halt missing entries must retain high/critical severities")
+    require(len(hard_halt["safety_default_gaps"]) == 2, "high/critical missing evidence must remain fail-closed safety gaps")
+    require("High severity missing spec" in hard_halt["suggested_spec_patch"] and "Critical severity missing spec" in hard_halt["suggested_spec_patch"], "hard halt must include suggested spec patch text")
+
+    write_scope_manifest(workspace, "version: 1\ngoverned_paths:\n  - src/governed/**\nadvisory_only_paths:\n  - docs/advisory/**\n")
+    write_review_artifact(workspace, ".omo/ci/review-governed-high.json", [finding("Governed high missing spec", "src/governed/main.rs", severity="high")])
+    governed = run_design_artifact(actions_root, workspace, ".omo/ci/review-governed-high.json", ".omo/ci/spec-governed-high.json", ".omo/ci/design-governed-high.md", {1})
+    require(governed["gate_mode"] == "scope-manifest" and governed["manifest_status"] == "loaded", "valid scope manifest must activate scope-manifest gate")
+    require(governed["should_halt"] is True and governed["in_scope"][0]["scope_manifest_classification"] == "governed", "governed high finding must halt")
+
+    write_review_artifact(
+        workspace,
+        ".omo/ci/review-ungoverned-advisory.json",
+        [finding("Ungoverned high finding", "src/elsewhere/main.rs", severity="high"), finding("Advisory-only high finding", "docs/advisory/note.md", severity="high")],
+    )
+    ungoverned = run_design_artifact(actions_root, workspace, ".omo/ci/review-ungoverned-advisory.json", ".omo/ci/spec-ungoverned-advisory.json", ".omo/ci/design-ungoverned-advisory.md", {0})
+    reasons = {item["out_of_scope_reason"] for item in ungoverned["out_of_scope"]}
+    require(ungoverned["status"] == "sufficient" and ungoverned["missing"] == [], "ungoverned/advisory-only scope manifest findings must not halt")
+    require(reasons == {"scope-manifest-ungoverned", "scope-manifest-advisory-only"}, "scope manifest must retain ungoverned/advisory-only issue reasons")
+
+    write_scope_manifest(workspace, "version: 1\ngoverned_paths: [\n")
+    malformed = run_design_artifact(actions_root, workspace, ".omo/ci/review-governed-high.json", ".omo/ci/spec-malformed-manifest.json", ".omo/ci/design-malformed-manifest.md", {1})
+    require(malformed["gate_mode"] == "severity-threshold" and malformed["manifest_status"] == "malformed", "malformed scope manifest must fall back to severity-threshold")
+    remove_scope_manifest(workspace)
+    absent = run_design_artifact(actions_root, workspace, ".omo/ci/review-governed-high.json", ".omo/ci/spec-absent-manifest.json", ".omo/ci/design-absent-manifest.md", {1})
+    require(absent["gate_mode"] == "severity-threshold" and absent["manifest_status"] == "absent", "absent scope manifest must fall back to severity-threshold")
+
+    write_scope_manifest(workspace, "version: 1\ngoverned_paths:\n  - src/unsafe/**\n")
+    write_review_artifact(workspace, ".omo/ci/review-unsafe-target.json", [finding("Unsafe target path", "src/unsafe/main.rs", severity="low", target_paths=["../escape.md"])])
+    unsafe = run_design_artifact(actions_root, workspace, ".omo/ci/review-unsafe-target.json", ".omo/ci/spec-unsafe-target.json", ".omo/ci/design-unsafe-target.md", {1})
+    require(unsafe["invalid_allowed_write_paths"] == ["../escape.md"] and unsafe["should_halt"] is True, "unsafe target paths must fail closed even below severity threshold")
+    remove_scope_manifest(workspace)
+
 
 def assert_spec_gap(actions_root: Path, workspace: Path) -> None:
     script = helper(actions_root, "spec-gap", "spec_gap.py")
@@ -574,10 +631,14 @@ def assert_spec_gap(actions_root: Path, workspace: Path) -> None:
     )
     status = read_json(workspace, ".omo/ci/spec-gap-status.json")
     require(status["status"] == "halt" and status["should_halt"] is True and status["should_comment"] is True, "spec-gap must emit halt status")
+    require(status["advisory"] is True, "spec-gap halt status must be advisory for neutral completion")
     require(status["top_level_sections"] == SPEC_GAP_SECTIONS and status["top_level_section_count"] == 5, "spec-gap must expose exactly five top-level sections")
     comment = rel_path(workspace, ".omo/ci/spec-gap-comment.md").read_text(encoding="utf-8")
     headings = [line.removeprefix("## ") for line in comment.splitlines() if line.startswith("## ")]
     require(headings == SPEC_GAP_SECTIONS, "spec-gap comment headings drifted")
+    require(comment.count("<!-- grimoire-spec-gap -->") == 1, "spec-gap comment must retain exactly one idempotent marker")
+    require("High severity missing spec" in comment and "Critical severity missing spec" in comment, "spec-gap comment must retain suggested patch content")
+    require("advisory/non-blocking guidance" in comment and "not a hard red failure" in comment, "spec-gap comment must frame rerun guidance as non-blocking")
 
 
 def assert_fix(actions_root: Path, workspace: Path) -> tuple[str, str]:
@@ -797,8 +858,7 @@ This file documents the Grimoire reusable control-plane push smoke for the OpenS
     subprocess.run(["git", "commit", "-m", "test: add marker spec baseline"], cwd=str(verify_workspace), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     marker = rel_path(verify_workspace, "docs/GRIMOIRE_PUSH_SMOKE.md")
     marker.write_text(
-        "# Grimoire Push Smoke\n\n"
-        "This file documents the Grimoire reusable control-plane push smoke for the OpenSpec-backed `grimoire-push-smoke` change.\n",
+        "# Grimoire Push Smoke\n\nThis file documents the Grimoire reusable control-plane push smoke for the OpenSpec-backed `grimoire-push-smoke` change.\n",
         encoding="utf-8",
     )
     write_design_artifact(verify_workspace, ".omo/ci/spec-verify-live.json", sufficient=True, in_scope=[{"path": "docs/GRIMOIRE_PUSH_SMOKE.md"}], bindings=[{"allowed_write_paths": ["docs/GRIMOIRE_PUSH_SMOKE.md"]}])
@@ -836,8 +896,117 @@ This file documents the Grimoire reusable control-plane push smoke for the OpenS
     return ".omo/grimoire/verdict-approve.json"
 
 
+def load_decide_fixture_module(actions_root: Path) -> Any:
+    path = actions_root.parents[1] / "tests" / "fixtures" / "grimoire" / "run-loop-fixtures.py"
+    spec = importlib.util.spec_from_file_location("grimoire_run_loop_fixtures", path)
+    if spec is None or spec.loader is None:
+        raise ContractError(f"unable to load decide fixture helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def copy_decide_workspace(root: Path, case: dict[str, Any]) -> Path:
+    source = Path(str(case["fixture_dir"]))
+    require(source.is_dir(), f"missing decide fixture directory: {source}")
+    workspace = root / str(case["name"])
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    shutil.copytree(source, workspace)
+    return workspace
+
+
+def complete_status_for(decision: dict[str, Any]) -> tuple[int, str, str]:
+    conclusion = str(decision.get("conclusion"))
+    if conclusion == "neutral":
+        return 0, "advisory", "neutral"
+    if conclusion == "failure":
+        return 1, "fizzled", "failure"
+    if decision.get("decision") == "scoped-push":
+        return 0, "awaiting-synchronize", "success"
+    return 0, "terminal", "success"
+
+
+def run_complete_case(script: Path, workspace: Path, decision_path: str, output: str, expected_exit: int, expected_status: str, expected_conclusion: str, push_status: str | None = None) -> dict[str, Any]:
+    args = ["complete", "--consumer-workspace", str(workspace), "--decision", decision_path, "--output", output]
+    if push_status is not None:
+        args.extend(["--push-status", push_status])
+    run_helper(script, args, {expected_exit})
+    final = read_json(workspace, output)
+    require(final["status"] == expected_status, f"complete status mismatch for {decision_path}: {final}")
+    require(final["conclusion"] == expected_conclusion, f"complete conclusion mismatch for {decision_path}: {final}")
+    require(isinstance(final.get("summary"), str) and final["summary"], "complete must emit a non-empty summary")
+    return final
+
+
+def run_decide_fixture_contracts(actions_root: Path) -> None:
+    script = helper(actions_root, "cast", "cast_driver.py")
+    fixture_module = load_decide_fixture_module(actions_root)
+    cases = fixture_module.load_decide_fixture_cases()
+    expected_by_name = fixture_module.expected_decide_tuples()
+    require(len(cases) == 7 and set(expected_by_name) == {str(case["name"]) for case in cases}, "decide fixture inventory must contain the seven Task 4 cases")
+    root = make_workspace("decide-fixture-contracts")
+    failure_cases = {"scope-violation-failure", "malformed-verdict-failure", "preflight-blocked-failure"}
+    seen_failures: set[str] = set()
+    for case in cases:
+        name = str(case["name"])
+        require(tuple(case["expected"]) == tuple(expected_by_name[name]), f"{name} must reuse expected_decide_tuples()")
+        workspace = copy_decide_workspace(root, case)
+        input_paths = case["input_paths"]
+        run_helper(
+            script,
+            [
+                "decide",
+                "--consumer-workspace",
+                str(workspace),
+                "--preflight-status",
+                input_paths["preflight"],
+                "--review-status",
+                input_paths["review"],
+                "--review-outcome",
+                str(case["review_outcome"]),
+                "--design-status",
+                input_paths["design"],
+                "--issue-status",
+                input_paths["issues"],
+                "--spec-gap-status",
+                input_paths["spec_gap"],
+                "--fix-status",
+                input_paths["fix"],
+                "--fix-outcome",
+                str(case["fix_outcome"]),
+                "--boulder-status",
+                input_paths["boulder"],
+                "--verdict-status",
+                input_paths["verdict"],
+                "--verify-outcome",
+                str(case["verify_outcome"]),
+                "--output",
+                ".omo/ci/cast-decision.json",
+            ],
+            {0},
+        )
+        decision = read_json(workspace, ".omo/ci/cast-decision.json")
+        actual = fixture_module.actual_decide_tuple(decision)
+        require(actual == tuple(case["expected"]), f"{name} tuple mismatch: actual={actual} expected={case['expected']}")
+        expected_exit, expected_status, expected_conclusion = complete_status_for(decision)
+        push_status = None
+        if decision.get("decision") == "scoped-push":
+            push_status = ".omo/ci/cast-push-status.json"
+            write_json(workspace, push_status, {"schema_version": 1, "stage": "grimoire-cast", "status": "pushed", "push_count": 1})
+        final = run_complete_case(script, workspace, ".omo/ci/cast-decision.json", ".omo/ci/cast-final.json", expected_exit, expected_status, expected_conclusion, push_status)
+        require(final["decision"] == decision["decision"], f"{name} complete must preserve decision")
+        if name in failure_cases:
+            require(decision["exit_code"] == 1 and decision["conclusion"] == "failure", f"{name} must remain red failure")
+            seen_failures.add(name)
+        if name in {"spec-gap-advisory", "no-actionable-work"}:
+            require(decision["exit_code"] == 0 and decision["conclusion"] == "neutral" and decision["label_transition"] == "spec-needed", f"{name} must be advisory spec-needed")
+    require(seen_failures == failure_cases, "scope-violation, malformed verdict, and preflight-blocked fixtures must all remain red")
+
+
 def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: str, approve_verdict: str) -> None:
     script = helper(actions_root, "cast", "cast_driver.py")
+    run_decide_fixture_contracts(actions_root)
     trusted = {
         "schema_version": 1,
         "stage": "grimoire-trusted-controller",
@@ -882,6 +1051,41 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
     preflight = read_json(workspace, ".omo/ci/cast-preflight.json")
     require(preflight["does_not_rerun_trusted_controller"] is True, "cast preflight must consume the one trusted-controller result")
 
+    protected = dict(trusted)
+    protected.update({"status": "protected", "action": "halt", "model_execution_allowed": False, "write_allowed": False, "commit_allowed": False, "push_allowed": False, "github_mutation_allowed": False})
+    write_json(workspace, ".omo/ci/trusted-controller-protected.json", protected)
+    run_helper(
+        script,
+        [
+            "preflight",
+            "--consumer-workspace",
+            str(workspace),
+            "--trusted-status-path",
+            ".omo/ci/trusted-controller-protected.json",
+            "--trusted-outcome",
+            "success",
+            "--trusted-status",
+            "protected",
+            "--trusted-action",
+            "halt",
+            "--model-execution-allowed",
+            "false",
+            "--write-allowed",
+            "false",
+            "--commit-allowed",
+            "false",
+            "--push-allowed",
+            "false",
+            "--github-mutation-allowed",
+            "false",
+            "--output",
+            ".omo/ci/cast-preflight-protected.json",
+        ],
+        {0},
+    )
+    protected_preflight = read_json(workspace, ".omo/ci/cast-preflight-protected.json")
+    require(protected_preflight["status"] == "blocked" and protected_preflight["can_continue"] is False, "protected trusted-controller status must block cast preflight")
+
     write_design_artifact(workspace, ".omo/ci/spec-clear-for-cast.json", sufficient=True)
     write_json(workspace, ".omo/ci/issues-ok.json", {"schema_version": 1, "stage": "grimoire-cast", "status": "ok", "issue_count": 0})
     run_helper(script, ["boulder", "--consumer-workspace", str(workspace), "--fix-status", clear_fix, "--output", ".omo/boulder-clear.json"], {0})
@@ -921,7 +1125,43 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
     require(clear_decision["should_push"] is False and "no commit, no push" in clear_decision["clear_noop_terminal_semantics"], "clear-noop terminal must not commit or push")
     run_helper(script, ["complete", "--consumer-workspace", str(workspace), "--decision", ".omo/ci/cast-decision-clear.json", "--output", ".omo/ci/cast-final-clear.json"], {0})
     final_clear = read_json(workspace, ".omo/ci/cast-final-clear.json")
-    require(final_clear["status"] == "terminal", "clear-noop complete status must be terminal")
+    require(final_clear["status"] == "terminal" and final_clear["conclusion"] == "success", "clear-noop complete status must be terminal success")
+    require(isinstance(final_clear.get("summary"), str) and final_clear["summary"], "clear-noop complete must emit summary")
+
+    run_helper(
+        script,
+        [
+            "decide",
+            "--consumer-workspace",
+            str(workspace),
+            "--preflight-status",
+            ".omo/ci/cast-preflight-protected.json",
+            "--review-status",
+            ".omo/ci/review-clean.json",
+            "--review-outcome",
+            "success",
+            "--design-status",
+            ".omo/ci/spec-clear-for-cast.json",
+            "--issue-status",
+            ".omo/ci/issues-ok.json",
+            "--fix-status",
+            clear_fix,
+            "--fix-outcome",
+            "success",
+            "--boulder-status",
+            ".omo/boulder-clear.json",
+            "--verdict-status",
+            approve_verdict,
+            "--verify-outcome",
+            "success",
+            "--output",
+            ".omo/ci/cast-decision-protected.json",
+        ],
+        {0},
+    )
+    protected_decision = read_json(workspace, ".omo/ci/cast-decision-protected.json")
+    require(protected_decision["exit_code"] == 1 and protected_decision["conclusion"] == "failure", "protected preflight failures must remain red")
+    run_complete_case(script, workspace, ".omo/ci/cast-decision-protected.json", ".omo/ci/cast-final-protected.json", 1, "fizzled", "failure")
 
     run_helper(script, ["boulder", "--consumer-workspace", str(workspace), "--fix-status", fixed_fix, "--output", ".omo/boulder-fixed.json"], {0})
     run_helper(
@@ -962,6 +1202,11 @@ def assert_cast(actions_root: Path, workspace: Path, clear_fix: str, fixed_fix: 
     run_helper(script, ["complete", "--consumer-workspace", str(workspace), "--decision", ".omo/ci/cast-decision-fixed.json", "--push-status", ".omo/ci/cast-push-status.json", "--output", ".omo/ci/cast-final-fixed.json"], {0})
     final_fixed = read_json(workspace, ".omo/ci/cast-final-fixed.json")
     require(final_fixed["status"] == "awaiting-synchronize" and final_fixed["next_expected_event"] == "pull_request.synchronize", "fixed completion must await synchronize re-review")
+    require(final_fixed["conclusion"] == "success" and isinstance(final_fixed.get("summary"), str) and final_fixed["summary"], "fixed complete must emit success conclusion and summary")
+    write_json(workspace, ".omo/ci/cast-push-status-bad-count.json", {"schema_version": 1, "stage": "grimoire-cast", "status": "pushed", "push_count": 2})
+    run_complete_case(script, workspace, ".omo/ci/cast-decision-fixed.json", ".omo/ci/cast-final-bad-count.json", 1, "fizzled", "failure", ".omo/ci/cast-push-status-bad-count.json")
+    write_json(workspace, ".omo/ci/cast-decision-invalid-conclusion.json", {"schema_version": 1, "stage": "grimoire-cast", "status": "ok", "decision": "clear-noop-terminal", "conclusion": "invalid", "terminal": True, "should_push": False, "exit_code": 0, "reasons": []})
+    run_complete_case(script, workspace, ".omo/ci/cast-decision-invalid-conclusion.json", ".omo/ci/cast-final-invalid-conclusion.json", 1, "fizzled", "failure")
 
     empty_workspace = make_workspace("empty-push")
     subprocess.run(["git", "init"], cwd=str(empty_workspace), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
