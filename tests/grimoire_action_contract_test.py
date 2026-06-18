@@ -117,6 +117,41 @@ def run_line_indices(text: str) -> list[int]:
     return [index for index, line in enumerate(text.splitlines()) if re.match(r"^\s*run\s*:\s*\|", line)]
 
 
+def action_step_block(text: str, step_id: str) -> str:
+    lines = text.splitlines()
+    id_pattern = re.compile(rf"^\s*-\s*id\s*:\s*{re.escape(step_id)}\s*$")
+    for index, line in enumerate(lines):
+        if not id_pattern.match(line):
+            continue
+        base_indent = indent_of(line)
+        body = [line]
+        for child in lines[index + 1 :]:
+            if re.match(rf"^ {{{base_indent}}}-\s+", child):
+                break
+            body.append(child)
+        return "\n".join(body)
+    return ""
+
+
+def assert_cast_spec_gap_comment_upsert_contract(text: str) -> None:
+    step = action_step_block(text, "upsert-spec-gap-comment")
+    require(bool(step), "cast action must define a spec-gap comment upsert step")
+    for snippet in (
+        "steps.decide.outputs.decision == 'spec-gap-halt'",
+        "steps.spec-gap.outputs.should_comment == 'true'",
+        "steps.spec-gap.outputs.comment_path != ''",
+        "inputs.github-mutation-allowed == 'true'",
+        "env.GRIMOIRE_GITHUB_PAT != ''",
+        "upsert-spec-gap-comment",
+        "--comment-path \"${{ steps.spec-gap.outputs.comment_path }}\"",
+        "--github-mutation-allowed \"${{ inputs.github-mutation-allowed }}\"",
+        "--github-output \"$GITHUB_OUTPUT\"",
+    ):
+        require(snippet in step, f"cast spec-gap comment upsert missing required guarded snippet: {snippet}")
+    for forbidden in ("steps.complete.outputs", "conclusion == 'failure'", "label_transition == 'fizzled'", "gh pr comment", "gh issue comment", "GITHUB_TOKEN", "github.token"):
+        require(forbidden not in step, f"cast spec-gap comment upsert contains forbidden failure-path or alternate-stack snippet: {forbidden}")
+
+
 def assert_run_blocks_are_bash(text: str, stage: str) -> None:
     lines = text.splitlines()
     for run_index in run_line_indices(text):
@@ -171,6 +206,8 @@ def assert_action(actions_root: Path, stage: str) -> None:
     require(not missing_outputs, f"{stage} missing required outputs: {', '.join(sorted(missing_outputs))}")
     assert_run_blocks_are_bash(text, stage)
     assert_helper_contract(actions_root, stage, text)
+    if stage == "cast":
+        assert_cast_spec_gap_comment_upsert_contract(text)
 
 
 def assert_actions_contract(actions_root: Path) -> None:
@@ -179,6 +216,11 @@ def assert_actions_contract(actions_root: Path) -> None:
     require(discovered == tuple(sorted(EXPECTED_STAGES)), f"stage set drifted: {list(discovered)}")
     for stage in EXPECTED_STAGES:
         assert_action(actions_root, stage)
+
+
+def test_grimoire_action_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert_actions_contract(repo_root / "actions" / "grimoire")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
