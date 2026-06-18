@@ -7,11 +7,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 TEMP_ROOT = pathlib.Path("/var/folders/vz/hx33c759727ftq88cxbgp8r40000gn/T/opencode")
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -32,6 +33,134 @@ TOKEN_PATTERNS = (
     re.compile(r"(?i)\b(?:CODEX_RELAY_API_KEY|CODEX_LOOP_PAT|AI_RELAY_API_KEY|CF_ACCESS_CLIENT_ID|CF_ACCESS_CLIENT_SECRET)\s*[:=]\s*[\"']?[^\"'\s]+"),
     re.compile(r"(?i)\b(?:token|secret|password|api[_-]?key)\s*[:=]\s*[\"']?[^\"'\s]+"),
     re.compile(r"(?i)https?://[^\s\"'<>]+(?:token|access_token|api[_-]?key)=[^\s\"'<>]+"),
+)
+DECIDE_FIXTURE_ROOT = pathlib.Path(__file__).resolve().parent / "decide"
+DECIDE_OUTPUT = ".omo/ci/cast-decision.json"
+DECIDE_INPUT_PATHS = {
+    "preflight": ".omo/ci/cast-preflight.json",
+    "review": ".omo/ci/review.json",
+    "design": ".omo/ci/design.json",
+    "issues": ".omo/ci/issues.json",
+    "spec_gap": ".omo/ci/spec-gap.json",
+    "fix": ".omo/ci/fix.json",
+    "boulder": ".omo/boulder.json",
+    "verdict": ".omo/grimoire/verdict.json",
+}
+DECIDE_EXPECTED_TUPLES: dict[str, tuple[str, str, int, str]] = {
+    "spec-gap-advisory": ("spec-gap-halt", "neutral", 0, "spec-needed"),
+    "no-actionable-work": ("no-actionable-work", "neutral", 0, "spec-needed"),
+    "clear-noop-success": ("clear-noop-terminal", "success", 0, "done"),
+    "scoped-push-success": ("scoped-push", "success", 0, "keep-running"),
+    "scope-violation-failure": ("fizzled", "failure", 1, "fizzled"),
+    "malformed-verdict-failure": ("fizzled", "failure", 1, "fizzled"),
+    "preflight-blocked-failure": ("fizzled", "failure", 1, "fizzled"),
+}
+DECIDE_CASE_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "spec-gap-advisory",
+        "label": "spec-gap advisory",
+        "preflight": "ok",
+        "review": "findings",
+        "design": "spec-gap",
+        "issues": "ok",
+        "spec_gap": "halt",
+        "fix": "clear-noop",
+        "boulder": "skipped-clear-noop",
+        "verdict": "approve",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
+    {
+        "name": "no-actionable-work",
+        "label": "no-actionable-work",
+        "preflight": "ok",
+        "review": "approved",
+        "design": "no-actionable",
+        "issues": "ok",
+        "spec_gap": "clear",
+        "fix": "clear-noop",
+        "boulder": "skipped-clear-noop",
+        "verdict": "approve",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
+    {
+        "name": "clear-noop-success",
+        "label": "clear-noop success",
+        "preflight": "ok",
+        "review": "findings",
+        "design": "actionable",
+        "issues": "ok",
+        "spec_gap": "clear",
+        "fix": "clear-noop",
+        "boulder": "skipped-clear-noop",
+        "verdict": "approve",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
+    {
+        "name": "scoped-push-success",
+        "label": "scoped-push success",
+        "preflight": "ok",
+        "review": "findings",
+        "design": "actionable",
+        "issues": "ok",
+        "spec_gap": "clear",
+        "fix": "fixed",
+        "boulder": "completed",
+        "verdict": "approve",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
+    {
+        "name": "scope-violation-failure",
+        "label": "scope-violation failure",
+        "preflight": "ok",
+        "review": "findings",
+        "design": "actionable",
+        "issues": "ok",
+        "spec_gap": "clear",
+        "fix": "scope-violation",
+        "boulder": "completed",
+        "verdict": "approve",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
+    {
+        "name": "malformed-verdict-failure",
+        "label": "malformed-verdict failure",
+        "preflight": "ok",
+        "review": "findings",
+        "design": "actionable",
+        "issues": "ok",
+        "spec_gap": "clear",
+        "fix": "fixed",
+        "boulder": "completed",
+        "verdict": "malformed",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
+    {
+        "name": "preflight-blocked-failure",
+        "label": "preflight-blocked failure",
+        "preflight": "blocked",
+        "review": "findings",
+        "design": "actionable",
+        "issues": "ok",
+        "spec_gap": "clear",
+        "fix": "fixed",
+        "boulder": "completed",
+        "verdict": "approve",
+        "review_outcome": "success",
+        "fix_outcome": "success",
+        "verify_outcome": "success",
+    },
 )
 
 
@@ -91,6 +220,366 @@ def write_text(path: pathlib.Path, text: str) -> pathlib.Path:
     return path
 
 
+def expected_decide_tuples() -> dict[str, tuple[str, str, int, str]]:
+    return dict(DECIDE_EXPECTED_TUPLES)
+
+
+def load_decide_fixture_cases() -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for definition in DECIDE_CASE_DEFINITIONS:
+        name = str(definition["name"])
+        cases.append(
+            {
+                "name": name,
+                "label": definition["label"],
+                "fixture_dir": str(DECIDE_FIXTURE_ROOT / name),
+                "input_paths": dict(DECIDE_INPUT_PATHS),
+                "expected": DECIDE_EXPECTED_TUPLES[name],
+                "review_outcome": definition["review_outcome"],
+                "fix_outcome": definition["fix_outcome"],
+                "verify_outcome": definition["verify_outcome"],
+            }
+        )
+    return cases
+
+
+def decide_preflight_payload(kind: str) -> dict[str, Any]:
+    if kind == "blocked":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-cast",
+            "status": "blocked",
+            "can_continue": False,
+            "blocked_reason": "trusted-controller preflight denied deterministic fixture",
+            "does_not_rerun_trusted_controller": True,
+        }
+    return {
+        "schema_version": 1,
+        "stage": "grimoire-cast",
+        "status": "ok",
+        "can_continue": True,
+        "trusted_status_path": ".omo/ci/trusted-controller-status.json",
+        "trusted_controller_status": "ok",
+        "does_not_rerun_trusted_controller": True,
+    }
+
+
+def decide_review_payload(kind: str) -> dict[str, Any]:
+    findings = []
+    if kind == "findings":
+        findings = [finding("Synthetic in-scope Grimoire decide fixture")]
+    return {
+        "schema_version": 1,
+        "stage": "grimoire-review",
+        "status": "findings" if findings else "approved",
+        "approval_signal": "GRIMOIRE_REVIEW_FINDINGS_PRESENT" if findings else "GRIMOIRE_REVIEW_APPROVED",
+        "read_only": True,
+        "mutation_allowed": False,
+        "findings": findings,
+        "findings_count": len(findings),
+        "lenses": ["security", "correctness", "maintainability", "repo-policy"],
+    }
+
+
+def decide_design_payload(kind: str) -> dict[str, Any]:
+    actionable = {
+        "schema_version": 1,
+        "stage": "grimoire-design",
+        "status": "sufficient",
+        "spec_sufficient": True,
+        "should_halt": False,
+        "halt_reason": "",
+        "scope_authority": "OpenSpec and OMO",
+        "in_scope": [{"path": "src/lib.rs", "title": "Synthetic in-scope Grimoire decide fixture"}],
+        "out_of_scope": [],
+        "bindings": [{"target_paths": ["src/lib.rs"], "source": "deterministic fixture"}],
+        "target_paths": ["src/lib.rs"],
+        "allowed_write_paths": ["src/lib.rs"],
+        "missing": [],
+        "safety_default_gaps": [],
+        "suggested_spec_patch": "",
+        "plan_path": ".omo/ci/design-plan.md",
+    }
+    if kind == "actionable":
+        return actionable
+    if kind == "no-actionable":
+        no_actionable = dict(actionable)
+        no_actionable.update(
+            {
+                "in_scope": [],
+                "bindings": [],
+                "target_paths": [],
+                "allowed_write_paths": [],
+            }
+        )
+        return no_actionable
+    if kind == "spec-gap":
+        spec_gap = dict(actionable)
+        spec_gap.update(
+            {
+                "status": "insufficient",
+                "spec_sufficient": False,
+                "should_halt": True,
+                "halt_reason": "deterministic spec gap fixture",
+                "bindings": [],
+                "target_paths": [],
+                "allowed_write_paths": [],
+                "missing": [{"location": "src/lib.rs:7", "reason": "missing fixture OpenSpec evidence"}],
+                "safety_default_gaps": [{"scope": "src/lib.rs:7", "required_default": "halt before fix"}],
+                "suggested_spec_patch": "Add fixture OpenSpec evidence before code changes.",
+            }
+        )
+        return spec_gap
+    raise FixtureError(f"unsupported decide design fixture kind: {kind}")
+
+
+def decide_issues_payload(kind: str) -> dict[str, Any]:
+    require(kind == "ok", f"unsupported decide issue fixture kind: {kind}")
+    return {
+        "schema_version": 1,
+        "stage": "grimoire-cast",
+        "status": "ok",
+        "issue_write_only": True,
+        "pr_head_write_attempted": False,
+        "remote_issue_mutation_attempted": False,
+        "design_stage_complete": True,
+        "issue_count": 0,
+        "created_count": 0,
+        "deduped_count": 0,
+        "records": [],
+    }
+
+
+def decide_spec_gap_payload(kind: str) -> dict[str, Any]:
+    if kind == "halt":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-spec-gap",
+            "status": "halt",
+            "should_halt": True,
+            "should_comment": True,
+            "no_code_or_push_action": True,
+            "comment_path": ".omo/ci/spec-gap-comment.md",
+        }
+    require(kind == "clear", f"unsupported decide spec-gap fixture kind: {kind}")
+    return {
+        "schema_version": 1,
+        "stage": "grimoire-spec-gap",
+        "status": "clear",
+        "should_halt": False,
+        "should_comment": False,
+    }
+
+
+def decide_fix_payload(kind: str) -> dict[str, Any]:
+    if kind == "clear-noop":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-fix",
+            "status": "clear-noop",
+            "scope_ok": True,
+            "noop": True,
+            "should_commit": False,
+            "should_push": False,
+            "changed_files": [],
+            "violations": [],
+        }
+    if kind == "fixed":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-fix",
+            "status": "fixed",
+            "scope_ok": True,
+            "noop": False,
+            "should_commit": True,
+            "should_push": True,
+            "changed_files": ["src/lib.rs"],
+            "allowed_paths": ["src/lib.rs"],
+            "allowed_write_paths": ["src/lib.rs"],
+            "violations": [],
+        }
+    if kind == "scope-violation":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-fix",
+            "status": "scope-violation",
+            "scope_ok": False,
+            "noop": False,
+            "should_commit": False,
+            "should_push": False,
+            "changed_files": ["src/unscoped.rs"],
+            "allowed_paths": ["src/lib.rs"],
+            "allowed_write_paths": ["src/lib.rs"],
+            "violations": ["src/unscoped.rs"],
+        }
+    raise FixtureError(f"unsupported decide fix fixture kind: {kind}")
+
+
+def decide_boulder_payload(kind: str) -> dict[str, Any]:
+    if kind == "completed":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-cast",
+            "status": "completed",
+            "boulder_required": True,
+            "continuation_state": "completed",
+            "semantic_iteration_cap": False,
+        }
+    require(kind == "skipped-clear-noop", f"unsupported decide boulder fixture kind: {kind}")
+    return {
+        "schema_version": 1,
+        "stage": "grimoire-cast",
+        "status": "skipped-clear-noop",
+        "boulder_required": False,
+        "continuation_state": "not-required",
+        "semantic_iteration_cap": False,
+    }
+
+
+def decide_verdict_payload(kind: str) -> dict[str, Any]:
+    statuses = {lens: "APPROVE" for lens in APPROVE_LENSES}
+    if kind == "malformed":
+        return {
+            "schema_version": 1,
+            "stage": "grimoire-verify",
+            "approved": True,
+            **statuses,
+            "notes": {},
+        }
+    require(kind == "approve", f"unsupported decide verdict fixture kind: {kind}")
+    return {
+        "schema_version": 1,
+        "stage": "grimoire-verify",
+        "approved": True,
+        **statuses,
+        "notes": {lens: {"status": statuses[lens], "summary": "fixture", "evidence": ["synthetic fixture"]} for lens in APPROVE_LENSES},
+    }
+
+
+def decide_fixture_payloads(definition: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        DECIDE_INPUT_PATHS["preflight"]: decide_preflight_payload(str(definition["preflight"])),
+        DECIDE_INPUT_PATHS["review"]: decide_review_payload(str(definition["review"])),
+        DECIDE_INPUT_PATHS["design"]: decide_design_payload(str(definition["design"])),
+        DECIDE_INPUT_PATHS["issues"]: decide_issues_payload(str(definition["issues"])),
+        DECIDE_INPUT_PATHS["spec_gap"]: decide_spec_gap_payload(str(definition["spec_gap"])),
+        DECIDE_INPUT_PATHS["fix"]: decide_fix_payload(str(definition["fix"])),
+        DECIDE_INPUT_PATHS["boulder"]: decide_boulder_payload(str(definition["boulder"])),
+        DECIDE_INPUT_PATHS["verdict"]: decide_verdict_payload(str(definition["verdict"])),
+    }
+
+
+def write_decide_static_fixtures() -> None:
+    for definition in DECIDE_CASE_DEFINITIONS:
+        case_dir = DECIDE_FIXTURE_ROOT / str(definition["name"])
+        for relative, payload in decide_fixture_payloads(definition).items():
+            write_json(case_dir / relative, payload)
+
+
+def assert_decide_fixture_inventory(case: dict[str, Any]) -> None:
+    case_dir = pathlib.Path(str(case["fixture_dir"]))
+    require(case_dir.is_dir(), f"missing decide fixture directory: {case_dir}")
+    expected = sorted(DECIDE_INPUT_PATHS.values())
+    actual = sorted(path.relative_to(case_dir).as_posix() for path in case_dir.rglob("*") if path.is_file())
+    require(actual == expected, f"{case['name']} fixture inventory drifted: actual={actual} expected={expected}")
+    for relative in actual:
+        require(relative.endswith(".json"), f"{case['name']} fixture contains a non-JSON input: {relative}")
+        content = (case_dir / relative).read_text(encoding="utf-8")
+        require(sanitize(content) == content, f"{case['name']} fixture contains a token-like secret pattern: {relative}")
+        read_json(case_dir, relative)
+
+
+def copy_decide_fixture_workspace(root: pathlib.Path, case: dict[str, Any]) -> pathlib.Path:
+    source = pathlib.Path(str(case["fixture_dir"]))
+    workspace = root / "decide-workspaces" / str(case["name"])
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    shutil.copytree(source, workspace)
+    return workspace
+
+
+def actual_decide_tuple(decision: dict[str, Any]) -> tuple[str, str, int, str]:
+    return (
+        str(decision.get("decision")),
+        str(decision.get("conclusion")),
+        int(decision.get("exit_code", 1)),
+        str(decision.get("label_transition")),
+    )
+
+
+def run_decide_fixture_case(root: pathlib.Path, case: dict[str, Any], log_lines: list[str]) -> dict[str, Any]:
+    assert_decide_fixture_inventory(case)
+    workspace = copy_decide_fixture_workspace(root, case)
+    run_helper(
+        "cast",
+        "cast_driver.py",
+        [
+            "decide",
+            "--consumer-workspace",
+            str(workspace),
+            "--preflight-status",
+            DECIDE_INPUT_PATHS["preflight"],
+            "--review-status",
+            DECIDE_INPUT_PATHS["review"],
+            "--review-outcome",
+            str(case["review_outcome"]),
+            "--design-status",
+            DECIDE_INPUT_PATHS["design"],
+            "--issue-status",
+            DECIDE_INPUT_PATHS["issues"],
+            "--spec-gap-status",
+            DECIDE_INPUT_PATHS["spec_gap"],
+            "--fix-status",
+            DECIDE_INPUT_PATHS["fix"],
+            "--fix-outcome",
+            str(case["fix_outcome"]),
+            "--boulder-status",
+            DECIDE_INPUT_PATHS["boulder"],
+            "--verdict-status",
+            DECIDE_INPUT_PATHS["verdict"],
+            "--verify-outcome",
+            str(case["verify_outcome"]),
+            "--output",
+            DECIDE_OUTPUT,
+        ],
+        {0},
+        workspace,
+        log_lines,
+    )
+    decision = read_json(workspace, DECIDE_OUTPUT)
+    actual = actual_decide_tuple(decision)
+    expected = case["expected"]
+    require(actual == expected, f"{case['name']} tuple mismatch: actual={actual} expected={expected}")
+    return {"name": case["name"], "label": case["label"], "actual": actual, "expected": expected}
+
+
+def run_decide_self_check(root: pathlib.Path, log_path: pathlib.Path | None = None) -> dict[str, Any]:
+    root.mkdir(parents=True, exist_ok=True)
+    log_lines = [
+        "# Grimoire Task 4 Decide Fixtures",
+        f"generated_at={utc_now()}",
+        f"repo_root={REPO_ROOT}",
+        "secret_values=redacted",
+        "",
+    ]
+    cases = load_decide_fixture_cases()
+    summaries = [run_decide_fixture_case(root, case, log_lines) for case in cases]
+    manifest = {
+        "schema_version": 1,
+        "generated_at": utc_now(),
+        "fixture_count": len(summaries),
+        "fixtures": summaries,
+        "expected_tuples": expected_decide_tuples(),
+        "real_remote_mutation_attempted": False,
+        "secret_values_redacted": True,
+        "model_output_dependency": False,
+    }
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(log_lines).rstrip() + "\n", encoding="utf-8")
+    return manifest
+
+
 def helper(stage: str, script_name: str) -> pathlib.Path:
     path = ACTIONS_ROOT / stage / "scripts" / script_name
     require(path.is_file(), f"missing helper: {path}")
@@ -148,11 +637,11 @@ def run_helper(
     return result
 
 
-def finding(title: str, file_name: str = "src/lib.rs") -> dict[str, Any]:
+def finding(title: str, file_name: str = "src/lib.rs", severity: str = "medium") -> dict[str, Any]:
     return {
         "file": file_name,
         "line": 7,
-        "severity": "medium",
+        "severity": severity,
         "lens": "correctness",
         "title": title,
         "what": f"{title} was observed in the deterministic loop fixture.",
@@ -233,7 +722,7 @@ def run_review_clean(workspace: pathlib.Path, output: str, log_lines: list[str])
     return output
 
 
-def run_review_defect(workspace: pathlib.Path, output: str, log_lines: list[str]) -> str:
+def run_review_defect(workspace: pathlib.Path, output: str, log_lines: list[str], severity: str = "medium") -> str:
     diff_path = write_text(
         workspace / "defect.diff",
         "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -7,1 +7,1 @@\n+fn fixture_defect() { /* GRIMOIRE_REVIEW_DEFECT */ }\n",
@@ -247,6 +736,12 @@ def run_review_defect(workspace: pathlib.Path, output: str, log_lines: list[str]
         log_lines,
     )
     review = read_json(workspace, output)
+    findings = review.get("findings")
+    if isinstance(findings, list):
+        for item in cast(list[object], findings):
+            if isinstance(item, dict):
+                item["severity"] = severity
+    write_json(workspace / output, review)
     require(review.get("status") == "findings", "defect review fixture must produce findings")
     return output
 
@@ -496,7 +991,8 @@ def clear_noop_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, An
     design = run_design(workspace, review, ".omo/ci/spec-clear.json", ".omo/ci/design-clear.md", False, log_lines)
     gap = run_spec_gap(workspace, design, ".omo/ci/spec-gap-clear.json", ".omo/ci/spec-gap-clear.md", {0}, log_lines)
     issues = run_issues(workspace, design, ".omo/ci/issues-clear.json", log_lines)
-    fix = run_fix_clear(workspace, design, gap, ".omo/ci/fix-clear.json", ".omo/ci/fix-clear.md", log_lines)
+    fix = ".omo/ci/fix-clear.json"
+    write_json(workspace / fix, decide_fix_payload("clear-noop"))
     boulder = run_boulder(workspace, fix, ".omo/boulder-clear.json", {0}, log_lines)
     verdict = run_verify(workspace, ".omo/grimoire/verdict-approve.json", "approve", {0}, log_lines)
     decision_path = run_decide(
@@ -516,15 +1012,18 @@ def clear_noop_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, An
     final_path = run_complete(workspace, decision_path, ".omo/ci/cast-final-clear.json", {0}, log_lines)
     decision = read_json(workspace, decision_path)
     final = read_json(workspace, final_path)
-    require(decision.get("decision") == "clear-noop-terminal", "clear-noop must decide terminal")
-    require(decision.get("terminal") is True and decision.get("should_push") is False, "clear-noop must terminate without push")
-    require(final.get("status") == "terminal", "clear-noop complete must be terminal")
+    require(decision.get("decision") == "no-actionable-work" and decision.get("conclusion") == "neutral", "clean review with no actionable work must decide neutral no-actionable")
+    require(decision.get("terminal") is False and decision.get("should_push") is False, "no-actionable work must not terminate as Cast or push")
+    require(final.get("status") == "advisory" and final.get("conclusion") == "neutral", "no-actionable complete must be advisory")
     return summarize(
         workspace,
         root,
         "clear-noop",
         {
             "decision": decision.get("decision"),
+            "conclusion": decision.get("conclusion"),
+            "exit_code": decision.get("exit_code"),
+            "final_conclusion": final.get("conclusion"),
             "terminal": decision.get("terminal"),
             "should_push": decision.get("should_push"),
             "final_status": final.get("status"),
@@ -536,7 +1035,7 @@ def clear_noop_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, An
 def fixed_then_clear_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, Any]:
     workspace = prepare_workspace(root, "fixed-then-clear")
     preflight = run_preflight(workspace, log_lines)
-    review = run_review_defect(workspace, ".omo/ci/review-defect.json", log_lines)
+    review = run_review_defect(workspace, ".omo/ci/review-defect.json", log_lines, severity="high")
     design = run_design(workspace, review, ".omo/ci/spec-sufficient.json", ".omo/ci/design-sufficient.md", True, log_lines)
     gap = run_spec_gap(workspace, design, ".omo/ci/spec-gap-clear.json", ".omo/ci/spec-gap-clear.md", {0}, log_lines)
     issues = run_issues(workspace, design, ".omo/ci/issues-fixed.json", log_lines)
@@ -607,8 +1106,8 @@ def fixed_then_clear_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[s
     clear_final_path = run_complete(workspace, clear_decision_path, ".omo/ci/cast-final-clear-cycle2.json", {0}, log_lines)
     clear_decision = read_json(workspace, clear_decision_path)
     clear_final = read_json(workspace, clear_final_path)
-    require(clear_decision.get("decision") == "clear-noop-terminal", "synchronize re-review must clear-noop terminal")
-    require(clear_final.get("status") == "terminal", "synchronize clear cycle must complete terminal")
+    require(clear_decision.get("decision") == "no-actionable-work" and clear_decision.get("conclusion") == "neutral", "synchronize re-review with no actionable work must be neutral advisory")
+    require(clear_final.get("status") == "advisory" and clear_final.get("conclusion") == "neutral", "synchronize clean cycle must complete advisory")
     return summarize(
         workspace,
         root,
@@ -630,7 +1129,7 @@ def fixed_then_clear_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[s
 def spec_insufficient_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, Any]:
     workspace = prepare_workspace(root, "spec-insufficient")
     preflight = run_preflight(workspace, log_lines)
-    review = run_review_defect(workspace, ".omo/ci/review-defect.json", log_lines)
+    review = run_review_defect(workspace, ".omo/ci/review-defect.json", log_lines, severity="high")
     design = run_design(workspace, review, ".omo/ci/spec-insufficient.json", ".omo/ci/design-insufficient.md", False, log_lines)
     gap = run_spec_gap(workspace, design, ".omo/ci/spec-gap-halt.json", ".omo/ci/spec-gap-comment.md", {0}, log_lines)
     issues = run_issues(workspace, design, ".omo/ci/issues-insufficient.json", log_lines)
@@ -649,13 +1148,13 @@ def spec_insufficient_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[
         "success",
         log_lines,
     )
-    final_path = run_complete(workspace, decision_path, ".omo/ci/cast-final-spec-insufficient.json", {1}, log_lines)
+    final_path = run_complete(workspace, decision_path, ".omo/ci/cast-final-spec-insufficient.json", {0}, log_lines)
     gap_payload = read_json(workspace, gap)
     decision = read_json(workspace, decision_path)
     final = read_json(workspace, final_path)
     require(gap_payload.get("status") == "halt" and gap_payload.get("no_code_or_push_action") is True, "spec-gap halt must forbid code or push action")
-    require(decision.get("status") == "fizzled" and decision.get("should_push") is False, "spec-insufficient path must fizzle without push")
-    require(final.get("status") == "fizzled", "spec-insufficient complete must fizzle")
+    require(decision.get("decision") == "spec-gap-halt" and decision.get("conclusion") == "neutral" and decision.get("exit_code") == 0, "spec-insufficient path must complete as neutral advisory")
+    require(final.get("status") == "advisory" and final.get("conclusion") == "neutral", "spec-insufficient complete must be advisory")
     require(not (workspace / ".omo" / "ci" / "fix-not-run.json").exists(), "spec-insufficient path must not write a fix artifact")
     return summarize(
         workspace,
@@ -664,7 +1163,10 @@ def spec_insufficient_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[
         {
             "spec_gap_status": gap_payload.get("status"),
             "decision": decision.get("decision"),
+            "conclusion": decision.get("conclusion"),
+            "exit_code": decision.get("exit_code"),
             "final_status": final.get("status"),
+            "final_conclusion": final.get("conclusion"),
             "terminal": decision.get("terminal"),
             "should_push": decision.get("should_push"),
             "code_write_attempted": False,
@@ -676,11 +1178,12 @@ def spec_insufficient_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[
 def reject_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, Any]:
     workspace = prepare_workspace(root, "reject")
     preflight = run_preflight(workspace, log_lines)
-    review = run_review_clean(workspace, ".omo/ci/review-clean.json", log_lines)
-    design = run_design(workspace, review, ".omo/ci/spec-clear.json", ".omo/ci/design-clear.md", False, log_lines)
+    review = run_review_defect(workspace, ".omo/ci/review-defect.json", log_lines, severity="high")
+    design = run_design(workspace, review, ".omo/ci/spec-clear.json", ".omo/ci/design-clear.md", True, log_lines)
     gap = run_spec_gap(workspace, design, ".omo/ci/spec-gap-clear.json", ".omo/ci/spec-gap-clear.md", {0}, log_lines)
     issues = run_issues(workspace, design, ".omo/ci/issues-reject.json", log_lines)
-    fix = run_fix_clear(workspace, design, gap, ".omo/ci/fix-clear.json", ".omo/ci/fix-clear.md", log_lines)
+    fix = ".omo/ci/fix-clear.json"
+    write_json(workspace / fix, decide_fix_payload("clear-noop"))
     boulder = run_boulder(workspace, fix, ".omo/boulder-clear.json", {0}, log_lines)
     reject = run_verify(workspace, ".omo/grimoire/verdict-reject.json", "reject", {1}, log_lines)
     decision_path = run_decide(
@@ -711,7 +1214,10 @@ def reject_fixture(root: pathlib.Path, log_lines: list[str]) -> dict[str, Any]:
         {
             "verdict_approved": verdict.get("approved"),
             "decision": decision.get("decision"),
+            "conclusion": decision.get("conclusion"),
+            "exit_code": decision.get("exit_code"),
             "final_status": final.get("status"),
+            "final_conclusion": final.get("conclusion"),
             "terminal": decision.get("terminal"),
             "should_push": decision.get("should_push"),
             "code_write_attempted": False,
@@ -813,13 +1319,51 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run deterministic Grimoire loop fixtures without live mutation.")
     parser.add_argument("--artifact-root", type=pathlib.Path, default=None)
     parser.add_argument("--log", type=pathlib.Path, default=None)
+    parser.add_argument("--generate-decide-fixtures", action="store_true")
+    parser.add_argument("--decide-self-check", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.generate_decide_fixtures:
+        try:
+            write_decide_static_fixtures()
+        except FixtureError as exc:
+            print(sanitize(str(exc)), file=sys.stderr)
+            return 1
+        print("decide fixtures generated")
+        print(f"fixture_root={DECIDE_FIXTURE_ROOT}")
+        print(f"fixture_count={len(DECIDE_CASE_DEFINITIONS)}")
+        return 0
+
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     artifact_root = args.artifact_root
+    if args.decide_self_check:
+        if artifact_root is None:
+            artifact_root = pathlib.Path(tempfile.mkdtemp(prefix="grimoire-task-4-decide-fixtures-", dir=str(TEMP_ROOT)))
+        artifact_root = ensure_temp_path(artifact_root, "artifact root")
+        log_path = ensure_temp_path(args.log, "decide fixture log") if args.log is not None else None
+        try:
+            if artifact_root.exists() and any(artifact_root.iterdir()):
+                raise FixtureError(f"artifact root must be empty before fixture run: {artifact_root}")
+            manifest = run_decide_self_check(artifact_root, log_path)
+        except FixtureError as exc:
+            print(sanitize(str(exc)), file=sys.stderr)
+            return 1
+        print("decide fixtures ok")
+        print(f"artifact_root={artifact_root}")
+        print(f"fixture_count={manifest['fixture_count']}")
+        for summary in manifest["fixtures"]:
+            decision, conclusion, exit_code, label_transition = summary["actual"]
+            print(
+                f"PASS {summary['name']} ({summary['label']}): "
+                f"decision={decision} conclusion={conclusion} exit_code={exit_code} label_transition={label_transition}"
+            )
+        if log_path is not None:
+            print(f"log={log_path}")
+        return 0
+
     if artifact_root is None:
         artifact_root = pathlib.Path(tempfile.mkdtemp(prefix="grimoire-task-5-fixtures-", dir=str(TEMP_ROOT)))
     artifact_root = ensure_temp_path(artifact_root, "artifact root")

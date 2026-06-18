@@ -1,0 +1,10 @@
+{
+  "approved": true,
+  "f1_oracle": "APPROVE",
+  "f2_quality": "APPROVE",
+  "f3_real_qa": "APPROVE",
+  "f4_scope": "APPROVE",
+  "notes": {},
+  "schema_version": 1,
+  "stage": "grimoire-verify"
+}

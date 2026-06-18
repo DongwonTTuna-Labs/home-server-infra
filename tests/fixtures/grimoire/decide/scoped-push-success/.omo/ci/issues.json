@@ -1,0 +1,13 @@
+{
+  "created_count": 0,
+  "deduped_count": 0,
+  "design_stage_complete": true,
+  "issue_count": 0,
+  "issue_write_only": true,
+  "pr_head_write_attempted": false,
+  "records": [],
+  "remote_issue_mutation_attempted": false,
+  "schema_version": 1,
+  "stage": "grimoire-cast",
+  "status": "ok"
+}
