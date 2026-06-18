@@ -8,7 +8,7 @@ Accepted for Grimoire privileged GitHub operations. This records the docs and co
 
 Grimoire needs privileged GitHub access for trusted control-plane checkout, consumer checkout, advisory comment upsert, out-of-scope Issue filing, display label updates, and one scoped bot push after F1-F4 approval.
 
-The old documentation described PAT auth as the current model and didn't treat App-token auth as the valid privileged path. That no longer matches the reusable workflow. The workflow now mints one Grimoire GitHub App installation token with `actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349`, `client-id: ${{ inputs.grimoire_app_client_id }}`, `private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}`, and `owner: DongwonTTuna-Labs`.
+The old documentation described PAT auth as the current model and didn't treat App-token auth as the valid privileged path. That no longer matches the reusable workflow. The workflow now mints one Grimoire GitHub App installation token with `actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1`, `client-id: ${{ inputs.grimoire_app_client_id }}`, `private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}`, and `owner: DongwonTTuna-Labs`.
 
 Both checkouts use the minted App token. The cast stage receives that same minted token through the existing downstream `GRIMOIRE_GITHUB_PAT` environment name. That name is compatibility plumbing only. It is not a live PAT fallback.
 

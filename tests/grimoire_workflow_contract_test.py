@@ -26,7 +26,7 @@ EXPECTED_SECRETS = {
     "CF_ACCESS_CLIENT_ID": False,
     "CF_ACCESS_CLIENT_SECRET": False,
 }
-APP_TOKEN_ACTION = "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+APP_TOKEN_ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
 APP_TOKEN_EXPR = "${{ steps.grimoire-app-token.outputs.token }}"
 EXPECTED_CF_HEADERS = {
     "CF-Access-Client-Id": "{env:CF_ACCESS_CLIENT_ID}",
