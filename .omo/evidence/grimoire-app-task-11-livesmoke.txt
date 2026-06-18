@@ -1,0 +1,36 @@
+# Grimoire App Auth Task 11 Live Smoke Evidence
+
+Date: 2026-06-18
+Branch: grimoire-control-plane-redesign
+Repository: DongwonTTuna-Labs/home-server-infra
+PR: 64
+
+Live App-token smoke:
+- Scratch PR search: no separate scratch/test PR open; used temporary PR #64 artifact path.
+- Installation lookup: HTTP 200.
+- Installation token mint: HTTP 201.
+- Initial marker comment count: 0.
+- Comment upsert first run: status ok, operation created.
+- Comment upsert second run: status ok, operation patched.
+- Marker comment count after update: 1.
+- Spec Needed label definition initial lookup: HTTP 404.
+- Temporary Spec Needed label definition create: HTTP 201.
+- Spec Needed label add via Grimoire labels script: status ok, remote status applied.
+- Spec Needed label present after add: true.
+- Spec Needed label remove cleanup: HTTP 200.
+- Spec Needed label present after remove: false.
+- Marker comment delete cleanup: HTTP 204.
+- Marker comment count after cleanup: 0.
+- Temporary Spec Needed label definition delete cleanup: HTTP 204.
+- Final live smoke result: pass.
+- Final PR cleanup verification: comments empty, labels empty.
+
+Local verification:
+- python3 actions/grimoire/cast/scripts/self_smoke.py --control-plane-root "$PWD": pass.
+- Targeted pytest suite for Grimoire stage/action/workflow/secret/doc/label contracts: 15 passed.
+- tests/validate_consumer_adapter.py on documented consumer workflow snippet with expected reusable repo DongwonTTuna-Labs/home-server-infra and ref main: consumer adapter ok.
+
+Git and PR checks:
+- Commit: pending.
+- Push: pending.
+- PR #64 checks: pending.
