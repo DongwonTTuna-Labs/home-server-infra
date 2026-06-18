@@ -31,6 +31,10 @@ Local verification:
 - tests/validate_consumer_adapter.py on documented consumer workflow snippet with expected reusable repo DongwonTTuna-Labs/home-server-infra and ref main: consumer adapter ok.
 
 Git and PR checks:
-- Commit: pending.
+- Local commit stack before evidence status update: 9 commits through efac969.
+- Final pre-push deterministic self-smoke: pass.
+- Final pre-push targeted pytest suite: 15 passed.
+- Final pre-push consumer adapter validator: consumer adapter ok.
+- Final pre-push branch secret scan: pass.
 - Push: pending.
 - PR #64 checks: pending.
