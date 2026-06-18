@@ -67,9 +67,9 @@ The spec-gap stage artifact still keeps compatibility fields such as `status="ha
 
 ```mermaid
 flowchart TD
-  PR[pull_request opened, ready_for_review, synchronize, reopened] --> Caller[Thin consumer workflow]
+  PR[pull_request opened, ready_for_review, synchronize, reopened, unlabeled] --> Caller[Thin consumer workflow]
   Caller -->|workflow_call @main| Reusable[home-server-infra grimoire-control-plane.yml]
-  Reusable --> Auth[PAT and relay key resolve, masked, fail closed]
+  Reusable --> Auth[App token and relay credentials resolve, masked, fail closed]
   Auth --> Control[Checkout control-plane at main into control-plane/]
   Auth --> Consumer[Checkout consumer head_sha as data into consumer/]
   Control --> Trusted[trusted-controller]
@@ -118,9 +118,11 @@ The package layout is:
 | Consumer adapter validator | `tests/validate_consumer_adapter.py` |
 | Operator guide | `docs/grimoire-reusable.md` |
 | Primary ADR | `docs/decisions/grimoire-reusable-control-plane.md` |
+| GitHub App auth ADR | `docs/decisions/grimoire-app-auth.md` |
 | Advisory and failure ADR | `docs/decisions/grimoire-advisory-failure-separation.md` |
 | v1 release notes | `docs/releases/grimoire-reusable-control-plane-v1.md` |
 | v1 advisory and failure release notes | `docs/releases/grimoire-reusable-control-plane-v1-advisory-failure.md` |
+| v1 GitHub App auth release notes | `docs/releases/grimoire-app-auth-v1.md` |
 
 The reusable workflow is a thin `workflow_call` orchestrator. The eight stage actions own stage logic. Helper files under `actions/grimoire/<stage>/scripts/` are action-local implementation details. They are not public API, not consumer extension points, and not a flat runtime script surface. There is no top-level `scripts/grimoire/` runtime package.
 
@@ -134,13 +136,18 @@ name: Grimoire
 
 on:
   pull_request:
-    types: [opened, ready_for_review, synchronize, reopened]
+    types: [opened, ready_for_review, synchronize, reopened, unlabeled]
 
 permissions: {}
 
 jobs:
   grimoire:
-    if: ${{ github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, 'grimoire:disabled') }}
+    if: >-
+      ${{
+        github.event.pull_request.draft == false &&
+        !contains(github.event.pull_request.labels.*.name, 'grimoire:disabled') &&
+        (github.event.action != 'unlabeled' || github.event.label.name == '📋 Spec Needed')
+      }}
     uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main
     with:
       consumer_repository: ${{ github.repository }}
@@ -148,22 +155,25 @@ jobs:
       pull_request_number: ${{ github.event.pull_request.number }}
       head_sha: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.event.pull_request.base.ref }}
+      grimoire_app_client_id: Iv23liFL1dDHmU06FLSF
     secrets:
-      GRIMOIRE_PAT: ${{ secrets.GRIMOIRE_PAT }}
+      GRIMOIRE_APP_PRIVATE_KEY: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}
       AI_RELAY_API_KEY: ${{ secrets.AI_RELAY_API_KEY }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
 ```
 <!-- grimoire-consumer-workflow:recommended:end -->
 
+`pull_request.unlabeled` is only for re-review after a human removes `📋 Spec Needed`. The job guard prevents non-Spec-Needed label removals from triggering Grimoire.
+
 Required caller behavior:
 
-1. Use only the `pull_request` event with types `[opened, ready_for_review, synchronize, reopened]`.
+1. Use only the `pull_request` event with types `[opened, ready_for_review, synchronize, reopened, unlabeled]`.
 2. Keep top-level `permissions: {}` in the consumer caller.
-3. Keep the job-level guard for non-draft PRs and the absence of the `grimoire:disabled` stop label.
+3. Keep the job-level guard for non-draft PRs, the absence of the `grimoire:disabled` stop label, and `unlabeled` events limited to `📋 Spec Needed` removals.
 4. Call `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`.
-5. Pass `consumer_repository`, `consumer_ref`, `pull_request_number`, `head_sha`, and `base_ref` from GitHub pull request metadata.
-6. Map named secrets explicitly. Don't use `secrets: inherit`.
+5. Pass `consumer_repository`, `consumer_ref`, `pull_request_number`, `head_sha`, and `base_ref` from GitHub pull request metadata, plus non-secret `grimoire_app_client_id`.
+6. Map named secrets explicitly, including `GRIMOIRE_APP_PRIVATE_KEY`. Don't use `secrets: inherit`.
 
 The reusable workflow also accepts optional `grimoire_contract_version` with default `"1"`. Consumers normally omit it. If a future version requires explicit selection, the release notes for that version will say so.
 
@@ -178,18 +188,22 @@ If GitHub says the workflow can't be found or isn't reusable, check those gates 
 
 ### Required Secrets And Runner Access
 
-Grimoire uses a PAT-only auth model for privileged GitHub operations.
+Grimoire uses GitHub App installation token auth for privileged GitHub operations.
 
-1. Preferred GitHub auth is the named consumer secret `GRIMOIRE_PAT`.
-2. If that named secret is absent, the self-hosted runner may provide `CODEX_LOOP_PAT` as a bounded fallback.
-3. If neither is present, the workflow fails closed before checkout, Issues, labels, or push stages.
-4. Preferred model relay auth is the named consumer secret `AI_RELAY_API_KEY`.
-5. If that named secret is absent, the runner may provide `AI_RELAY_API_KEY` from its environment.
-6. Cloudflare Access for the AI relay uses named consumer secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
-7. If either Cloudflare Access named secret is absent, the runner may provide the same-name `CF_ACCESS_CLIENT_ID` or `CF_ACCESS_CLIENT_SECRET` environment variable.
-8. If no relay key is present, or either Cloudflare Access value is absent, the workflow fails closed before model-capable stages.
-9. OpenCode receives those Cloudflare Access values only as provider headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` from environment-backed config.
-10. Resolved credentials are masked before use. Docs, logs, fixtures, comments, and evidence must never include raw secrets, prefixes, lengths, hashes, token-bearing URLs, or private run URLs.
+1. Current GitHub auth is the named consumer secret `GRIMOIRE_APP_PRIVATE_KEY` plus non-secret `grimoire_app_client_id`.
+2. The default Grimoire App client ID is `Iv23liFL1dDHmU06FLSF`.
+3. The reusable workflow mints one installation token with `actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349`, `client-id: ${{ inputs.grimoire_app_client_id }}`, `private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}`, and `owner: DongwonTTuna-Labs`.
+4. Both checkouts and downstream privileged GitHub operations use the minted App token. The downstream env name `GRIMOIRE_GITHUB_PAT` remains compatibility plumbing only and isn't a PAT fallback.
+5. If the private key is absent or the installation token cannot be minted, the workflow fails closed before checkout, Issues, labels, comments, or push stages.
+6. These forbidden legacy or caller-scoped credentials are not valid for privileged Grimoire operations: PATs, `GITHUB_TOKEN`, `CODEX_LOOP_PAT`, and `github.token`.
+7. This repository has the current repo-level `GRIMOIRE_APP_PRIVATE_KEY` secret path. Organization-level secret and variable rollout requires an organization admin, and these docs don't claim org-level rollout has happened.
+8. Preferred model relay auth is the named consumer secret `AI_RELAY_API_KEY`.
+9. If that named secret is absent, the runner may provide `AI_RELAY_API_KEY` from its environment.
+10. Cloudflare Access for the AI relay uses named consumer secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`.
+11. If either Cloudflare Access named secret is absent, the runner may provide the same-name `CF_ACCESS_CLIENT_ID` or `CF_ACCESS_CLIENT_SECRET` environment variable.
+12. If no relay key is present, or either Cloudflare Access value is absent, the workflow fails closed before model-capable stages.
+13. OpenCode receives those Cloudflare Access values only as provider headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` from environment-backed config.
+14. Resolved credentials are masked before use. Docs, logs, fixtures, comments, and evidence must never include raw secrets, prefixes, lengths, hashes, token-bearing URLs, or private run URLs.
 
 The reusable workflow runs on self-hosted infrastructure only:
 
@@ -219,12 +233,11 @@ Do not use these as valid Grimoire patterns:
 
 1. `secrets: inherit`
 2. `pull_request_target`
-3. `GITHUB_TOKEN` for privileged Grimoire GitHub operations
-4. GitHub App token auth for Grimoire privileged writes
-5. GitHub-hosted runner fallback
-6. Manual dispatch triggers or a separate manual Grimoire workflow
-7. Consumer-provided runtime control inputs that change execution mode or pretend to run live behavior
-8. SHA, tag, or non-main branch refs for this private reusable workflow
+3. These forbidden legacy or caller-scoped credentials are not valid for privileged Grimoire GitHub operations: PAT, `GITHUB_TOKEN`, `CODEX_LOOP_PAT`, or `github.token`
+4. GitHub-hosted runner fallback
+5. Manual dispatch triggers or a separate manual Grimoire workflow
+6. Consumer-provided runtime control inputs that change execution mode or pretend to run live behavior
+7. SHA, tag, or non-main branch refs for this private reusable workflow
 
 ### Invalid Examples, Not Recommended
 
@@ -261,7 +274,7 @@ jobs:
     runs-on: ubuntu-latest
 ```
 
-Invalid example, do not copy, `GITHUB_TOKEN` auth:
+Invalid example, do not copy, legacy PAT or `GITHUB_TOKEN` auth:
 
 ```yaml
 jobs:
@@ -304,11 +317,13 @@ The loop must not fix out-of-scope findings. It must not use private log excerpt
 
 ### Spec-Gap Advisory
 
-`spec-gap` now produces a five-section advisory comment and status when Grimoire needs OpenSpec evidence before it can act. It is guidance, not a red workflow failure, when cast maps it to `conclusion="neutral"`.
+`spec-gap` now produces a five-section advisory status when Grimoire needs OpenSpec evidence before it can act. It is guidance, not a red workflow failure, when cast maps it to `conclusion="neutral"`.
+
+Cast posts or upserts the marker-backed `<!-- grimoire-spec-gap -->` advisory comment when mutation is allowed and a spec-gap comment artifact exists. The comment is neutral guidance. It doesn't approve code changes, authorize push, or replace the need for truthful OpenSpec evidence.
 
 The advisory always means `no_code_or_push_action=true`. It doesn't authorize code changes, file writes, commits, or push. It tells the owner what evidence is missing and how to rerun safely.
 
-To satisfy spec-gap guidance, add or update the relevant OpenSpec evidence, keep the spec truthful to the intended change, and let Grimoire rerun through normal pull request events such as `opened`, `ready_for_review`, `synchronize`, or `reopened`. Don't use manual dispatch, runtime controls, or label state as a substitute for spec evidence.
+To satisfy spec-gap guidance, add or update the relevant OpenSpec evidence, keep the spec truthful to the intended change, and let Grimoire rerun through normal pull request events such as `opened`, `ready_for_review`, `synchronize`, `reopened`, or the guarded removal of `📋 Spec Needed`. The label-clear path is only the guarded `pull_request.unlabeled` event where `github.event.label.name == '📋 Spec Needed'`. Don't use manual dispatch, runtime controls, or unrelated label state as a substitute for spec evidence.
 
 ## Display Labels
 
@@ -316,13 +331,15 @@ The labels action manages display labels only. Labels help humans read PR state,
 
 `spec-needed` removes the managed running, done, and fizzled labels, then adds `📋 Spec Needed`. It preserves unrelated labels such as team, area, or reviewer labels. `📋 Spec Needed` means Grimoire has advisory OpenSpec guidance for the PR. It is display-only advisory state, not a workflow state machine input.
 
+After the owner fixes the OpenSpec evidence, removing `📋 Spec Needed` is the only label-clear re-review path. The consumer caller must include `pull_request.unlabeled` and the job guard must restrict that event to `📋 Spec Needed` removals.
+
 The managed labels are `🔮 Casting…`, `✨ Cast`, `💨 Fizzled`, and `📋 Spec Needed`. The stop signal remains the explicit `grimoire:disabled` consumer guard label.
 
 ## Runtime Policy
 
 There is no runtime simulation input and no separate manual Grimoire workflow. The loop is always-on for eligible pull requests and is controlled by:
 
-1. Pull request trigger types `[opened, ready_for_review, synchronize, reopened]`
+1. Pull request trigger types `[opened, ready_for_review, synchronize, reopened, unlabeled]`, with `unlabeled` guarded to `📋 Spec Needed` removals
 2. Job-level Ready-only and non-`grimoire:disabled` gate
 3. `grimoire:disabled` stop label
 4. Trusted-controller protected-path guard
@@ -332,7 +349,7 @@ There is no runtime simulation input and no separate manual Grimoire workflow. T
 8. Wall-clock boulder liveness guard
 9. Scoped push filter that excludes `.omo/**`
 
-Local deterministic contract tests provide pre-rollout evidence. Before consumer PR-head data is checked out, the trusted control-plane workflow provisions a pinned `opencode-ai` CLI through the controller-owned helper, then validates `opencode --version` before any model stage can run. A real cross-repo pull request event is a later task after `home-server-infra` is merged and private reusable workflow access is enabled. Task 9 is the first place to claim observed real cross-repo PR-event execution.
+Local deterministic contract tests provide pre-rollout evidence. Before consumer PR-head data is checked out, the trusted control-plane workflow provisions a pinned `opencode-ai` CLI through the controller-owned helper, then validates `opencode --version` before any model stage can run. This documentation doesn't claim observed real cross-repo PR-event execution; that evidence belongs to a later smoke task after human merge, private reusable workflow access, and required secret setup.
 
 The cast action exposes `conclusion` and `summary` outputs. They enable optional display or presentation semantics, including neutral/advisory summaries. They don't create a separate neutral check-run in this release.
 
@@ -345,6 +362,10 @@ That release note records the relocated Grimoire loop, PR #53 context, contract 
 The v1 advisory and failure separation note is `docs/releases/grimoire-reusable-control-plane-v1-advisory-failure.md`.
 
 That release note records the minor behavior change from red spec-gap halt to neutral advisory guidance, the `📋 Spec Needed` display label, optional `.omo/grimoire/scope.yml`, and the unchanged failure behavior for real safety violations.
+
+The v1 GitHub App auth release note is `docs/releases/grimoire-app-auth-v1.md`.
+
+That release note records the auth behavior change from legacy PAT guidance to org GitHub App installation-token auth, the consumer migration checklist, guarded `📋 Spec Needed` label-clear re-review, security notes, validation evidence, and rollout limits.
 
 ## Non-Goals
 

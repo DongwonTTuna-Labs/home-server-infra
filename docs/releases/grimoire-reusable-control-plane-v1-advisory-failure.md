@@ -31,9 +31,9 @@ No consumer workflow action is required. Existing private consumers keep the thi
 
 ## Migration
 
-No consumer action is required for the workflow call. Keep using `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`, keep `permissions: {}`, and keep explicit secret mapping for `GRIMOIRE_PAT`, `AI_RELAY_API_KEY`, `CF_ACCESS_CLIENT_ID`, and `CF_ACCESS_CLIENT_SECRET`.
+Consumers now keep using `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`, keep `permissions: {}`, map `GRIMOIRE_APP_PRIVATE_KEY`, pass `grimoire_app_client_id`, and keep explicit relay and Cloudflare Access secret mappings. The caller trigger includes guarded `pull_request.unlabeled` handling for `📋 Spec Needed` removals.
 
-To satisfy a spec-gap advisory, add or update the relevant OpenSpec evidence, keep the spec truthful, and let the PR rerun through normal `pull_request` events such as `synchronize`.
+To satisfy a spec-gap advisory, add or update the relevant OpenSpec evidence, keep the spec truthful, and let the PR rerun through normal `pull_request` events such as `synchronize` or the guarded `📋 Spec Needed` label removal.
 
 Consumers may add `.omo/grimoire/scope.yml` later if they need governed and advisory-only path families. The manifest is optional. Invalid manifests don't grant authority and fall back to severity-threshold behavior.
 

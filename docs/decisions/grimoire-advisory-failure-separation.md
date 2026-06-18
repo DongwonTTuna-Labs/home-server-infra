@@ -40,7 +40,7 @@ The cast action exposes `conclusion` and `summary` outputs for optional display 
 
 ## Backward-Safety
 
-Consumer workflow shape doesn't change. Consumers still call `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`, keep `permissions: {}`, and map named secrets explicitly. The auth model remains PAT-only through `GRIMOIRE_PAT` for privileged GitHub writes, with relay and Cloudflare Access secrets mapped by name.
+Consumer workflow shape now includes the guarded `pull_request.unlabeled` path for `📋 Spec Needed` removals. Consumers still call `DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main`, keep `permissions: {}`, map named secrets explicitly, and use GitHub App installation-token auth through `GRIMOIRE_APP_PRIVATE_KEY` plus `grimoire_app_client_id`. `docs/decisions/grimoire-app-auth.md` records the current auth decision.
 
 The compatible `spec-gap-halt` decision string stays available for readers that key on the old name. The new `conclusion` field is the authoritative outcome class for success, neutral, and failure.
 
