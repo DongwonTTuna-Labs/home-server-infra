@@ -36,5 +36,6 @@ Git and PR checks:
 - Final pre-push targeted pytest suite: 15 passed.
 - Final pre-push consumer adapter validator: consumer adapter ok.
 - Final pre-push branch secret scan: pass.
-- Push: pending.
-- PR #64 checks: pending.
+- Push: pass to origin/grimoire-control-plane-redesign.
+- PR #64 checks: pass.
+- PR #64 check result: Deterministic Grimoire signal self-smoke, state SUCCESS, bucket pass.
