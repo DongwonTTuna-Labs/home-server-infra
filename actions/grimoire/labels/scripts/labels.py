@@ -330,7 +330,7 @@ def run(args: argparse.Namespace) -> int:
         "github_label_results": remote_results,
         "remote_apply_status": remote_status,
         "remote_apply_skip_reason": "" if remote_enabled else remote_skip_reason,
-        "token_source": "pat-input" if str(args.token or "").strip() else "none",
+        "token_source": "grimoire-github-auth-input" if str(args.token or "").strip() else "none",
         "notes": notes,
     }
     if blocked_reason:

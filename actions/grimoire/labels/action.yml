@@ -32,7 +32,7 @@ inputs:
     required: false
     default: "false"
   token:
-    description: Resolved Grimoire PAT used only for optional GitHub Issues label mutation.
+    description: Resolved Grimoire App installation token used only for optional GitHub Issues label mutation.
     required: false
     default: ""
   github-api-url:
