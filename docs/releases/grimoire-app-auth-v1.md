@@ -8,7 +8,7 @@ This note covers documentation and contract state only. It doesn't claim product
 
 ## Changed
 
-1. The reusable workflow mints one short-lived Grimoire GitHub App installation token with `actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349`.
+1. The reusable workflow mints one short-lived Grimoire GitHub App installation token with `actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1`.
 2. Token minting uses `client-id: ${{ inputs.grimoire_app_client_id }}`, `private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}`, and `owner: DongwonTTuna-Labs`.
 3. Trusted control-plane checkout, consumer checkout, advisory comment upsert, Issues, labels, and scoped push use the minted App token path.
 4. The downstream env name `GRIMOIRE_GITHUB_PAT` remains compatibility plumbing for existing helpers, but the value must come only from the minted App token output.

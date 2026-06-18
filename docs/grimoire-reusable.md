@@ -148,6 +148,8 @@ jobs:
         !contains(github.event.pull_request.labels.*.name, 'grimoire:disabled') &&
         (github.event.action != 'unlabeled' || github.event.label.name == '📋 Spec Needed')
       }}
+    permissions:
+      contents: read
     uses: DongwonTTuna-Labs/home-server-infra/.github/workflows/grimoire-control-plane.yml@main
     with:
       consumer_repository: ${{ github.repository }}
@@ -192,7 +194,7 @@ Grimoire uses GitHub App installation token auth for privileged GitHub operation
 
 1. Current GitHub auth is the named consumer secret `GRIMOIRE_APP_PRIVATE_KEY` plus non-secret `grimoire_app_client_id`.
 2. The default Grimoire App client ID is `Iv23liFL1dDHmU06FLSF`.
-3. The reusable workflow mints one installation token with `actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349`, `client-id: ${{ inputs.grimoire_app_client_id }}`, `private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}`, and `owner: DongwonTTuna-Labs`.
+3. The reusable workflow mints one installation token with `actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1`, `client-id: ${{ inputs.grimoire_app_client_id }}`, `private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}`, and `owner: DongwonTTuna-Labs`.
 4. Both checkouts and downstream privileged GitHub operations use the minted App token. The downstream env name `GRIMOIRE_GITHUB_PAT` remains compatibility plumbing only and isn't a PAT fallback.
 5. If the private key is absent or the installation token cannot be minted, the workflow fails closed before checkout, Issues, labels, comments, or push stages.
 6. These forbidden legacy or caller-scoped credentials are not valid for privileged Grimoire operations: PATs, `GITHUB_TOKEN`, `CODEX_LOOP_PAT`, and `github.token`.

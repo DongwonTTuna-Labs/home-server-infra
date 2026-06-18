@@ -115,7 +115,7 @@ APP_AUTH_ADR_HEADINGS = (
 
 APP_AUTH_ADR_REQUIRED_PHRASES = (
     "GitHub App installation token",
-    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
     "client-id: ${{ inputs.grimoire_app_client_id }}",
     "private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}",
     "GRIMOIRE_APP_PRIVATE_KEY",
@@ -141,7 +141,7 @@ APP_AUTH_RELEASE_NOTES_HEADINGS = (
 
 APP_AUTH_RELEASE_NOTES_REQUIRED_PHRASES = (
     "legacy PAT guidance to organization GitHub App installation-token auth",
-    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
     "client-id: ${{ inputs.grimoire_app_client_id }}",
     "private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}",
     "GRIMOIRE_APP_PRIVATE_KEY",
@@ -202,7 +202,7 @@ REQUIRED_PHRASES = (
     "Grimoire opencode and OMO relocation",
     "GitHub App installation-token auth",
     "GitHub App installation token",
-    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
     "SHA-pinned App-token action",
     "GRIMOIRE_APP_PRIVATE_KEY",
     "grimoire_app_client_id",
@@ -358,6 +358,7 @@ def assert_recommended_consumer_snippet(docs_text: str) -> None:
         "pull_request:",
         "types: [opened, ready_for_review, synchronize, reopened, unlabeled]",
         "permissions: {}",
+        "contents: read",
         "github.event.pull_request.draft == false",
         "!contains(github.event.pull_request.labels.*.name, 'grimoire:disabled')",
         "github.event.label.name == '📋 Spec Needed'",
