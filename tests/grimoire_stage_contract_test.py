@@ -632,12 +632,19 @@ def assert_spec_gap(actions_root: Path, workspace: Path) -> None:
     status = read_json(workspace, ".omo/ci/spec-gap-status.json")
     require(status["status"] == "halt" and status["should_halt"] is True and status["should_comment"] is True, "spec-gap must emit halt status")
     require(status["advisory"] is True, "spec-gap halt status must be advisory for neutral completion")
+    require(status["no_code_or_push_action"] is True, "spec-gap advisory must continue forbidding code or push action")
     require(status["top_level_sections"] == SPEC_GAP_SECTIONS and status["top_level_section_count"] == 5, "spec-gap must expose exactly five top-level sections")
     comment = rel_path(workspace, ".omo/ci/spec-gap-comment.md").read_text(encoding="utf-8")
+    require(comment.splitlines()[0] == "<!-- grimoire-spec-gap -->", "spec-gap comment marker must remain the first line")
     headings = [line.removeprefix("## ") for line in comment.splitlines() if line.startswith("## ")]
     require(headings == SPEC_GAP_SECTIONS, "spec-gap comment headings drifted")
     require(comment.count("<!-- grimoire-spec-gap -->") == 1, "spec-gap comment must retain exactly one idempotent marker")
     require("High severity missing spec" in comment and "Critical severity missing spec" in comment, "spec-gap comment must retain suggested patch content")
+    require("src/high.rs:7" in comment and "src/critical.rs:7" in comment, "spec-gap comment must name concrete missing evidence locations")
+    require("src/high.rs" in comment and "src/critical.rs" in comment, "spec-gap comment must name concrete affected paths")
+    require("### Requirement:" in comment and "#### Scenario:" in comment, "spec-gap comment must include copy-pasteable OpenSpec skeleton headings")
+    require("What To Modify vs Add" in comment and "Modify existing OpenSpec evidence" in comment and "Add a new OpenSpec requirement/scenario" in comment, "spec-gap comment must distinguish modify vs add guidance")
+    require("How To Clear" in comment and "📋 Spec Needed" in comment and "pull_request.synchronize" in comment, "spec-gap comment must explain label and synchronize rerun clearing")
     require("advisory/non-blocking guidance" in comment and "not a hard red failure" in comment, "spec-gap comment must frame rerun guidance as non-blocking")
 
 
@@ -937,6 +944,158 @@ def run_complete_case(script: Path, workspace: Path, decision_path: str, output:
     require(final["conclusion"] == expected_conclusion, f"complete conclusion mismatch for {decision_path}: {final}")
     require(isinstance(final.get("summary"), str) and final["summary"], "complete must emit a non-empty summary")
     return final
+
+
+def write_spec_gap_upsert_inputs(workspace: Path, decision: str, gap: str, comment: str, body: str) -> None:
+    write_json(
+        workspace,
+        decision,
+        {
+            "schema_version": 1,
+            "stage": "grimoire-cast",
+            "status": "ok",
+            "decision": "spec-gap-halt",
+            "conclusion": "neutral",
+            "label_transition": "spec-needed",
+            "exit_code": 0,
+            "terminal": False,
+            "should_push": False,
+            "reasons": ["deterministic spec gap"],
+        },
+    )
+    write_json(
+        workspace,
+        gap,
+        {
+            "schema_version": 1,
+            "stage": "grimoire-spec-gap",
+            "status": "halt",
+            "should_halt": True,
+            "should_comment": True,
+            "advisory": True,
+            "no_code_or_push_action": True,
+            "comment_path": comment,
+        },
+    )
+    rel_path(workspace, comment).parent.mkdir(parents=True, exist_ok=True)
+    rel_path(workspace, comment).write_text(body, encoding="utf-8")
+
+
+def run_upsert_module(module: Any, workspace: Path, output: str, *, allowed: str = "true", decision: str = ".omo/ci/upsert-decision.json", gap: str = ".omo/ci/upsert-gap.json", comment: str = ".omo/ci/upsert-comment.md") -> int:
+    return int(
+        module.main(
+            [
+                "upsert-spec-gap-comment",
+                "--consumer-workspace",
+                str(workspace),
+                "--decision",
+                decision,
+                "--spec-gap-status",
+                gap,
+                "--comment-path",
+                comment,
+                "--repository",
+                "DongwonTTuna-Labs/example",
+                "--pr-number",
+                "17",
+                "--github-mutation-allowed",
+                allowed,
+                "--output",
+                output,
+            ]
+        )
+    )
+
+
+def assert_spec_gap_comment_upsert(actions_root: Path, workspace: Path) -> None:
+    module = load_script_module(helper(actions_root, "cast", "cast_driver.py"))
+    marker = str(module.SPEC_GAP_COMMENT_MARKER)
+    comment_body = marker + "\n\n## Summary\nInitial deterministic advisory.\n"
+    updated_body = marker + "\n\n## Summary\nUpdated deterministic advisory.\n"
+    write_spec_gap_upsert_inputs(workspace, ".omo/ci/upsert-decision.json", ".omo/ci/upsert-gap.json", ".omo/ci/upsert-comment.md", comment_body)
+    comments: list[dict[str, Any]] = [{"id": 10, "body": "ordinary reviewer comment", "html_url": "https://example.invalid/comment/10"}]
+    calls: list[tuple[str, str, dict[str, Any] | None]] = []
+    next_comment_id = 40
+    original_request = module.github_request
+    original_token = os.environ.get("GRIMOIRE_GITHUB_PAT")
+
+    def fake_github_request(method: str, path: str, token: str, payload: dict[str, Any] | None = None) -> Any:
+        nonlocal next_comment_id
+        require(token == "fixture-token", "spec-gap upsert must use GRIMOIRE_GITHUB_PAT without exposing it")
+        calls.append((method, path, payload))
+        if method == "GET":
+            require(path.startswith("/repos/DongwonTTuna-Labs/example/issues/17/comments?per_page=100&page="), "upsert must list issue comments with pagination")
+            return [dict(comment) for comment in comments]
+        if method == "POST":
+            require(path == "/repos/DongwonTTuna-Labs/example/issues/17/comments", "upsert must create comments through the issue comments endpoint")
+            if payload is None or payload.get("body") != comment_body:
+                raise ContractError("POST must carry the rendered spec-gap comment")
+            next_comment_id += 1
+            created = {"id": next_comment_id, "body": str(payload["body"]), "html_url": f"https://example.invalid/comment/{next_comment_id}"}
+            comments.append(created)
+            return dict(created)
+        if method == "PATCH":
+            require(path == f"/repos/DongwonTTuna-Labs/example/issues/comments/{next_comment_id}", "upsert must patch the existing marker comment")
+            if payload is None or payload.get("body") != updated_body:
+                raise ContractError("PATCH must carry the updated spec-gap comment")
+            for comment in comments:
+                if comment["id"] == next_comment_id:
+                    comment["body"] = str(payload["body"])
+                    return dict(comment)
+        raise ContractError(f"unexpected fake GitHub request: {method} {path}")
+
+    module.github_request = fake_github_request
+    os.environ["GRIMOIRE_GITHUB_PAT"] = "fixture-token"
+    try:
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-created.json") == 0, "first spec-gap upsert must create a comment")
+        created = read_json(workspace, ".omo/ci/upsert-created.json")
+        require(created["status"] == "ok" and created["operation"] == "created", "first upsert must report created")
+        require(len([comment for comment in comments if marker in comment["body"]]) == 1, "first upsert must create exactly one marker comment")
+        require([call[0] for call in calls] == ["GET", "POST"], "first upsert must GET then POST the marker comment")
+
+        rel_path(workspace, ".omo/ci/upsert-comment.md").write_text(updated_body, encoding="utf-8")
+        calls.clear()
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-patched.json") == 0, "second spec-gap upsert must patch the existing comment")
+        patched = read_json(workspace, ".omo/ci/upsert-patched.json")
+        marker_comments = [comment for comment in comments if marker in comment["body"]]
+        require(patched["status"] == "ok" and patched["operation"] == "patched", "second upsert must report patched")
+        require(len(marker_comments) == 1 and marker_comments[0]["body"] == updated_body, "second upsert must update without duplicating marker comments")
+        require([call[0] for call in calls] == ["GET", "PATCH"], "second upsert must GET then PATCH the marker comment")
+
+        calls.clear()
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-skipped.json", allowed="false") == 0, "mutation-disallowed upsert must skip cleanly")
+        skipped = read_json(workspace, ".omo/ci/upsert-skipped.json")
+        require(skipped["status"] == "skipped" and skipped["comment_mutation_attempted"] is False and calls == [], "mutation-disallowed upsert must not touch GitHub")
+
+        write_json(workspace, ".omo/ci/upsert-failure-decision.json", {"schema_version": 1, "stage": "grimoire-cast", "status": "fizzled", "decision": "fizzled", "conclusion": "failure", "exit_code": 1})
+        calls.clear()
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-failure-blocked.json", decision=".omo/ci/upsert-failure-decision.json") == 1, "failure decisions must not post advisory comments")
+        failure = read_json(workspace, ".omo/ci/upsert-failure-blocked.json")
+        require(failure["status"] == "blocked" and failure["comment_mutation_attempted"] is False and calls == [], "failure path must block before GitHub mutation")
+
+        write_json(workspace, ".omo/ci/upsert-no-actionable-decision.json", {"schema_version": 1, "stage": "grimoire-cast", "status": "ok", "decision": "no-actionable-work", "conclusion": "neutral", "label_transition": "spec-needed", "exit_code": 0})
+        calls.clear()
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-no-actionable-blocked.json", decision=".omo/ci/upsert-no-actionable-decision.json") == 1, "non-spec-gap neutral decisions must not post advisory comments")
+        no_actionable = read_json(workspace, ".omo/ci/upsert-no-actionable-blocked.json")
+        require(no_actionable["status"] == "blocked" and no_actionable["comment_mutation_attempted"] is False and calls == [], "non-spec-gap neutral path must block before GitHub mutation")
+
+        write_json(workspace, ".omo/ci/upsert-malformed-gap.json", {"schema_version": 1, "stage": "grimoire-spec-gap", "status": "clear", "should_halt": False, "should_comment": False})
+        calls.clear()
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-malformed-gap-blocked.json", gap=".omo/ci/upsert-malformed-gap.json") == 1, "malformed spec-gap statuses must not post advisory comments")
+        malformed = read_json(workspace, ".omo/ci/upsert-malformed-gap-blocked.json")
+        require(malformed["status"] == "blocked" and malformed["comment_mutation_attempted"] is False and calls == [], "malformed spec-gap status must block before GitHub mutation")
+
+        rel_path(workspace, ".omo/ci/upsert-comment.md").unlink()
+        calls.clear()
+        require(run_upsert_module(module, workspace, ".omo/ci/upsert-missing-comment.json") == 1, "missing comment files must block")
+        missing = read_json(workspace, ".omo/ci/upsert-missing-comment.json")
+        require(missing["status"] == "blocked" and missing["comment_mutation_attempted"] is False and calls == [], "missing comment file must block before GitHub mutation")
+    finally:
+        module.github_request = original_request
+        if original_token is None:
+            os.environ.pop("GRIMOIRE_GITHUB_PAT", None)
+        else:
+            os.environ["GRIMOIRE_GITHUB_PAT"] = original_token
 
 
 def run_decide_fixture_contracts(actions_root: Path) -> None:
@@ -1252,6 +1411,7 @@ def assert_stage_contract(actions_root: Path) -> None:
     assert_design_and_issues(actions_root, workspace)
     assert_spec_gap(actions_root, workspace)
     assert_runtime_artifact_exclusions(actions_root)
+    assert_spec_gap_comment_upsert(actions_root, workspace)
     clear_fix, fixed_fix = assert_fix(actions_root, workspace)
     approve_verdict = assert_verify(actions_root, workspace)
     assert_cast(actions_root, workspace, clear_fix, fixed_fix, approve_verdict)
