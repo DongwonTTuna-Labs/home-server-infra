@@ -29,7 +29,7 @@ def load_labels_module() -> Any:
     return module
 
 
-def labels_args(workspace: Path, transition: str, *, remote_apply: bool, token: str = "github_pat_fixturetokenfixturetoken123456", github_output: str = "") -> argparse.Namespace:
+def labels_args(workspace: Path, transition: str, *, remote_apply: bool, token: str = "fixture-grimoire-app-token", github_output: str = "") -> argparse.Namespace:
     return argparse.Namespace(
         transition=transition,
         consumer_workspace=str(workspace),
@@ -145,7 +145,7 @@ def test_spec_needed_transition_removes_other_managed_labels_preserves_unrelated
 
 def test_remote_add_failure_fails_closed_with_sanitized_error(tmp_path: Path, monkeypatch: Any) -> None:
     module = load_labels_module()
-    secret = "github_pat_secretsecretsecretsecret1234567890"
+    secret = "fixture-grimoire-app-secret-value"
     write_state(tmp_path, ["🔮 Casting…"])
 
     def fake_request(method: str, path: str, token: str, payload: dict[str, Any] | None, api_url: str) -> dict[str, Any]:
@@ -161,7 +161,7 @@ def test_remote_add_failure_fails_closed_with_sanitized_error(tmp_path: Path, mo
     serialized = json.dumps(status, ensure_ascii=False, sort_keys=True)
     require(status["github_pr_label_mutation_attempted"] is True, "failed remote add still must record that GitHub mutation was attempted")
     require(status["remote_apply_status"] == "failed", "failed remote add must be explicit in the status artifact")
-    require(secret not in serialized and "github_pat_" not in serialized, "status artifact must not leak PAT values or prefixes")
+    require(secret not in serialized and "fixture-grimoire-app-secret-value" not in serialized, "status artifact must not leak token values")
     require("[REDACTED]" in serialized, "sanitized failure should preserve a redaction marker for diagnostics")
 
 
@@ -173,7 +173,7 @@ def step_block(text: str, step_id: str) -> str:
     return text[start:] if next_start == -1 else text[start:next_start]
 
 
-def test_cast_action_wires_label_remote_apply_only_through_trusted_pat_path() -> None:
+def test_cast_action_wires_label_remote_apply_only_through_trusted_app_token_path() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     labels_text = (repo_root / "actions" / "grimoire" / "labels" / "action.yml").read_text(encoding="utf-8")
     cast_text = (repo_root / "actions" / "grimoire" / "cast" / "action.yml").read_text(encoding="utf-8")
