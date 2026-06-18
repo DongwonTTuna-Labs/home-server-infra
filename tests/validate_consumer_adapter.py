@@ -158,6 +158,15 @@ def assert_job_guard(job_block: str, pr_types: list[str]) -> None:
         )
 
 
+def assert_job_permissions(job_block: str) -> None:
+    try:
+        permissions_block = section_body(job_block, "permissions", 4)
+    except ContractError as exc:
+        raise ContractError("consumer job must declare job-level permissions with contents: read") from exc
+    permissions = parse_mapping(permissions_block, 6)
+    require(permissions.get("contents") == "read", "consumer job permissions must include contents: read")
+
+
 def assert_reusable_call(job_block: str, ref: str, expected_ref: str) -> None:
     require(ref == expected_ref, f"consumer workflow must call @{expected_ref}, got @{ref}")
     with_block = section_body(job_block, "with", 4)
@@ -207,6 +216,7 @@ def validate(workflow: Path, expected_reusable_repo: str, expected_ref: str) -> 
     pr_types = assert_pull_request_trigger(text)
     assert_no_forbidden_runtime_shapes(text)
     _job_name, job_block, ref = find_reusable_job_block(text, expected_reusable_repo)
+    assert_job_permissions(job_block)
     assert_job_guard(job_block, pr_types)
     assert_reusable_call(job_block, ref, expected_ref)
     assert_secrets(job_block, text)
