@@ -35,8 +35,10 @@ services:
       # - ${HOME}/.gitconfig:/root/.gitconfig:ro
 
   # Every 6h: self-update opencode and force the oh-my-openagent @latest plugin to
-  # re-resolve, then restart opencode to apply. Uses the docker socket like the
-  # other stacks' watchtower services.
+  # re-resolve, then restart opencode to apply — but only when opencode is idle,
+  # so a running agent task is never interrupted. /session/status is "{}" when no
+  # session is active; if busy, re-check every 10 min for up to 2h, else defer to
+  # the next cycle. Uses the docker socket like the other stacks' watchtower.
   opencode-updater:
     image: docker:cli
     container_name: opencode-updater
@@ -50,9 +52,18 @@ services:
       - |
         while true; do
           sleep 21600
-          docker exec opencode opencode upgrade || true
-          docker exec opencode sh -c 'rm -rf /root/.cache/opencode/packages/oh-my-openagent@latest /root/.config/opencode/node_modules /root/.config/opencode/bun.lock' || true
-          docker restart opencode || true
+          i=0
+          while [ "$$i" -lt 12 ]; do
+            status=$$(docker exec opencode sh -c 'curl -s -u "opencode:$$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/session/status' 2>/dev/null)
+            if [ "$$status" = "{}" ]; then
+              docker exec opencode opencode upgrade || true
+              docker exec opencode sh -c 'rm -rf /root/.cache/opencode/packages/oh-my-openagent@latest /root/.config/opencode/node_modules /root/.config/opencode/bun.lock' || true
+              docker restart opencode || true
+              break
+            fi
+            i=$$((i+1))
+            sleep 600
+          done
         done
 
   # Dedicated tunnel for opencode.dongwontuna.net. Runs as uid 1000 so it can read
