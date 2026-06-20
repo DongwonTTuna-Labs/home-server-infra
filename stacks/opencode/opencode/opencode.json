@@ -1,5 +1,8 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "oh-my-openagent@latest"
+  ],
   "provider": {
     "ai-relay": {
       "npm": "@ai-sdk/openai",
@@ -62,11 +65,33 @@
               "providerOptions": { "openai": { "reasoningEffort": "xhigh" } }
             }
           }
+        },
+        "gpt-5.3-codex-spark": {
+          "name": "Codex Spark"
+        },
+        "codex-auto-review": {
+          "name": "Codex Auto Review"
         }
       }
     }
   },
   "model": "ai-relay/gpt-5.5",
   "small_model": "ai-relay/gpt-5.5",
+  "agent": {
+    "build": {
+      "enable1mContext": true
+    }
+  },
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "tail_turns": 1,
+    "preserve_recent_tokens": 60000,
+    "reserved": 30000
+  },
+  "tool_output": {
+    "max_lines": 1000,
+    "max_bytes": 32000
+  },
   "permission": "allow"
 }

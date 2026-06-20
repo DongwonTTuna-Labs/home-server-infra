@@ -2,45 +2,63 @@ name: opencode
 
 services:
   opencode:
-    image: ghcr.io/anomalyco/opencode:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: opencode-home:latest
     container_name: opencode
-    pull_policy: always
     restart: unless-stopped
     labels:
-      com.centurylinklabs.watchtower.enable: "true"
-    # The image ENTRYPOINT is ["opencode"], so this runs `opencode web ...`.
-    # web = headless server + browser UI. Clients: browser (any device) and
-    # `opencode attach https://opencode.dongwontuna.net` (terminal TUI).
+      com.centurylinklabs.watchtower.enable: "false"
     command: ["web", "--hostname", "0.0.0.0", "--port", "4096"]
     working_dir: /workspace
     environment:
-      # HTTP basic auth for the server. Applies to both browser and attach.
       OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
       OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:?set in stacks/opencode/.env}
-      # Consumed by provider.ai-relay.options.apiKey ({env:...}) in opencode.json.
       CODEX_LB_LOCAL_API_KEY: ${CODEX_LB_LOCAL_API_KEY:?set in stacks/opencode/.env}
     ports:
-      # Host-local only; public access is via the cloudflared tunnel below.
-      # Handy for `opencode attach http://127.0.0.1:4096` on the host.
       - "127.0.0.1:4096:4096"
     networks:
       - opencode
     volumes:
+      # Config mirrored from the laptop (read-only); opencode installs plugins
+      # into the writable opencode-config volume alongside these files.
       - ./opencode/opencode.json:/root/.config/opencode/opencode.json:ro
+      - ./opencode/oh-my-openagent.jsonc:/root/.config/opencode/oh-my-openagent.jsonc:ro
+      - ./opencode/AGENTS.md:/root/.config/opencode/AGENTS.md:ro
+      - opencode-config:/root/.config/opencode
+      - opencode-cache:/root/.cache/opencode
       - opencode-data:/root/.local/share/opencode
       - opencode-workspace:/workspace
-      # Optional: let opencode clone/push private repos. Uncomment and provide
-      # host credentials (read-only). Keep commented if you don't need git auth.
+      # Optional git auth (not enabled): provide host credentials read-only.
       # - ${HOME}/.ssh:/root/.ssh:ro
       # - ${HOME}/.gitconfig:/root/.gitconfig:ro
 
-  # Dedicated tunnel for opencode.dongwontuna.net. Kept separate from codex-lb's
-  # lifecycle so a watchtower recreate of opencode does not tear down the tunnel;
-  # cloudflared just re-resolves the origin and reconnects.
+  # Every 6h: self-update opencode and force the oh-my-openagent @latest plugin to
+  # re-resolve, then restart opencode to apply. Uses the docker socket like the
+  # other stacks' watchtower services.
+  opencode-updater:
+    image: docker:cli
+    container_name: opencode-updater
+    restart: unless-stopped
+    depends_on:
+      - opencode
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          sleep 21600
+          docker exec opencode opencode upgrade || true
+          docker exec opencode sh -c 'rm -rf /root/.cache/opencode/packages/oh-my-openagent@latest /root/.config/opencode/node_modules /root/.config/opencode/bun.lock' || true
+          docker restart opencode || true
+        done
+
+  # Dedicated tunnel for opencode.dongwontuna.net. Runs as uid 1000 so it can read
+  # the host-owned tunnel credentials (mode 600).
   cloudflared-opencode:
     image: cloudflare/cloudflared:2026.5.0
-    # Run as the host user that owns ~/.cloudflared/opencode.json (mode 600),
-    # otherwise the default nonroot image user cannot read the credentials.
     user: "1000:1000"
     container_name: cloudflared-opencode
     restart: unless-stopped
@@ -55,22 +73,11 @@ services:
       - ./cloudflared/opencode.yml:/etc/cloudflared/opencode.yml:ro
       - ${HOME}/.cloudflared/opencode.json:/etc/cloudflared/opencode.json:ro
 
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: watchtower-opencode
-    restart: unless-stopped
-    command: ["--api-version", "1.40"]
-    environment:
-      TZ: Asia/Seoul
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_SCHEDULE: "0 0 9 * * *"
-      WATCHTOWER_CLEANUP: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
 networks:
   opencode:
 
 volumes:
+  opencode-config:
+  opencode-cache:
   opencode-data:
   opencode-workspace:

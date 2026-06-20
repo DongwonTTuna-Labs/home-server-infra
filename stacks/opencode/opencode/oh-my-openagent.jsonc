@@ -1,0 +1,107 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",
+  "agents": {
+    "sisyphus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "hephaestus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "oracle": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "librarian": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "explore": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "multimodal-looker": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "prometheus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "metis": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "momus": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "atlas": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "sisyphus-junior": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    }
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "ultrabrain": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "deep": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "artistry": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "quick": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "unspecified-low": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "unspecified-high": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    },
+    "writing": {
+      "model": "ai-relay/gpt-5.5",
+      "variant": "xhigh",
+      "reasoningEffort": "xhigh"
+    }
+  },
+  "tmux": {
+    "enabled": true,
+    "layout": "main-vertical",
+    "main_pane_size": 60
+  }
+}
