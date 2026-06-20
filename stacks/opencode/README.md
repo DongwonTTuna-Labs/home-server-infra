@@ -1,26 +1,52 @@
 # opencode Stack
 
-Runs the headless [opencode](https://opencode.ai) server on the home server and
-serves it at `opencode.dongwontuna.net` through a dedicated Cloudflare tunnel.
+Runs an opencode server on the home server, served at `opencode.dongwontuna.net`
+through a dedicated Cloudflare tunnel, mirroring the laptop opencode setup.
 
-`opencode web` exposes both a browser UI and the HTTP/server API, so you can use
-it from any device:
+`opencode web` exposes a browser UI and the HTTP API, usable from any device:
 
 - **Browser** (PC / mobile): open `https://opencode.dongwontuna.net`.
 - **Terminal TUI**: `opencode attach https://opencode.dongwontuna.net`.
 
-Because it runs on the home server with `restart: unless-stopped`, it keeps
-running when your laptop is closed and comes back automatically after a reboot.
+Runs with `restart: unless-stopped`, so it survives laptop close and reboots.
 
-Watchtower keeps the opencode image at latest daily at 09:00 Asia/Seoul. The
-cloudflared image is pinned (watchtower disabled for it).
+## Image
+
+The official `ghcr.io/anomalyco/opencode` image is a minimal runtime (no git /
+ssh / node). This stack builds its own dev image (`Dockerfile`) instead:
+
+- base `node:22-bookworm-slim` + opencode (official install script)
+- `git`, `openssh-client`, `curl`, `ca-certificates`, `ripgrep`, `tmux`, `jq`
+
+## Mirrored config
+
+`opencode/` is mounted read-only into the container config and mirrors the laptop:
+
+- `opencode.json` — `ai-relay` provider (relay-ai.dongwontuna.net), `gpt-5.5`
+  default, `oh-my-openagent` plugin, `permission: "allow"` (auto-approve)
+- `oh-my-openagent.jsonc` — agent/category model map; **sisyphus/prometheus are
+  remapped from `anthropic/claude-opus-4-8` to `ai-relay/gpt-5.5`** because the
+  server has no Anthropic credentials (add a key + restore to use claude-opus)
+- `AGENTS.md` — global prompt
+
+Differences from the laptop (intentional):
+
+- `agbrowse` MCP is omitted (it needs the laptop's node path + ChatGPT browser
+  session; not portable to a headless container).
+- `opencode-claude-auth` plugin is omitted (no Anthropic auth on the server).
+
+## Auto-update (every 6h)
+
+`opencode-updater` (docker:cli + docker socket) runs every 6h:
+
+1. `opencode upgrade` (self-update the binary)
+2. force `oh-my-openagent@latest` to re-resolve (clears the plugin cache)
+3. restart opencode to apply
 
 ## Tracked
 
-- `compose.yaml`
-- `cloudflared/opencode.yml`
-- `opencode/opencode.json` — provider/model config (no secrets; the API key is
-  injected via `{env:CODEX_LB_LOCAL_API_KEY}`)
+- `Dockerfile`, `compose.yaml`, `cloudflared/opencode.yml`
+- `opencode/opencode.json`, `opencode/oh-my-openagent.jsonc`, `opencode/AGENTS.md`
 - `.env.example`
 
 ## Host State
@@ -28,64 +54,45 @@ cloudflared image is pinned (watchtower disabled for it).
 Required on the host but not committed (see `docs/secrets.md`):
 
 - `stacks/opencode/.env` — `OPENCODE_SERVER_PASSWORD`, `CODEX_LB_LOCAL_API_KEY`
-  (copy from `.env.example`)
 - `${HOME}/.cloudflared/opencode.json` — tunnel credentials for tunnel `opencode`
-- Docker volumes `opencode-data` (sessions/auth/state) and `opencode-workspace`
+- Docker volumes `opencode-config` (plugins), `opencode-cache`, `opencode-data`
+  (sessions/auth), `opencode-workspace`
 
 ## Security
 
-- `OPENCODE_SERVER_PASSWORD` (HTTP basic auth) is the minimum and is required.
-- The opencode server can read/write files and run shell commands, so the public
-  hostname **must** sit behind Cloudflare Access (zero-trust). Configure the
-  Access application + policy for `opencode.dongwontuna.net` in the Cloudflare
-  dashboard (e.g. allow your identity / bypass on WARP). This is managed in
-  Cloudflare, not in this repo.
-- With Access enabled, the browser uses the Access login page. For
-  `opencode attach` through an Access-protected hostname, use a service token
-  (`CF-Access-Client-Id` / `CF-Access-Client-Secret`) or `cloudflared access`.
+- `OPENCODE_SERVER_PASSWORD` (HTTP basic auth) is required.
+- `permission: "allow"` auto-approves every tool call, and the agent runs as root
+  with full shell access. The public hostname **must** sit behind Cloudflare
+  Access (zero-trust); configure the Access app/policy (e.g. WARP bypass) in the
+  Cloudflare dashboard. Managed in Cloudflare, not this repo.
+
+## Git auth (optional, not enabled)
+
+The image has `git`/`ssh`, but no credentials are mounted, so only public repos
+work. To clone/push private repos, uncomment the `~/.ssh` / `~/.gitconfig` mounts
+in `compose.yaml` (provides the host key to a root, auto-approving agent — enable
+Cloudflare Access first).
 
 ## One-time Cloudflare setup
 
-Run on the host with the account `cert.pem` already present in
-`${HOME}/.cloudflared/`:
-
 ```sh
-# 1. Create the tunnel; this prints a UUID and writes ~/.cloudflared/<UUID>.json
 cloudflared tunnel create opencode
-
-# 2. Point the compose-mounted credentials path at that file
 ln -sf ~/.cloudflared/<UUID>.json ~/.cloudflared/opencode.json
-
-# 3. Put the UUID into cloudflared/opencode.yml (replace REPLACE_WITH_OPENCODE_TUNNEL_ID)
-
-# 4. Create the public DNS route
+# put <UUID> into cloudflared/opencode.yml
 cloudflared tunnel route dns opencode opencode.dongwontuna.net
 ```
-
-Then configure the Cloudflare Access application/policy for the hostname (see
-Security above).
 
 ## Deploy
 
 ```sh
 cp stacks/opencode/.env.example stacks/opencode/.env   # then edit real values
-docker compose -f stacks/opencode/compose.yaml up -d
+docker compose -f stacks/opencode/compose.yaml up -d --build
 ```
-
-## Workspace
-
-`opencode-workspace` is a Docker volume mounted at `/workspace` (the opencode
-working directory). To work on host files directly instead, replace the
-`opencode-workspace:/workspace` volume with a bind mount, e.g.
-`/home/dongwonttuna/workspace:/workspace`, and uncomment the `~/.ssh` /
-`~/.gitconfig` mounts in `compose.yaml` if opencode needs git credentials.
 
 ## Verify
 
 ```sh
-# On the host (basic auth):
 curl -fsS -u "opencode:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/global/health
-
-# Public (after tunnel + Access are configured):
+curl -fsS -u "opencode:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/agent   # oh-my-openagent agents
 curl -fsS https://opencode.dongwontuna.net/global/health
 ```
