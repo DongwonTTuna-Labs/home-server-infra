@@ -1,7 +1,7 @@
-# Replace REPLACE_WITH_OPENCODE_TUNNEL_ID with the UUID printed by
-# `cloudflared tunnel create opencode` (see README "One-time Cloudflare setup").
-# The credentials JSON is host-only state, not committed (see docs/secrets.md).
-tunnel: REPLACE_WITH_OPENCODE_TUNNEL_ID
+# Tunnel `opencode` (created with `cloudflared tunnel create opencode`).
+# The credentials JSON is host-only state, not committed (see docs/secrets.md);
+# it is mounted from ${HOME}/.cloudflared/opencode.json by compose.yaml.
+tunnel: 7a1eb69a-992a-4d3d-9eca-bf0e3c4cb916
 credentials-file: /etc/cloudflared/opencode.json
 
 ingress:
