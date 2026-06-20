@@ -93,5 +93,17 @@
     "max_lines": 1000,
     "max_bytes": 32000
   },
-  "permission": "allow"
+  "permission": "allow",
+  "mcp": {
+    "agbrowse": {
+      "type": "local",
+      "command": [
+        "/home/dongwonttuna/.local/nodejs/node-v24.16.0-linux-x64/bin/node",
+        "/home/dongwonttuna/.local/nodejs/node-v24.16.0-linux-x64/lib/node_modules/agbrowse/bin/agbrowse.mjs",
+        "web-ai",
+        "mcp-server"
+      ],
+      "enabled": true
+    }
+  }
 }

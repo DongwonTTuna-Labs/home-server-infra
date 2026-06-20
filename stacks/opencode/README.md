@@ -36,9 +36,13 @@ boot and survives logout/laptop-close.
 
 ## Config mirror notes
 
-- `oh-my-openagent.jsonc`: sisyphus/prometheus are remapped from
-  `anthropic/claude-opus-4-8` to `ai-relay/gpt-5.5` (no Anthropic creds on the
-  server). agbrowse MCP and `opencode-claude-auth` are omitted (not portable).
+- All agents use `ai-relay/gpt-5.5` (by choice). Anthropic / `opencode-claude-auth`
+  are intentionally not configured here.
+- `agbrowse` MCP is wired to the host's native agbrowse
+  (`~/.local/nodejs/node-v24.16.0-linux-x64`), which drives a headless
+  chrome-for-testing with a logged-in ChatGPT session under `~/.browser-agent`.
+  The node version in the `mcp.agbrowse` command path must match the installed
+  agbrowse node.
 
 ## Auto-update (every 6h)
 
