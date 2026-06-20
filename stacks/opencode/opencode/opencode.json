@@ -1,0 +1,71 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ai-relay": {
+      "npm": "@ai-sdk/openai",
+      "name": "AI Relay",
+      "options": {
+        "baseURL": "https://relay-ai.dongwontuna.net/v1",
+        "apiKey": "{env:CODEX_LB_LOCAL_API_KEY}"
+      },
+      "models": {
+        "gpt-5.5": {
+          "name": "GPT-5.5",
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 272000,
+            "input": 272000,
+            "output": 128000
+          },
+          "variants": {
+            "medium": {
+              "reasoningEffort": "medium",
+              "providerOptions": { "openai": { "reasoningEffort": "medium" } }
+            },
+            "high": {
+              "reasoningEffort": "high",
+              "providerOptions": { "openai": { "reasoningEffort": "high" } }
+            },
+            "xhigh": {
+              "reasoningEffort": "xhigh",
+              "providerOptions": { "openai": { "reasoningEffort": "xhigh" } }
+            }
+          }
+        },
+        "gpt-5.4": {
+          "name": "GPT-5.4",
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 272000,
+            "input": 272000,
+            "output": 128000
+          },
+          "variants": {
+            "medium": {
+              "reasoningEffort": "medium",
+              "providerOptions": { "openai": { "reasoningEffort": "medium" } }
+            },
+            "high": {
+              "reasoningEffort": "high",
+              "providerOptions": { "openai": { "reasoningEffort": "high" } }
+            },
+            "xhigh": {
+              "reasoningEffort": "xhigh",
+              "providerOptions": { "openai": { "reasoningEffort": "xhigh" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "model": "ai-relay/gpt-5.5",
+  "small_model": "ai-relay/gpt-5.5"
+}

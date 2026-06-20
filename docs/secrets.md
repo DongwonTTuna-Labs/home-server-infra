@@ -11,6 +11,11 @@ external secret store.
   - Cloudflare tunnel credentials for `relay-ai.dongwontuna.net`
 - `stacks/codex-github-runners/state/github_pat`
   - GitHub PAT used for runner registration
+- `stacks/opencode/.env`
+  - `OPENCODE_SERVER_PASSWORD` (HTTP basic auth) and `CODEX_LB_LOCAL_API_KEY`
+    (ai-relay provider key)
+- `${HOME}/.cloudflared/opencode.json`
+  - Cloudflare tunnel credentials for `opencode.dongwontuna.net`
 
 ## Excluded Runtime Secrets
 

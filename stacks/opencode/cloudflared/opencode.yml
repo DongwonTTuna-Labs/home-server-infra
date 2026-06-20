@@ -1,0 +1,10 @@
+# Replace REPLACE_WITH_OPENCODE_TUNNEL_ID with the UUID printed by
+# `cloudflared tunnel create opencode` (see README "One-time Cloudflare setup").
+# The credentials JSON is host-only state, not committed (see docs/secrets.md).
+tunnel: REPLACE_WITH_OPENCODE_TUNNEL_ID
+credentials-file: /etc/cloudflared/opencode.json
+
+ingress:
+  - hostname: opencode.dongwontuna.net
+    service: http://opencode:4096
+  - service: http_status:404
