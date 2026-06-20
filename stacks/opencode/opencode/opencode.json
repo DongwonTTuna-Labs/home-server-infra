@@ -67,5 +67,6 @@
     }
   },
   "model": "ai-relay/gpt-5.5",
-  "small_model": "ai-relay/gpt-5.5"
+  "small_model": "ai-relay/gpt-5.5",
+  "permission": "allow"
 }
