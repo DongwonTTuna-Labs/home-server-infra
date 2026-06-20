@@ -1,0 +1,7 @@
+[Unit]
+Description=opencode idle-aware self-update
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/opencode/opencode.env
+ExecStart=%h/.config/opencode/opencode-update.sh

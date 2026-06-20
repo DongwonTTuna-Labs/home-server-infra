@@ -1,0 +1,10 @@
+[Unit]
+Description=opencode 6h auto-update
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

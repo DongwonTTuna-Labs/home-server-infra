@@ -1,0 +1,7 @@
+tunnel: 7a1eb69a-992a-4d3d-9eca-bf0e3c4cb916
+credentials-file: /home/dongwonttuna/.cloudflared/opencode.json
+
+ingress:
+  - hostname: opencode.dongwontuna.net
+    service: http://localhost:4096
+  - service: http_status:404

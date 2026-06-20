@@ -1,0 +1,13 @@
+[Unit]
+Description=cloudflared tunnel for opencode.dongwontuna.net
+After=opencode.service
+Wants=opencode.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --config %h/.config/opencode/cloudflared-opencode.yml run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
