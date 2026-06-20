@@ -39,6 +39,9 @@ services:
   # cloudflared just re-resolves the origin and reconnects.
   cloudflared-opencode:
     image: cloudflare/cloudflared:2026.5.0
+    # Run as the host user that owns ~/.cloudflared/opencode.json (mode 600),
+    # otherwise the default nonroot image user cannot read the credentials.
+    user: "1000:1000"
     container_name: cloudflared-opencode
     restart: unless-stopped
     labels:
