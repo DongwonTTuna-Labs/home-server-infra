@@ -2,8 +2,7 @@
 Description=opencode 6h auto-update
 
 [Timer]
-OnBootSec=15min
-OnUnitActiveSec=6h
+OnCalendar=*-*-* 00/6:00:00
 Persistent=true
 
 [Install]
