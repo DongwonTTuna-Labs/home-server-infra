@@ -7,7 +7,9 @@ services:
     pull_policy: always
     restart: unless-stopped
     labels:
-      com.centurylinklabs.watchtower.enable: "false"
+      # Auto-update target: watchtower runs in label-enable mode, so this
+      # MUST be "true" for the daily 09:00 KST update to pick up codex-lb.
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       CODEX_LB_CONNECT_ADDRESS: relay-ai.dongwontuna.net
       CODEX_LB_DATABASE_URL: postgresql+asyncpg://codex_lb:${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb/.env}@postgres:5432/codex_lb
