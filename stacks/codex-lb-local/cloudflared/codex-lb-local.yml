@@ -1,6 +1,0 @@
-tunnel: bbc484d5-7aa8-4caf-9ec5-15f64c6f5610
-credentials-file: /etc/cloudflared/codex-lb-local.json
-ingress:
-  - hostname: relay-ai.dongwontuna.net
-    service: http://codex-lb-local:2455
-  - service: http_status:404

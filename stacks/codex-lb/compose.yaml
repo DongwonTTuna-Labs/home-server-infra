@@ -2,16 +2,27 @@ name: codex-lb
 
 services:
   codex-lb:
-    image: ghcr.io/soju06/codex-lb:latest
+    # Pinned rollback: 1.20.x was too buggy. Hold at 1.19.0 until upstream is
+    # stable again. To resume auto-updates: restore `:latest`, set pull_policy
+    # back to always, and re-enable the watchtower label below.
+    image: ghcr.io/soju06/codex-lb:1.19.0
     container_name: codex-lb
-    pull_policy: always
-    restart: unless-stopped
+    pull_policy: missing
+    restart: always
     labels:
+      # Disabled while pinned to 1.19.0 so watchtower can't re-bump to latest.
       com.centurylinklabs.watchtower.enable: "false"
     environment:
       CODEX_LB_CONNECT_ADDRESS: relay-ai.dongwontuna.net
       CODEX_LB_DATABASE_URL: postgresql+asyncpg://codex_lb:${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb/.env}@postgres:5432/codex_lb
+      # The DB schema was migrated forward by 1.20.x (head 20260611). To run
+      # 1.19.0 we kept that superset schema but set alembic_version back to
+      # 1.19.0's head (20260513_000000_add_accounts_alias) via a direct stamp,
+      # so this no-op'd `upgrade head` matches and the app boots. 1.19.0 ignores
+      # the extra 1.20.x columns/tables. Backup: backups/codex_lb_pre119_*.dump.
+      # Returning to 1.20.x: re-stamp alembic_version to 20260611 first.
       CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"
+      CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT: "50"
       # Request-path pool (max 100 conns) + separate background pool (max 20) so
       # background jobs can't starve request connections. Must stay under the PG
       # server's max_connections (set to 200 below).
@@ -32,7 +43,7 @@ services:
   postgres:
     image: postgres:18
     container_name: codex-lb-postgres
-    restart: unless-stopped
+    restart: always
     # Headroom above the app pools (main 100 + background 20 = 120 max clients).
     command: ["postgres", "-c", "max_connections=200"]
     labels:
@@ -51,33 +62,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-
-  cloudflared-codex-lb:
-    image: cloudflare/cloudflared:2026.5.0
-    user: "1000:1000"
-    container_name: cloudflared-codex-lb
-    network_mode: host
-    restart: unless-stopped
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
-    command: ["--no-autoupdate", "tunnel", "--config", "/etc/cloudflared/codex-lb.yml", "--no-autoupdate", "--metrics", "127.0.0.1:20243", "run"]
-    volumes:
-      - ./cloudflared/codex-lb.yml:/etc/cloudflared/codex-lb.yml:ro
-      - ${HOME}/.cloudflared/codex-lb.json:/etc/cloudflared/codex-lb.json:ro
-
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: watchtower-codex-lb
-    restart: unless-stopped
-    command: ["--api-version", "1.40"]
-    environment:
-      TZ: Asia/Seoul
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_SCHEDULE: "0 0 9 * * *"
-      WATCHTOWER_CLEANUP: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
 volumes:
   codex-lb-data:
     external: true

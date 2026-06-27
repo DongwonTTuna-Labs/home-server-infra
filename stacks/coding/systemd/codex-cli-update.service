@@ -1,0 +1,10 @@
+[Unit]
+Description=Update Codex CLI to the latest standalone release
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dongwonttuna
+Environment=HOME=/home/dongwonttuna
+Environment=CODEX_HOME=/home/dongwonttuna/.codex
+Environment=PATH=/home/dongwonttuna/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/dongwonttuna/.local/bin/codex update

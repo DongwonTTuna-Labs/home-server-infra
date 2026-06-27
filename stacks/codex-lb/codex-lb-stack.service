@@ -1,0 +1,19 @@
+[Unit]
+Description=Bring up codex-lb compose stack (relay + postgres)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=dongwonttuna
+Group=docker
+Environment=HOME=/home/dongwonttuna
+WorkingDirectory=/home/dongwonttuna/Documents/Programming/home-server-infra/stacks/codex-lb
+ExecStartPre=/usr/bin/docker info
+ExecStart=/usr/bin/docker compose -f /home/dongwonttuna/Documents/Programming/home-server-infra/stacks/codex-lb/compose.yaml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f /home/dongwonttuna/Documents/Programming/home-server-infra/stacks/codex-lb/compose.yaml stop
+
+[Install]
+WantedBy=multi-user.target

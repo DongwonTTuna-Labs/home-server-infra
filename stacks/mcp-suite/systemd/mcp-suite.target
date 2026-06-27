@@ -1,0 +1,6 @@
+[Unit]
+Description=MCP suite user systemd domain
+Wants=mcp-suite-update.timer
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=opencode idle-aware self-update
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/opencode/opencode.env
+Environment="PATH=%h/.opencode/bin:%h/.local/bin:%h/.local/nodejs/node-v24.16.0-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+ExecStart=%h/.config/opencode/opencode-update.sh

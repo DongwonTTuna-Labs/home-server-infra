@@ -1,0 +1,17 @@
+name: maintenance
+
+services:
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower-maintenance
+    restart: unless-stopped
+    command: ["--api-version", "1.40"]
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      TZ: Asia/Seoul
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_SCHEDULE: "0 0 9 * * *"
+      WATCHTOWER_CLEANUP: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

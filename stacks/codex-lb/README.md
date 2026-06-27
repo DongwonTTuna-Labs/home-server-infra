@@ -1,19 +1,23 @@
 # codex-lb Stack
 
-This stack owns the Codex relay and its Cloudflare route. It runs the upstream
-`ghcr.io/soju06/codex-lb:latest` image.
+This stack owns the Codex relay application and database. Public routing for
+`relay-ai.dongwontuna.net` is owned by `stacks/tunnel-apps`.
+
+Image updates are handled by the single Watchtower instance in
+`stacks/maintenance` through label-enabled updates. The Postgres service is
+explicitly excluded.
 
 ## Tracked
 
 - `compose.yaml`
-- `cloudflared/codex-lb.yml`
 
 ## Host State
 
 These are required on each host but are not committed:
 
-- `${HOME}/.cloudflared/codex-lb.json`
+- `stacks/codex-lb/.env` with `CODEX_LB_POSTGRES_PASSWORD`
 - Docker volume `codex-lb-data`
+- Docker volume `codex-lb_codex-lb-postgres-data`
 
 ## Deploy
 

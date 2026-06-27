@@ -1,36 +1,29 @@
 # codex-lb-local Stack
 
-Runs `ghcr.io/soju06/codex-lb:latest` on this Mac (Docker Desktop) and serves
-`relay-ai.dongwontuna.net` through a Cloudflare tunnel created on this host. This
-replaces the home-server `codex-lb` stack as the backend for that hostname; the
-home-server instance is left running but idle (DNS no longer routes to it).
+Runs `ghcr.io/soju06/codex-lb:latest` on this host as a local relay app/DB
+variant. Public routing for `relay-ai.dongwontuna.net` is owned by
+`stacks/tunnel-apps`; this stack must not run its own Cloudflare connector.
 
-Watchtower keeps the relay image at latest daily at 09:00 Asia/Seoul.
+The single Watchtower instance in `stacks/maintenance` updates the relay image
+when this optional stack is deployed. The Postgres service is explicitly
+excluded.
 
 ## Tracked
 
 - `compose.yaml`
-- `cloudflared/codex-lb-local.yml`
 
 ## Host State
 
 Required on this host but not committed:
 
-- `${HOME}/.cloudflared/bbc484d5-7aa8-4caf-9ec5-15f64c6f5610.json` — tunnel
-  credentials for tunnel `codex-lb-local`
-- Docker volume `codex-lb-local-data`
-
-## One-time Cloudflare setup
-
-The tunnel and DNS route were created from this host with the account
-`cert.pem`:
-
-```sh
-cloudflared tunnel create codex-lb-local
-cloudflared tunnel route dns --overwrite-dns codex-lb-local relay-ai.dongwontuna.net
-```
+- `stacks/codex-lb-local/.env` with `CODEX_LB_POSTGRES_PASSWORD`
+- Docker volume `codex-lb-local_codex-lb-local-data`
+- Docker volume `codex-lb-local_codex-lb-local-postgres-data`
 
 ## Deploy
+
+Do not run `stacks/codex-lb` and `stacks/codex-lb-local` simultaneously on the
+same host unless one host port is changed; both default to `127.0.0.1:2455`.
 
 ```sh
 docker compose -f stacks/codex-lb-local/compose.yaml up -d
@@ -49,5 +42,4 @@ docker compose -f stacks/codex-lb-local/compose.yaml up -d
 
 ```sh
 curl -fsS http://127.0.0.1:2455/health/ready
-curl -fsS https://relay-ai.dongwontuna.net/health/ready
 ```
