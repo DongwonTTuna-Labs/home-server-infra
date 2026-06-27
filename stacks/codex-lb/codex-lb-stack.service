@@ -1,5 +1,5 @@
 [Unit]
-Description=Bring up codex-lb compose stack (relay + postgres + cloudflared + watchtower)
+Description=Bring up codex-lb compose stack (relay + postgres)
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service

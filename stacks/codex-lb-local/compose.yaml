@@ -55,40 +55,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-
-  cloudflared-codex-lb-local:
-    image: cloudflare/cloudflared:2026.5.0
-    container_name: cloudflared-codex-lb-local
-    restart: unless-stopped
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
-    # Reach codex-lb over the shared bridge by container name. Kept separate
-    # from codex-lb's lifecycle (not network_mode: service:) so a watchtower
-    # recreate of codex-lb-local does not tear down the tunnel — cloudflared
-    # just re-resolves the origin and reconnects. Remote+API-key requests are
-    # accepted because API Key Auth is enabled in the dashboard settings.
-    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/codex-lb-local.yml", "run"]
-    depends_on:
-      - codex-lb-local
-    networks:
-      - codex-lb-local
-    volumes:
-      - ./cloudflared/codex-lb-local.yml:/etc/cloudflared/codex-lb-local.yml:ro
-      - ${HOME}/.cloudflared/bbc484d5-7aa8-4caf-9ec5-15f64c6f5610.json:/etc/cloudflared/codex-lb-local.json:ro
-
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: watchtower-codex-lb-local
-    restart: unless-stopped
-    command: ["--api-version", "1.40"]
-    environment:
-      TZ: Asia/Seoul
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_SCHEDULE: "0 0 9 * * *"
-      WATCHTOWER_CLEANUP: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
 networks:
   codex-lb-local:
 

@@ -1,0 +1,7 @@
+[Unit]
+Description=Coding tools user systemd domain
+Wants=opencode.service opencode-update.timer codex-cli-update.timer
+After=network-online.target
+
+[Install]
+WantedBy=default.target

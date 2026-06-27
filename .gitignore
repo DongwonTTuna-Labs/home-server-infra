@@ -9,8 +9,14 @@ id_*
 **/*token*
 *secret*
 **/*secret*
-*pat*
-**/*pat*
+pat
+**/pat
+github_pat
+**/github_pat
+github_pat_*
+**/github_pat_*
+*.pat
+**/*.pat
 !schemas/*.schema.json
 auth.json
 **/auth.json
@@ -42,6 +48,11 @@ mirrors/
 # Local agent/runtime artifacts. PR review memory stays ignored on base/main;
 # trusted memory writers force-add canonical `.omo/review-memory/pr-<n>/` files only.
 .omo/
+!.omo/
+!.omo/plans/
+!.omo/plans/**
+.omo/run-continuation/
+.playwright-mcp/
 
 # Python cache artifacts
 __pycache__/
@@ -51,16 +62,55 @@ __pycache__/
 *.pyo
 **/*.pyo
 
+# Company OS generated artifacts
+services/robobotuna-company-os/.artifacts/
+services/robobotuna-company-os/web/node_modules/
+services/robobotuna-company-os/web/.svelte-kit/
+services/robobotuna-company-os/web/.vite/
+services/robobotuna-company-os/web/build/
+services/robobotuna-company-os/web/coverage/
+services/robobotuna-company-os/web/test-results/
+services/robobotuna-company-os/web/playwright-report/
+services/robobotuna-company-os/web/blob-report/
+services/robobotuna-company-os/api/target/
+
 # Explicit safe examples/docs whose names contain secret-like words.
 !docs/secrets.md
 !scripts/scan-secrets.sh
 !tests/grimoire_secret_hygiene_test.py
 !stacks/agent-stack/secrets/
-!stacks/agent-stack/secrets/cloudflared.env.example
+stacks/agent-stack/secrets/*
+!stacks/agent-stack/secrets/*.example
 !**/.env.example
 
 # Planned Codex loop deliverable that contains "pat" as part of dispatch text.
 !.github/workflows/codex-loop-dispatch.yml
+
+# Planned Company OS OpenSpec capability whose path intentionally contains
+# "secret" as part of SecretBroker/capability contract text, not secret data.
+!openspec/changes/add-company-os-autonomous-delivery-loop/specs/capability-secret-approval/
+!openspec/changes/add-company-os-autonomous-delivery-loop/specs/capability-secret-approval/**
+
+# Planned Company OS Rust source module whose directory name is "secret", not
+# a secret-bearing file or runtime credential location.
+!services/robobotuna-company-os/api/src/secret/
+!services/robobotuna-company-os/api/src/secret/**
+
+# Planned Company OS Rust source/test modules may intentionally contain token
+# or secret in type names such as ResumeToken, session_token, approval_token,
+# and secret_canary. Runtime credentials remain ignored by the broad rules above.
+!services/robobotuna-company-os/api/src/contracts/
+!services/robobotuna-company-os/api/src/contracts/**
+!services/robobotuna-company-os/api/src/auth/
+!services/robobotuna-company-os/api/src/auth/**
+!services/robobotuna-company-os/api/src/approval/
+!services/robobotuna-company-os/api/src/approval/**
+!services/robobotuna-company-os/api/tests/contracts/
+!services/robobotuna-company-os/api/tests/contracts/**
+!services/robobotuna-company-os/api/src/
+!services/robobotuna-company-os/api/src/**
+!services/robobotuna-company-os/api/tests/
+!services/robobotuna-company-os/api/tests/**
 
 # Relocated trusted Codex loop helper. Package file names intentionally include
 # token/secret/pat words for security tests and patch/dispatch modules.

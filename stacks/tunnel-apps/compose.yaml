@@ -1,0 +1,16 @@
+name: tunnel-apps
+
+services:
+  cloudflared-apps:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared-apps
+    pull_policy: always
+    user: "1000:1000"
+    network_mode: host
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/tunnel-apps.yml", "--metrics", "127.0.0.1:20245", "run"]
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      - ./cloudflared/tunnel-apps.yml:/etc/cloudflared/tunnel-apps.yml:ro
+      - ${HOME}/.cloudflared/opencode.json:/etc/cloudflared/opencode.json:ro

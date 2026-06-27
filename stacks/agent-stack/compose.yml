@@ -20,6 +20,6 @@ services:
     container_name: ssh-port-forward
     restart: unless-stopped
     network_mode: host
-    command: ["TCP-LISTEN:2222,fork,reuseaddr", "TCP:127.0.0.1:22"]
+    command: ["TCP-LISTEN:2222,fork,reuseaddr,bind=127.0.0.1", "TCP:127.0.0.1:22"]
     labels:
       - com.centurylinklabs.watchtower.enable=false

@@ -1,0 +1,9 @@
+[Unit]
+Description=Rebuild MCP suite container with latest npm MCP runtimes
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/home-server-infra
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=%h/.config/mcp-suite/mcp-suite-update.sh

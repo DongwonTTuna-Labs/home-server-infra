@@ -1,0 +1,39 @@
+name: mcp-suite
+
+services:
+  mcp-suite:
+    build:
+      context: .
+    image: home-server/mcp-suite:latest
+    container_name: mcp-suite
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      HOME: /home/dongwonttuna
+      MCP_WORKSPACE: /home/dongwonttuna/Documents/Programming/home-server-infra
+      OMO_DISABLE_POSTHOG: "1"
+      OMO_SEND_ANONYMOUS_TELEMETRY: "0"
+      OMO_CODEX_DISABLE_POSTHOG: "1"
+      OMO_CODEX_SEND_ANONYMOUS_TELEMETRY: "0"
+      CODEGRAPH_TELEMETRY: "0"
+      DO_NOT_TRACK: "1"
+      LSP_TOOLS_MCP_PROJECT_CONFIG: .opencode/lsp.json:.omo/lsp.json:.omo/lsp-client.json
+      MCP_ALLOWED_WORKSPACE_ROOT: /home/dongwonttuna/Documents/Programming
+      CHROME_BINARY_PATH: /home/dongwonttuna/.local/chrome-for-testing/current/chrome
+      CHROME_NO_SANDBOX: "1"
+      DISPLAY: :99
+      AGBROWSE_CHROME_FLAGS: --disable-dev-shm-usage --disable-gpu
+    ports:
+      - "127.0.0.1:8301:8301"
+      - "127.0.0.1:8302:8302"
+      - "127.0.0.1:8303:8303"
+    volumes:
+      - /home/dongwonttuna/Documents/Programming:/home/dongwonttuna/Documents/Programming
+      - /home/dongwonttuna/.local/chrome-for-testing:/home/dongwonttuna/.local/chrome-for-testing:ro
+    healthcheck:
+      test: ["CMD", "mcp-suite-healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
