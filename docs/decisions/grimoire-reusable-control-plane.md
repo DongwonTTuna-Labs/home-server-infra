@@ -19,8 +19,9 @@ The Task 1 source material is:
 1. `rs-builder-relayer-client/.omo/plans/grimoire-reusable-control-plane.md`
 2. `rs-builder-relayer-client/.omo/drafts/grimoire-loop-history.md`
 3. This ADR
-4. `docs/grimoire-reusable.md`
-5. `tests/grimoire_doc_contract_test.py`
+4. `docs/decisions/grimoire-app-auth.md`
+5. `docs/grimoire-reusable.md`
+6. `tests/grimoire_doc_contract_test.py`
 
 ## Recovered Stage Map
 
@@ -37,7 +38,7 @@ The recovered stage list is exact and ordered:
 
 The control flow is `trusted-controller -> review -> design -> file deduped out-of-scope Issues -> spec-gap or fix -> boulder -> verify -> terminate or loop`. `cast` is the driver that sequences the stages, runs the boulder continuation, applies label transitions, and decides terminal or re-review behavior from machine-readable artifacts.
 
-`review` is read-only. `design` is the OpenSpec and OMO scope authority. `spec-gap` halts with a five-section comment when evidence is insufficient. `fix` may prepare and run Atlas work only inside the active scope. `verify` emits the F1-F4 verdict, and all four fields must approve before either terminal cast or one scoped bot push.
+`review` is read-only. `design` is the OpenSpec and OMO scope authority. `spec-gap` renders a five-section OpenSpec guidance comment when evidence is insufficient; `docs/decisions/grimoire-advisory-failure-separation.md` records the later neutral/advisory cast semantics. `fix` may prepare and run Atlas work only inside the active scope. `verify` emits the F1-F4 verdict, and all four fields must approve before either terminal cast or one scoped bot push.
 
 ## Package Boundary
 
@@ -66,6 +67,7 @@ Task 1 defines the package boundary only. Task 2 owns runtime relocation and sta
 | Consumer adapter validator | `tests/validate_consumer_adapter.py` |
 | Operator guide | `docs/grimoire-reusable.md` |
 | Decision record | `docs/decisions/grimoire-reusable-control-plane.md` |
+| GitHub App auth decision record | `docs/decisions/grimoire-app-auth.md` |
 
 The `.sh` and `.py` helpers are implementation details under the owning action. There is no flat top-level `scripts/grimoire/` runtime API.
 
@@ -85,7 +87,7 @@ The called workflow needs repository access enabled in `home-server-infra` Setti
 
 ## Security And Auth
 
-Grimoire uses PAT-only GitHub auth for privileged operations. The intended contract is `GRIMOIRE_PAT` as the named consumer secret, with the existing runner `CODEX_LOOP_PAT` fallback tension left as an explicit Task 3 and Task 4 contract point. Model-capable stages require explicit `AI_RELAY_API_KEY`, `CF_ACCESS_CLIENT_ID`, and `CF_ACCESS_CLIENT_SECRET` named secrets with same-name runner environment fallback for the relay and Cloudflare Access values; the OpenCode provider maps the CF values to `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers. Grimoire must not recommend `GITHUB_TOKEN`, GitHub App tokens, `secrets: inherit`, `pull_request_target`, or GitHub-hosted runner fallback for privileged control-plane work.
+Grimoire uses a GitHub App installation token for privileged GitHub operations. `docs/decisions/grimoire-app-auth.md` records that auth decision. Consumers explicitly map `GRIMOIRE_APP_PRIVATE_KEY` and pass non-secret `grimoire_app_client_id`; the reusable workflow mints a short-lived token with the SHA-pinned App-token action and feeds that token into checkout and downstream GitHub mutation paths. PATs, `GITHUB_TOKEN`, `CODEX_LOOP_PAT`, `github.token`, and `secrets: inherit` are invalid for privileged Grimoire operations. Model-capable stages still require explicit `AI_RELAY_API_KEY`, `CF_ACCESS_CLIENT_ID`, and `CF_ACCESS_CLIENT_SECRET` named secrets with same-name runner environment fallback for the relay and Cloudflare Access values; the OpenCode provider maps the CF values to `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers. Grimoire must not recommend `pull_request_target` or GitHub-hosted runner fallback for privileged control-plane work.
 
 The runner contract remains `Home Server Runners` with label `dongwontuna-labs-runner`. The reusable workflow keeps `permissions: {}` at the top level and grants only explicit job permissions if a later task proves they are needed.
 
@@ -111,4 +113,4 @@ Local tests and fixtures prove behavior before rollout. Live cross-repo evidence
 
 This decision keeps `home-server-infra` as the private source of truth and keeps consumer repositories thin. It also separates documentation and contract boundaries from runtime relocation so Task 2 can create the stage actions without changing the contract.
 
-The main risk is auth naming drift between `GRIMOIRE_PAT` and the existing `CODEX_LOOP_PAT` runner environment, plus consumer drift in the explicit relay and Cloudflare Access secret mapping. The workflow, schema, docs, and consumer adapter validator make those names explicit and fail closed when required model-capable credentials are absent.
+The main operational risk is GitHub App rollout drift between repository-level and organization-level secret or variable setup, plus consumer drift in the explicit relay and Cloudflare Access secret mapping. Organization-level secret and variable rollout requires an organization admin. The workflow, schema, docs, and consumer adapter validator make those names explicit and fail closed when required credentials are absent.

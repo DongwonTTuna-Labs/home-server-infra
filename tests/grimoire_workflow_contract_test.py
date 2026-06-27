@@ -18,8 +18,16 @@ EXPECTED_INPUTS = {
     "head_sha",
     "base_ref",
     "grimoire_contract_version",
+    "grimoire_app_client_id",
 }
-EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"}
+EXPECTED_SECRETS = {
+    "GRIMOIRE_APP_PRIVATE_KEY": True,
+    "AI_RELAY_API_KEY": False,
+    "CF_ACCESS_CLIENT_ID": False,
+    "CF_ACCESS_CLIENT_SECRET": False,
+}
+APP_TOKEN_ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
+APP_TOKEN_EXPR = "${{ steps.grimoire-app-token.outputs.token }}"
 EXPECTED_CF_HEADERS = {
     "CF-Access-Client-Id": "{env:CF_ACCESS_CLIENT_ID}",
     "CF-Access-Client-Secret": "{env:CF_ACCESS_CLIENT_SECRET}",
@@ -123,6 +131,14 @@ def step_block(text: str, name: str) -> str:
     raise ContractError(f"missing workflow step: {name}")
 
 
+def action_step_block(text: str, step_id: str) -> str:
+    marker = f"    - id: {step_id}\n"
+    start = text.find(marker)
+    require(start != -1, f"missing action step: {step_id}")
+    next_start = text.find("\n    - id:", start + len(marker))
+    return text[start:] if next_start == -1 else text[start:next_start]
+
+
 def assert_events(text: str) -> None:
     on_block = section_body(text, "on", 0)
     events = keys_at_indent(on_block, 2)
@@ -146,10 +162,10 @@ def assert_inputs_and_secrets(text: str) -> None:
 
     secrets_block = section_body(text, "secrets", 4)
     declared = keys_at_indent(secrets_block, 6)
-    require(declared == EXPECTED_SECRETS, f"workflow_call secrets drifted: {sorted(declared)}")
-    for secret in EXPECTED_SECRETS:
-        pattern = rf"(?ms)^      {re.escape(secret)}\s*:\s*$.*?^        required\s*:\s*false\s*$"
-        require(re.search(pattern, secrets_block) is not None, f"{secret} must remain an optional named workflow_call secret")
+    require(declared == set(EXPECTED_SECRETS), f"workflow_call secrets drifted: {sorted(declared)}")
+    for secret, required in EXPECTED_SECRETS.items():
+        pattern = rf"(?ms)^      {re.escape(secret)}\s*:\s*$.*?^        required\s*:\s*{str(required).lower()}\s*$"
+        require(re.search(pattern, secrets_block) is not None, f"{secret} must declare required: {str(required).lower()}")
     referenced = set(re.findall(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", text))
     undeclared = referenced - declared
     require(not undeclared, "workflow references undeclared secrets: " + ", ".join(sorted(undeclared)))
@@ -167,7 +183,7 @@ def assert_runner_and_checkouts(text: str) -> None:
         "uses: actions/checkout@v6",
         "repository: DongwonTTuna-Labs/home-server-infra",
         "ref: main",
-        "token: ${{ steps.auth.outputs.github_pat }}",
+        "token: ${{ steps.grimoire-app-token.outputs.token }}",
         "path: control-plane",
         "persist-credentials: false",
     ):
@@ -177,7 +193,7 @@ def assert_runner_and_checkouts(text: str) -> None:
         "uses: actions/checkout@v6",
         "repository: ${{ inputs.consumer_repository }}",
         "ref: ${{ inputs.head_sha }}",
-        "token: ${{ steps.auth.outputs.github_pat }}",
+        "token: ${{ steps.grimoire-app-token.outputs.token }}",
         "path: consumer",
         "fetch-depth: 0",
         "persist-credentials: false",
@@ -193,6 +209,26 @@ def assert_stage_paths(text: str, repo_root: Path) -> None:
     require(text.count("./control-plane/actions/grimoire/trusted-controller") == 1, "trusted-controller must be called exactly once")
     require(text.count("./control-plane/actions/grimoire/cast") == 1, "cast driver must be called exactly once")
     require("./actions/grimoire" not in text, "bare ./actions/grimoire paths are forbidden")
+
+
+def assert_cast_action_label_and_output_wiring(repo_root: Path) -> None:
+    cast_text = read_text(repo_root / "actions" / "grimoire" / "cast" / "action.yml")
+    require(cast_text.count("id: labels-spec-needed") == 1, "cast action must require exactly one labels-spec-needed step")
+    for output in ("conclusion", "summary"):
+        require(f"  {output}:" in cast_text and f"value: ${{{{ steps.complete.outputs.{output} }}}}" in cast_text, f"cast action must expose {output} from complete")
+    trusted_label_inputs = (
+        "remote-apply: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT != '' }}",
+        "token: ${{ inputs.github-mutation-allowed == 'true' && env.GRIMOIRE_GITHUB_PAT || '' }}",
+        "github-api-url: ${{ github.api_url }}",
+    )
+    for step_id in ("labels-running", "labels-done", "labels-fizzled", "labels-spec-needed"):
+        block = action_step_block(cast_text, step_id)
+        require("uses: ./control-plane/actions/grimoire/labels" in block, f"{step_id} must use the trusted labels action")
+        for snippet in trusted_label_inputs:
+            require(snippet in block, f"{step_id} must use trusted PAT label input {snippet}")
+    spec_needed = action_step_block(cast_text, "labels-spec-needed")
+    require("if: ${{ steps.decide.outputs.label_transition == 'spec-needed' }}" in spec_needed, "labels-spec-needed must be gated on spec-needed transition")
+    require("transition: spec-needed" in spec_needed, "labels-spec-needed must pass spec-needed transition")
 
 
 def assert_opencode_runtime_provisioning(text: str, repo_root: Path) -> None:
@@ -235,9 +271,21 @@ def assert_opencode_runtime_preflight(text: str) -> None:
 
 
 def assert_auth_and_inline_shell(text: str) -> None:
-    forbidden_auth = ("GITHUB_TOKEN", "github.token", "create-github-app-token", "github-app-token", "app-id:", "private-key:")
+    forbidden_auth = ("GITHUB_TOKEN", "github.token", "GRIMOIRE_PAT", "CODEX_LOOP_PAT", "steps.auth.outputs.github_pat", "app-id:")
     for marker in forbidden_auth:
-        require(marker not in text, f"forbidden GITHUB_TOKEN or GitHub App auth marker: {marker}")
+        require(marker not in text, f"forbidden privileged auth marker: {marker}")
+
+    token_step = step_block(text, "Mint Grimoire GitHub App installation token")
+    for marker in (
+        "id: grimoire-app-token",
+        f"uses: {APP_TOKEN_ACTION}",
+        "client-id: ${{ inputs.grimoire_app_client_id }}",
+        "private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}",
+        "owner: DongwonTTuna-Labs",
+    ):
+        require(marker in token_step, f"GitHub App token step missing marker: {marker}")
+    require(re.search(r"actions/create-github-app-token@[0-9A-Fa-f]{40}", token_step) is not None, "GitHub App token action must be SHA-pinned")
+    require(f"GRIMOIRE_GITHUB_PAT: {APP_TOKEN_EXPR}" in text, "cast driver must receive the minted App token as downstream auth")
     require(".omo/evidence" not in text, ".omo/evidence must not be a runtime workflow coupling")
     required_auth_markers = (
         "GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET: ${{ secrets.CF_ACCESS_CLIENT_ID }}",
@@ -291,6 +339,7 @@ def assert_workflow_contract(workflow_path: Path, repo_root: Path) -> None:
     assert_inputs_and_secrets(text)
     assert_runner_and_checkouts(text)
     assert_stage_paths(text, repo_root)
+    assert_cast_action_label_and_output_wiring(repo_root)
     assert_opencode_runtime_provisioning(text, repo_root)
     assert_opencode_runtime_preflight(text)
     assert_auth_and_inline_shell(text)
@@ -324,18 +373,28 @@ def assert_cast_workflow_validator_contract(workflow_path: Path, repo_root: Path
     valid = run_cast_workflow_validator(repo_root, workflow_path)
     require(valid.returncode == 0, f"cast validator rejected valid workflow: stdout={valid.stdout} stderr={valid.stderr}")
 
+    source = read_text(workflow_path)
     target_dir = Path(tempfile.mkdtemp(prefix="grimoire-cast-validator-negative-", dir=str(TEMP_ROOT)))
-    missing_setup = target_dir / "missing-opencode-runtime-provisioning.yml"
-    missing_setup.write_text(remove_step(read_text(workflow_path), "Provision opencode runtime"), encoding="utf-8")
-    missing_setup_result = run_cast_workflow_validator(repo_root, missing_setup)
-    require(missing_setup_result.returncode != 0, "cast validator accepted workflow missing Provision opencode runtime")
-    require("opencode runtime provisioning" in missing_setup_result.stderr, f"cast validator missing clear opencode provisioning error: {missing_setup_result.stderr}")
-
-    missing_preflight = target_dir / "missing-opencode-runtime-preflight.yml"
-    missing_preflight.write_text(remove_step(read_text(workflow_path), "Validate opencode runtime"), encoding="utf-8")
-    invalid = run_cast_workflow_validator(repo_root, missing_preflight)
-    require(invalid.returncode != 0, "cast validator accepted workflow missing Validate opencode runtime")
-    require("opencode runtime preflight" in invalid.stderr, f"cast validator missing clear opencode preflight error: {invalid.stderr}")
+    cases: list[tuple[str, Callable[[str], str], str]] = [
+        ("pat-auth", lambda text: replace_once(text, f"GRIMOIRE_GITHUB_PAT: {APP_TOKEN_EXPR}", "GRIMOIRE_GITHUB_PAT: ${{ secrets.GRIMOIRE_PAT }}"), "GRIMOIRE_PAT"),
+        ("github-token-auth", lambda text: replace_once(text, f"token: {APP_TOKEN_EXPR}", "token: ${{ secrets.GITHUB_TOKEN }}"), "GITHUB_TOKEN"),
+        ("secrets-inherit", lambda text: replace_once(text, "    steps:\n", "    secrets: inherit\n    steps:\n"), "secrets: inherit"),
+        ("pull-request-target", lambda text: insert_before_permissions(text, "  pull_request_target:"), "pull_request_target"),
+        (
+            "github-hosted-runner",
+            lambda text: replace_once(text, "    runs-on:\n      group: Home Server Runners\n      labels: dongwontuna-labs-runner", "    runs-on: ubuntu-latest"),
+            "GitHub-hosted runner",
+        ),
+        ("unpinned-token-action", lambda text: replace_once(text, APP_TOKEN_ACTION, "actions/create-github-app-token@v3"), "40-character commit SHA"),
+        ("missing-opencode-runtime-provisioning", lambda text: remove_step(text, "Provision opencode runtime"), "opencode runtime provisioning"),
+        ("missing-opencode-runtime-preflight", lambda text: remove_step(text, "Validate opencode runtime"), "opencode runtime preflight"),
+    ]
+    for name, mutate, expected in cases:
+        target = target_dir / f"{name}.yml"
+        target.write_text(mutate(source), encoding="utf-8")
+        invalid = run_cast_workflow_validator(repo_root, target)
+        require(invalid.returncode != 0, f"cast validator accepted negative workflow: {name}")
+        require(expected in invalid.stderr, f"cast validator missing clear {name} error: {invalid.stderr}")
 
 
 def make_missing_stage_root() -> Path:
@@ -355,13 +414,15 @@ def assert_negative_fixtures(workflow_path: Path, repo_root: Path) -> None:
         ("workflow-dispatch", lambda text: insert_before_permissions(text, "  workflow_dispatch:"), repo_root),
         ("push", lambda text: insert_before_permissions(text, "  push:"), repo_root),
         ("secrets-inherit", lambda text: replace_once(text, "    steps:\n", "    secrets: inherit\n    steps:\n"), repo_root),
+        ("pat-auth", lambda text: replace_once(text, f"GRIMOIRE_GITHUB_PAT: {APP_TOKEN_EXPR}", "GRIMOIRE_GITHUB_PAT: ${{ secrets.GRIMOIRE_PAT }}"), repo_root),
+        ("github-token-auth", lambda text: replace_once(text, f"token: {APP_TOKEN_EXPR}", "token: ${{ secrets.GITHUB_TOKEN }}"), repo_root),
+        ("unpinned-token-action", lambda text: replace_once(text, APP_TOKEN_ACTION, "actions/create-github-app-token@v3"), repo_root),
         ("missing-top-permissions", lambda text: replace_once(text, "permissions: {}\n", ""), repo_root),
         (
             "github-hosted-runner",
             lambda text: replace_once(text, "    runs-on:\n      group: Home Server Runners\n      labels: dongwontuna-labs-runner", "    runs-on: ubuntu-latest"),
             repo_root,
         ),
-        ("github-token-auth", lambda text: replace_once(text, "token: ${{ steps.auth.outputs.github_pat }}", "token: ${{ github.token }}"), repo_root),
         (
             "runtime-toggle-input",
             lambda text: replace_once(text, "      grimoire_contract_version:\n", "      mode:\n        description: Forbidden runtime toggle.\n        required: false\n        type: string\n      grimoire_contract_version:\n"),
@@ -372,7 +433,7 @@ def assert_negative_fixtures(workflow_path: Path, repo_root: Path) -> None:
         ("bare-local-action-path", lambda text: replace_once(text, "./control-plane/actions/grimoire/cast", "./actions/grimoire/cast"), repo_root),
         (
             "undeclared-secret",
-            lambda text: replace_once(text, "          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}", "          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}\n          EXTRA_SECRET: ${{ secrets.EXTRA_SECRET }}"),
+            lambda text: replace_once(text, "          GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}", "          GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}\n          EXTRA_SECRET: ${{ secrets.EXTRA_SECRET }}"),
             repo_root,
         ),
         ("evidence-runtime-coupling", lambda text: replace_once(text, "mkdir -p consumer/.omo/ci", "mkdir -p consumer/.omo/ci\n          touch consumer/.omo/evidence/runtime.txt"), repo_root),

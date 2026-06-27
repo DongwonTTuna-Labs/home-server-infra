@@ -7,12 +7,13 @@ import sys
 from pathlib import Path
 
 
-EXPECTED_PR_TYPES = ["opened", "ready_for_review", "synchronize", "reopened"]
-EXPECTED_WITH_KEYS = {"consumer_repository", "consumer_ref", "pull_request_number", "head_sha", "base_ref"}
-EXPECTED_SECRETS = {"GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"}
+EXPECTED_PR_TYPES = ["opened", "ready_for_review", "synchronize", "reopened", "unlabeled"]
+EXPECTED_WITH_KEYS = {"consumer_repository", "consumer_ref", "pull_request_number", "head_sha", "base_ref", "grimoire_app_client_id"}
+EXPECTED_SECRETS = {"GRIMOIRE_APP_PRIVATE_KEY", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"}
 FORBIDDEN_EVENTS = {"workflow_dispatch", "pull_request_target", "push"}
 FORBIDDEN_RUNTIME_KEYS = {"mode", "dry_run", "dry-run", "allow_live", "allow-live", "simulate", "simulation"}
 STOP_LABEL = "grimoire:disabled"
+SPEC_NEEDED_LABEL = "📋 Spec Needed"
 
 
 class ContractError(AssertionError):
@@ -61,7 +62,44 @@ def parse_mapping(block: str, indent: int) -> dict[str, str]:
     return values
 
 
-def assert_pull_request_trigger(text: str) -> None:
+def mapping_value(block: str, key: str, indent: int) -> str:
+    lines = block.splitlines()
+    prefix = " " * indent
+    block_markers = {">", ">-", ">+", "|", "|-", "|+"}
+    for index, line in enumerate(lines):
+        match = re.match(rf"^{prefix}{re.escape(key)}\s*:\s*(.*?)\s*$", line)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if value and value not in block_markers:
+            return value
+        parts: list[str] = []
+        for child in lines[index + 1 :]:
+            if child.strip() and indent_of(child) <= indent:
+                break
+            if child.strip():
+                parts.append(child.strip())
+        return " ".join(parts)
+    raise ContractError(f"missing YAML value: {' ' * indent}{key}:")
+
+
+def normalize_guard_expression(value: str) -> str:
+    expression = value.replace("${{", " ").replace("}}", " ")
+    return re.sub(r"\s+", " ", expression).strip()
+
+
+def has_spec_needed_unlabeled_guard(guard: str) -> bool:
+    normalized = normalize_guard_expression(guard)
+    label_literal = rf"['\"]{re.escape(SPEC_NEEDED_LABEL)}['\"]"
+    action_not_unlabeled = r"github\.event\.action\s*!=\s*['\"]unlabeled['\"]"
+    label_is_spec_needed = rf"github\.event\.label\.name\s*==\s*{label_literal}"
+    unlabeled_guard = rf"(?:{action_not_unlabeled}\s*\|\|\s*{label_is_spec_needed}|{label_is_spec_needed}\s*\|\|\s*{action_not_unlabeled})"
+    if re.fullmatch(rf"\(?\s*{unlabeled_guard}\s*\)?", normalized):
+        return True
+    return re.search(rf"\(\s*{unlabeled_guard}\s*\)", normalized) is not None
+
+
+def assert_pull_request_trigger(text: str) -> list[str]:
     on_block = section_body(text, "on", 0)
     events = keys_at_indent(on_block, 2)
     require(events == {"pull_request"}, f"consumer workflow must expose only pull_request, got {sorted(events)}")
@@ -80,6 +118,7 @@ def assert_pull_request_trigger(text: str) -> None:
             if match:
                 types.append(match.group(1))
     require(types == EXPECTED_PR_TYPES, f"pull_request types drifted: {types}")
+    return types
 
 
 def find_reusable_job_block(text: str, expected_reusable_repo: str) -> tuple[str, str, str]:
@@ -104,13 +143,28 @@ def find_reusable_job_block(text: str, expected_reusable_repo: str) -> tuple[str
     return job_name, "\n".join(body), match.group(2)
 
 
-def assert_job_guard(job_block: str) -> None:
-    guard_match = re.search(r"(?m)^    if\s*:\s*(.+?)\s*$", job_block)
-    require(guard_match is not None, f"consumer job must have a job-level Ready/non-{STOP_LABEL} guard")
-    guard = guard_match.group(1) if guard_match else ""
+def assert_job_guard(job_block: str, pr_types: list[str]) -> None:
+    try:
+        guard = mapping_value(job_block, "if", 4)
+    except ContractError as exc:
+        raise ContractError(f"consumer job must have a job-level Ready/non-{STOP_LABEL} guard") from exc
     require("pull_request" in guard and "draft" in guard and "false" in guard, "consumer guard must skip draft PRs")
     require(STOP_LABEL in guard and "contains" in guard and "!" in guard, f"consumer guard must skip the {STOP_LABEL} stop label")
     require("LGTM" not in guard and "codex:lgtm" not in guard, "consumer guard must not use legacy Codex/LGTM stop labels")
+    if "unlabeled" in pr_types:
+        require(
+            has_spec_needed_unlabeled_guard(guard),
+            f"consumer guard must allow unlabeled reruns only for {SPEC_NEEDED_LABEL}",
+        )
+
+
+def assert_job_permissions(job_block: str) -> None:
+    try:
+        permissions_block = section_body(job_block, "permissions", 4)
+    except ContractError as exc:
+        raise ContractError("consumer job must declare job-level permissions with contents: read") from exc
+    permissions = parse_mapping(permissions_block, 6)
+    require(permissions.get("contents") == "read", "consumer job permissions must include contents: read")
 
 
 def assert_reusable_call(job_block: str, ref: str, expected_ref: str) -> None:
@@ -118,7 +172,7 @@ def assert_reusable_call(job_block: str, ref: str, expected_ref: str) -> None:
     with_block = section_body(job_block, "with", 4)
     with_values = parse_mapping(with_block, 6)
     with_keys = set(with_values)
-    require(with_keys == EXPECTED_WITH_KEYS, f"consumer with keys must be only repo/PR metadata, got {sorted(with_keys)}")
+    require(with_keys == EXPECTED_WITH_KEYS, f"consumer with keys must be only repo/PR metadata plus App client ID, got {sorted(with_keys)}")
     forbidden = with_keys & FORBIDDEN_RUNTIME_KEYS
     require(not forbidden, "consumer with block must not pass runtime toggles: " + ", ".join(sorted(forbidden)))
     required_value_markers = {
@@ -127,15 +181,21 @@ def assert_reusable_call(job_block: str, ref: str, expected_ref: str) -> None:
         "pull_request_number": ("github.event.pull_request.number",),
         "head_sha": ("github.event.pull_request.head.sha",),
         "base_ref": ("github.base_ref", "github.event.pull_request.base.ref"),
+        "grimoire_app_client_id": ("Iv23liFL1dDHmU06FLSF", "vars.GRIMOIRE_APP_CLIENT_ID"),
     }
     for key, markers in required_value_markers.items():
         value = with_values.get(key, "")
+        if key == "grimoire_app_client_id":
+            require("secrets." not in value, "consumer with.grimoire_app_client_id must be a non-secret App client ID")
+            require(any(marker in value for marker in markers), "consumer with.grimoire_app_client_id must use the Grimoire App client ID")
+            continue
         require(any(marker in value for marker in markers), f"consumer with.{key} must use GitHub PR metadata")
 
 
 def assert_secrets(job_block: str, text: str) -> None:
     require(not re.search(r"(?m)^\s*secrets\s*:\s*inherit\s*$", text), "consumer workflow must not use secrets: inherit")
     require("GITHUB_TOKEN" not in text and "github.token" not in text, "consumer workflow must not map Grimoire auth to GITHUB_TOKEN")
+    require("GRIMOIRE_PAT" not in text, "consumer workflow must not use legacy GRIMOIRE_PAT auth")
     secrets_block = section_body(job_block, "secrets", 4)
     secret_values = parse_mapping(secrets_block, 6)
     require(set(secret_values) == EXPECTED_SECRETS, f"consumer must explicitly map only named secrets, got {sorted(secret_values)}")
@@ -153,10 +213,11 @@ def assert_no_forbidden_runtime_shapes(text: str) -> None:
 
 def validate(workflow: Path, expected_reusable_repo: str, expected_ref: str) -> None:
     text = read_text(workflow)
-    assert_pull_request_trigger(text)
+    pr_types = assert_pull_request_trigger(text)
     assert_no_forbidden_runtime_shapes(text)
     _job_name, job_block, ref = find_reusable_job_block(text, expected_reusable_repo)
-    assert_job_guard(job_block)
+    assert_job_permissions(job_block)
+    assert_job_guard(job_block, pr_types)
     assert_reusable_call(job_block, ref, expected_ref)
     assert_secrets(job_block, text)
 

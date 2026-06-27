@@ -1,0 +1,9 @@
+{
+  "comment_path": ".omo/ci/spec-gap-comment.md",
+  "no_code_or_push_action": true,
+  "schema_version": 1,
+  "should_comment": true,
+  "should_halt": true,
+  "stage": "grimoire-spec-gap",
+  "status": "halt"
+}

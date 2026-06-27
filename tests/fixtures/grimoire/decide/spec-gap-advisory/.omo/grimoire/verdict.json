@@ -1,0 +1,39 @@
+{
+  "approved": true,
+  "f1_oracle": "APPROVE",
+  "f2_quality": "APPROVE",
+  "f3_real_qa": "APPROVE",
+  "f4_scope": "APPROVE",
+  "notes": {
+    "f1_oracle": {
+      "evidence": [
+        "synthetic fixture"
+      ],
+      "status": "APPROVE",
+      "summary": "fixture"
+    },
+    "f2_quality": {
+      "evidence": [
+        "synthetic fixture"
+      ],
+      "status": "APPROVE",
+      "summary": "fixture"
+    },
+    "f3_real_qa": {
+      "evidence": [
+        "synthetic fixture"
+      ],
+      "status": "APPROVE",
+      "summary": "fixture"
+    },
+    "f4_scope": {
+      "evidence": [
+        "synthetic fixture"
+      ],
+      "status": "APPROVE",
+      "summary": "fixture"
+    }
+  },
+  "schema_version": 1,
+  "stage": "grimoire-verify"
+}

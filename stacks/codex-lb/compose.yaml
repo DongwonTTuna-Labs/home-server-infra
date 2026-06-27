@@ -10,7 +10,6 @@ services:
     pull_policy: missing
     restart: always
     labels:
-      # Disabled while pinned to 1.19.0 so watchtower can't re-bump to latest.
       com.centurylinklabs.watchtower.enable: "false"
     environment:
       CODEX_LB_CONNECT_ADDRESS: relay-ai.dongwontuna.net

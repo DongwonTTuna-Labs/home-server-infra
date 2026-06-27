@@ -1,0 +1,8 @@
+{
+  "blocked_reason": "trusted-controller preflight denied deterministic fixture",
+  "can_continue": false,
+  "does_not_rerun_trusted_controller": true,
+  "schema_version": 1,
+  "stage": "grimoire-cast",
+  "status": "blocked"
+}

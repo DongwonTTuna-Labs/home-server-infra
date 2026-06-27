@@ -1,0 +1,21 @@
+{
+  "allowed_paths": [
+    "src/lib.rs"
+  ],
+  "allowed_write_paths": [
+    "src/lib.rs"
+  ],
+  "changed_files": [
+    "src/unscoped.rs"
+  ],
+  "noop": false,
+  "schema_version": 1,
+  "scope_ok": false,
+  "should_commit": false,
+  "should_push": false,
+  "stage": "grimoire-fix",
+  "status": "scope-violation",
+  "violations": [
+    "src/unscoped.rs"
+  ]
+}
