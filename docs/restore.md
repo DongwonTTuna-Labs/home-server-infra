@@ -23,10 +23,9 @@ This repository restores configuration, not live data.
    curl -fsS https://relay-ai.dongwontuna.net/health/ready
    ```
 
-The retired `${HOME}/.cloudflared/codex-lb.json` and
-`${HOME}/.cloudflared/bbc484d5-7aa8-4caf-9ec5-15f64c6f5610.json` credentials are
-not required for restore unless you are intentionally rolling back the old
-per-stack tunnel runners.
+The retired `${HOME}/.cloudflared/codex-lb.json` credential is not required for
+restore unless you are intentionally rolling back the old per-stack tunnel
+runner.
 
 ## Coding Tool Native Services
 
@@ -50,18 +49,4 @@ per-stack tunnel runners.
    systemctl --user list-dependencies --plain coding-tools.target
    systemctl --user is-active opencode.service codex-cli-update.timer opencode-update.timer
    curl -fsS http://127.0.0.1:4096/session/status -u "opencode:$OPENCODE_SERVER_PASSWORD"
-   ```
-
-## codex-lb-local Relay
-
-The optional local relay stack uses Docker Compose project-prefixed volume names
-when started with the repository commands:
-
-1. Restore `stacks/codex-lb-local/.env` with `CODEX_LB_POSTGRES_PASSWORD`.
-2. Restore Docker volumes `codex-lb-local_codex-lb-local-data` and
-   `codex-lb-local_codex-lb-local-postgres-data`.
-3. Start the stack only if this host should run the optional local relay:
-
-   ```sh
-   docker compose -f stacks/codex-lb-local/compose.yaml up -d
    ```

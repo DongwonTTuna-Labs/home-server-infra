@@ -13,7 +13,6 @@ unlabeled or explicitly set to `false`.
 Current intended update targets:
 
 - `codex-lb`
-- `codex-lb-local` when that optional stack is deployed
 - `cloudflared-apps`
 
 `mcp-suite` is excluded because it is a local build image; updates are handled by
