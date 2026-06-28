@@ -49,17 +49,12 @@ done
 
 scripts/scan-secrets.sh
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
-CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb-local/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
 if [ -e stacks/codex-lb/cloudflared/codex-lb.yml ]; then
   printf 'Retired path still present: stacks/codex-lb/cloudflared/codex-lb.yml\n' >&2
   exit 1
 fi
-if [ -e stacks/codex-lb-local/cloudflared/codex-lb-local.yml ]; then
-  printf 'Retired path still present: stacks/codex-lb-local/cloudflared/codex-lb-local.yml\n' >&2
-  exit 1
-fi
-for compose in stacks/codex-lb/compose.yaml stacks/codex-lb-local/compose.yaml stacks/tunnel-apps/compose.yaml; do
+for compose in stacks/codex-lb/compose.yaml stacks/tunnel-apps/compose.yaml; do
   if grep -Eq 'container_name:[[:space:]]+watchtower-|^[[:space:]]+watchtower:' "$compose"; then
     printf 'Retired per-stack Watchtower service still present: %s\n' "$compose" >&2
     exit 1
@@ -121,10 +116,10 @@ trap 'rm -rf "$tmpdir"' EXIT
 cp -a stacks/codex-github-runners/. "$tmpdir/"
 mkdir -p "$tmpdir/state"
 printf 'placeholder\n' > "$tmpdir/state/github_pat"
-cat > "$tmpdir/.env.verify" <<'EOF'
+cat > "$tmpdir/.env.verify" <<'VERIFY_EOF'
 CODEX_RELAY_API_KEY=placeholder
 CODEX_LOOP_PAT=placeholder
-EOF
+VERIFY_EOF
 docker compose -f "$tmpdir/compose.yaml" --env-file "$tmpdir/.env.verify" config >/dev/null
 
 printf 'Layout verification passed.\n'
