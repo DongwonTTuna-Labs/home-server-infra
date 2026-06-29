@@ -14,6 +14,9 @@ class ContractError(AssertionError):
     pass
 
 
+GITHUB_PAT_PREFIX = "github_" + "pat_"
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ContractError(message)
@@ -28,7 +31,7 @@ def load_labels_module() -> Any:
     return module
 
 
-def labels_args(workspace: Path, transition: str, *, remote_apply: bool, token: str = "github_pat_fixturetokenfixturetoken123456", github_output: str = "") -> argparse.Namespace:
+def labels_args(workspace: Path, transition: str, *, remote_apply: bool, token: str = GITHUB_PAT_PREFIX + "fixturetokenfixturetoken123456", github_output: str = "") -> argparse.Namespace:
     return argparse.Namespace(
         transition=transition,
         consumer_workspace=str(workspace),
@@ -127,7 +130,7 @@ def test_remote_remove_missing_managed_label_is_idempotent(tmp_path: Path, monke
 
 def test_remote_add_failure_fails_closed_with_sanitized_error(tmp_path: Path, monkeypatch: Any) -> None:
     module = load_labels_module()
-    secret = "github_pat_secretsecretsecretsecret1234567890"
+    secret = GITHUB_PAT_PREFIX + "secretsecretsecretsecret1234567890"
     write_state(tmp_path, ["🔮 Casting…"])
 
     def fake_request(method: str, path: str, token: str, payload: dict[str, Any] | None, api_url: str) -> dict[str, Any]:
@@ -143,7 +146,7 @@ def test_remote_add_failure_fails_closed_with_sanitized_error(tmp_path: Path, mo
     serialized = json.dumps(status, ensure_ascii=False, sort_keys=True)
     require(status["github_pr_label_mutation_attempted"] is True, "failed remote add still must record that GitHub mutation was attempted")
     require(status["remote_apply_status"] == "failed", "failed remote add must be explicit in the status artifact")
-    require(secret not in serialized and "github_pat_" not in serialized, "status artifact must not leak PAT values or prefixes")
+    require(secret not in serialized and GITHUB_PAT_PREFIX not in serialized, "status artifact must not leak PAT values or prefixes")
     require("[REDACTED]" in serialized, "sanitized failure should preserve a redaction marker for diagnostics")
 
 
