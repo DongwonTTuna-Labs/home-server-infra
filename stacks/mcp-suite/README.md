@@ -28,6 +28,18 @@ proxy binds inside the container on all interfaces so Docker port publishing can
 reach it, but the host-side listener remains loopback-only. Do not add these
 ports to Cloudflare Tunnel ingress.
 
+For Paca containers, `mcp-suite` also joins the external Docker network
+`paca_mcp_internal` as `mcp-suite`. `stacks/paca/compose.yaml` creates that
+network; live attach or restart only after Paca has created it. Paca-internal
+URLs are:
+
+- `http://mcp-suite:8301/mcp`
+- `http://mcp-suite:8302/mcp`
+- `http://mcp-suite:8303/mcp`
+
+These URLs are for the private Docker network only. Do not expose them through
+Cloudflare Tunnel.
+
 `mcp-suite-smoke` checks HTTP `/ping` readiness and then lists tools through the
 same stdio launchers used by clients.
 

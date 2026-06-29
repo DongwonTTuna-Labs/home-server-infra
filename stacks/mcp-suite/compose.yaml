@@ -28,6 +28,11 @@ services:
       - "127.0.0.1:8301:8301"
       - "127.0.0.1:8302:8302"
       - "127.0.0.1:8303:8303"
+    networks:
+      default:
+      paca_mcp_internal:
+        aliases:
+          - mcp-suite
     volumes:
       - /home/dongwonttuna/Documents/Programming:/home/dongwonttuna/Documents/Programming
       - /home/dongwonttuna/.local/chrome-for-testing:/home/dongwonttuna/.local/chrome-for-testing:ro
@@ -37,3 +42,8 @@ services:
       timeout: 10s
       retries: 5
       start_period: 45s
+
+networks:
+  paca_mcp_internal:
+    external: true
+    name: paca_mcp_internal
