@@ -1,0 +1,54 @@
+{$SITE_ADDRESS::80} {
+	encode gzip
+
+	log {
+		output stdout
+	}
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		X-XSS-Protection "0"
+		-Server
+	}
+
+	@notStorage not path /storage/*
+	request_body @notStorage {
+		max_size 10MB
+	}
+
+	handle_path /storage/* {
+		reverse_proxy minio:9000 {
+			header_up Host minio:9000
+		}
+	}
+
+	handle_path /ws/* {
+		reverse_proxy realtime:3001
+	}
+
+	handle_path /plugins/* {
+		root * /var/www/plugins
+
+		@wasm path *.wasm
+		header @wasm Content-Type "application/wasm"
+		header Cache-Control "public, max-age=900, immutable"
+		file_server
+	}
+
+	handle_path /plugins-mcp/* {
+		root * /var/www/plugins-mcp
+		header Cache-Control "public, max-age=900, immutable"
+		file_server
+	}
+
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}
