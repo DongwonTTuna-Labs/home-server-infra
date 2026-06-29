@@ -22,6 +22,14 @@ required=(
   stacks/tunnel-apps/README.md
   stacks/tunnel-apps/compose.yaml
   stacks/tunnel-apps/cloudflared/tunnel-apps.yml
+  stacks/paca/README.md
+  stacks/paca/compose.yaml
+  stacks/paca/docker-compose.override.yaml
+  stacks/paca/.env.example
+  stacks/paca/caddy/Caddyfile
+  stacks/paca/relay-ai-enforce.sql
+  stacks/paca/mcp-local-servers.sql
+  stacks/paca/overrides/ai-agent/builder.py
   stacks/coding/README.md
   stacks/coding/systemd/coding-tools.target
   stacks/coding/systemd/codex-cli-update.service
@@ -47,7 +55,32 @@ for path in "${required[@]}"; do
   fi
 done
 
+assert_no_mcp_tunnel_exposure() {
+  local tunnel_config=$1
+
+  if grep -Eq '8301|8302|8303|mcp-suite|/mcp' "$tunnel_config"; then
+    printf 'MCP endpoints must not be exposed through tunnel-apps: %s\n' "$tunnel_config" >&2
+    exit 1
+  fi
+}
+
+paca_watchtower_true_services() {
+  awk '
+    /^[[:space:]][[:space:]][[:alnum:]_-]+:$/ {
+      service = $1
+      sub(/:$/, "", service)
+    }
+    /com[.]centurylinklabs[.]watchtower[.]enable:[[:space:]]*"?true"?/ {
+      if (service != "") print service
+    }
+  ' stacks/paca/compose.yaml | sort
+}
+
 scripts/scan-secrets.sh
+mkdir -p .omo/tmp
+tmpdir="$(mktemp -d .omo/tmp/verify-layout.XXXXXX)"
+trap 'rm -rf "$tmpdir"' EXIT
+
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb-local/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
@@ -85,10 +118,84 @@ if ! grep -q 'MCP_ALLOWED_WORKSPACE_ROOT' stacks/mcp-suite/compose.yaml; then
   printf 'mcp-suite must configure MCP_ALLOWED_WORKSPACE_ROOT\n' >&2
   exit 1
 fi
-if grep -Eq '8301|8302|8303|mcp-suite|/mcp' stacks/tunnel-apps/cloudflared/tunnel-apps.yml; then
-  printf 'MCP endpoints must not be exposed through tunnel-apps\n' >&2
+if ! grep -q 'paca.dongwontuna.net' stacks/tunnel-apps/cloudflared/tunnel-apps.yml; then
+  printf 'tunnel-apps must route paca.dongwontuna.net\n' >&2
   exit 1
 fi
+assert_no_mcp_tunnel_exposure stacks/tunnel-apps/cloudflared/tunnel-apps.yml
+if ! grep -q 'paca_mcp_internal' stacks/mcp-suite/compose.yaml; then
+  printf 'mcp-suite must join paca_mcp_internal\n' >&2
+  exit 1
+fi
+for port in 8301 8302 8303; do
+  if ! grep -q "127[.]0[.]0[.]1:${port}:${port}" stacks/mcp-suite/compose.yaml; then
+    printf 'mcp-suite port %s must publish on loopback only\n' "$port" >&2
+    exit 1
+  fi
+done
+if ! grep -q '^name: paca$' stacks/paca/compose.yaml; then
+  printf 'Paca compose project name must be paca\n' >&2
+  exit 1
+fi
+if ! grep -Eq 'name:[[:space:]]+paca_mcp_internal' stacks/paca/compose.yaml; then
+  printf 'Paca compose default network must be paca_mcp_internal\n' >&2
+  exit 1
+fi
+if ! grep -q '127[.]0[.]0[.]1:3080:80' stacks/paca/compose.yaml; then
+  printf 'Paca gateway must bind 3080 on loopback only\n' >&2
+  exit 1
+fi
+paca_watchtower_true_services_actual="$(paca_watchtower_true_services)"
+for service in api web realtime gateway minio valkey db-backup; do
+  if printf '%s\n' "$paca_watchtower_true_services_actual" | grep -qx "$service"; then
+    printf 'Paca service must not be Watchtower-enabled: %s\n' "$service" >&2
+    exit 1
+  fi
+done
+paca_watchtower_true_services_expected="$(printf '%s\n' ai-agent postgres | sort)"
+if [ "$paca_watchtower_true_services_actual" != "$paca_watchtower_true_services_expected" ]; then
+  printf 'Paca Watchtower true labels must be exactly ai-agent and postgres; got: %s\n' "${paca_watchtower_true_services_actual:-none}" >&2
+  exit 1
+fi
+for port in 8301 8302 8303; do
+  if ! grep -q "http://mcp-suite:${port}/mcp" stacks/paca/mcp-local-servers.sql; then
+    printf 'Paca MCP seed must use mcp-suite URL for port %s\n' "$port" >&2
+    exit 1
+  fi
+done
+if grep -Eq '127[.]0[.]0[.]1:830[123]|localhost:830[123]' stacks/paca/mcp-local-servers.sql; then
+  printf 'Paca MCP seed must not use host loopback URLs\n' >&2
+  exit 1
+fi
+cat > "$tmpdir/paca.env" <<'EOF'
+ENVIRONMENT=production
+PUBLIC_URL=https://paca.dongwontuna.net
+COOKIE_SECURE=true
+CORS_ORIGINS=https://paca.dongwontuna.net
+SITE_ADDRESS=:80
+POSTGRES_DB=paca
+POSTGRES_USER=paca
+POSTGRES_PASSWORD=placeholder
+JWT_SECRET=placeholder
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=placeholder
+ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
+AGENT_API_KEY=placeholder
+INTERNAL_API_KEY=placeholder
+STORAGE_PROVIDER=minio
+STORAGE_ENDPOINT=minio:9000
+STORAGE_PUBLIC_URL=https://paca.dongwontuna.net/storage
+STORAGE_REGION=us-east-1
+STORAGE_BUCKET=paca
+STORAGE_ACCESS_KEY_ID=placeholder
+STORAGE_SECRET_ACCESS_KEY=placeholder
+STORAGE_USE_SSL=false
+BACKUP_DIR=./backups
+BACKUP_RETENTION_DAYS=7
+BACKUP_CRON=0 2 * * *
+TZ=UTC
+EOF
+docker compose --env-file "$tmpdir/paca.env" -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml config >/dev/null
 for target in stacks/mcp-suite/systemd/mcp-suite.target stacks/coding/systemd/coding-tools.target; do
   if grep -Eq '^(Requires|BindsTo)=' "$target"; then
     printf 'Domain target must use soft Wants only: %s\n' "$target" >&2
@@ -116,8 +223,6 @@ done
 docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
 cp -a stacks/codex-github-runners/. "$tmpdir/"
 mkdir -p "$tmpdir/state"
 printf 'placeholder\n' > "$tmpdir/state/github_pat"
