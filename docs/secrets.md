@@ -30,6 +30,21 @@ external secret store.
   - `CODEX_LOOP_PAT` for Codex loop push and continuation dispatch
 - `stacks/codex-github-runners/state/github_pat`
   - GitHub PAT used for runner registration
+- `stacks/paca/.env`
+  - Local-only Paca runtime secrets. This file is ignored and must be rebuilt
+    from `stacks/paca/.env.example`, never committed.
+  - Secret names: `POSTGRES_PASSWORD`, `JWT_SECRET`, `ADMIN_PASSWORD`,
+    `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`, `AGENT_API_KEY`,
+    `INTERNAL_API_KEY`, and `ENCRYPTION_KEY`.
+  - `ENCRYPTION_KEY` is separate from ordinary runtime secrets. It protects
+    encrypted agent LLM keys in Postgres, must be 64 hex chars, and can't be
+    changed blindly. Rotate it only with a verified decrypt and re-encrypt
+    migration, or stop and re-enter agent LLM keys manually.
+- `stacks/paca/backups/`
+  - Local Paca Postgres dump path when `BACKUP_DIR` points inside the stack
+    folder. Backup files are runtime data and ignored.
+- `.omo/evidence/`
+  - Local-only task evidence. It is ignored and must not be committed.
 
 ## External Secret Stores
 
@@ -49,5 +64,9 @@ external secret store.
 - `codex-lb-local_codex-lb-local-data` and
   `codex-lb-local_codex-lb-local-postgres-data` Docker volumes when the optional
   local relay stack is deployed
+- Paca Docker volumes, including `paca_postgres_data`, `paca_valkey_data`,
+  `paca_minio_data`, `paca_backend_plugins`, `paca_frontend_plugins`,
+  `paca_mcp_plugins`, `paca_caddy_data`, and `paca_caddy_config`
+- Paca database rows that contain encrypted agent LLM keys
 - SSH private keys under `~/.ssh`
 - GitHub CLI `hosts.yml`
