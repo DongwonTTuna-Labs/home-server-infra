@@ -6,4 +6,6 @@ ingress:
     service: http://localhost:4096
   - hostname: relay-ai.dongwontuna.net
     service: http://localhost:2455
+  - hostname: paca.dongwontuna.net
+    service: http://localhost:3080
   - service: http_status:404

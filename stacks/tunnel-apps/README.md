@@ -10,6 +10,7 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 | --- | --- |
 | `opencode.dongwontuna.net` | `http://localhost:4096` |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
+| `paca.dongwontuna.net` | `http://localhost:3080` |
 
 ## Run
 
@@ -28,6 +29,7 @@ Move DNS routes only after local origins pass smoke tests:
 ```sh
 cloudflared tunnel route dns --overwrite-dns opencode opencode.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns opencode relay-ai.dongwontuna.net
+cloudflared tunnel route dns --overwrite-dns opencode paca.dongwontuna.net
 ```
 
 After `tunnel-apps` is healthy, retire the old non-SSH tunnel runners:
