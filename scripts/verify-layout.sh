@@ -29,7 +29,6 @@ required=(
   stacks/paca/caddy/Caddyfile
   stacks/paca/relay-ai-enforce.sql
   stacks/paca/mcp-local-servers.sql
-  stacks/paca/overrides/ai-agent/builder.py
   stacks/coding/README.md
   stacks/coding/systemd/coding-tools.target
   stacks/coding/systemd/codex-cli-update.service
@@ -143,6 +142,14 @@ if ! grep -Eq 'name:[[:space:]]+paca_mcp_internal' stacks/paca/compose.yaml; the
 fi
 if ! grep -q '127[.]0[.]0[.]1:3080:80' stacks/paca/compose.yaml; then
   printf 'Paca gateway must bind 3080 on loopback only\n' >&2
+  exit 1
+fi
+if [ -e stacks/paca/overrides/ai-agent/builder.py ]; then
+  printf 'Paca must not source-override auto-updated ai-agent code\n' >&2
+  exit 1
+fi
+if grep -q 'overrides/ai-agent' stacks/paca/compose.yaml stacks/paca/docker-compose.override.yaml; then
+  printf 'Paca compose must not bind-mount ai-agent source overrides\n' >&2
   exit 1
 fi
 paca_watchtower_true_services_actual="$(paca_watchtower_true_services)"

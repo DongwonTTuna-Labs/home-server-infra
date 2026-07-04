@@ -37,6 +37,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:2455:2455"
+    networks:
+      default:
+      paca_mcp_internal:
     volumes:
       - codex-lb-data:/var/lib/codex-lb
 
@@ -67,3 +70,8 @@ volumes:
     external: true
     name: codex-lb-data
   codex-lb-postgres-data:
+
+networks:
+  paca_mcp_internal:
+    external: true
+    name: paca_mcp_internal

@@ -1,5 +1,1 @@
-services:
-  ai-agent:
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./overrides/ai-agent/builder.py:/app/src/agent/builder.py:ro
+services: {}

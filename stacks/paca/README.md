@@ -15,7 +15,6 @@ stacks/paca/
   caddy/Caddyfile
   relay-ai-enforce.sql
   mcp-local-servers.sql
-  overrides/ai-agent/builder.py
 ```
 
 `stacks/paca/.env.example` documents required names. `stacks/paca/.env` holds

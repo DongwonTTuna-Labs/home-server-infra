@@ -5,7 +5,7 @@ AS $$
 BEGIN
     NEW.llm_provider := 'ai-relay';
     NEW.llm_model := 'gpt-5.5';
-    NEW.llm_base_url := 'https://relay-ai.dongwontuna.net/v1';
+    NEW.llm_base_url := 'http://codex-lb:2455/v1';
     RETURN NEW;
 END;
 $$;
@@ -23,12 +23,12 @@ ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_relay_ai_llm_only;
 UPDATE agents
 SET llm_provider = 'ai-relay',
     llm_model = 'gpt-5.5',
-    llm_base_url = 'https://relay-ai.dongwontuna.net/v1'
+    llm_base_url = 'http://codex-lb:2455/v1'
 WHERE deleted_at IS NULL;
 
 ALTER TABLE agents ADD CONSTRAINT agents_relay_ai_llm_only
 CHECK (
     llm_provider = 'ai-relay'
     AND llm_model = 'gpt-5.5'
-    AND llm_base_url = 'https://relay-ai.dongwontuna.net/v1'
+    AND llm_base_url = 'http://codex-lb:2455/v1'
 );
