@@ -28,6 +28,7 @@ ENVELOPE_CONTEXT=0
 CURRENT_COMMAND=""
 RUNTIME_LOCK_DIRS=()
 RUNTIME_LOCK_HOLDERS=()
+RUNTIME_LOCK_OWNER_BASHPID=""
 ATTACHMENT_SOURCE_PATHS=()
 ATTACHMENT_SHA256S=()
 ATTACHMENT_SIZES=()
@@ -197,7 +198,7 @@ public_message_for_reason() {
       printf 'send failed before a sessionId was recorded'
       ;;
     send.unknown_session)
-      printf 'send may have started but no sessionId was recorded; do not resend this fingerprint'
+      printf 'send was not proven to have reached ChatGPT because no sessionId was recorded; retry this request after checking status'
       ;;
     slot.pool_busy)
       printf 'all GPT slots are busy or repairing; queued for a later supervised retry'
@@ -506,6 +507,16 @@ pid_alive() {
   kill -0 "$pid" >/dev/null 2>&1
 }
 
+lock_missing_holder_is_stale() {
+  local dir="$1" grace="${GPT_WEBAI_LOCK_MISSING_HOLDER_GRACE_SECONDS:-5}"
+  local now mtime
+  [[ "$grace" =~ ^[0-9]+$ ]] || grace=5
+  now="$(date +%s)"
+  mtime="$(stat -c %Y "$dir" 2>/dev/null || true)"
+  [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+  [[ $((now - mtime)) -ge "$grace" ]]
+}
+
 prune_holders_internal() {
   local current_boot="$1"
   local pruned=0
@@ -598,8 +609,11 @@ holder_stale_reason() {
 lock_stale_reason() {
   local dir="$1" current_boot="$2" holder_file="$dir/holder" pid boot
   if [[ ! -f "$holder_file" ]]; then
-    printf 'missing-holder'
-    return 0
+    if lock_missing_holder_is_stale "$dir"; then
+      printf 'missing-holder'
+      return 0
+    fi
+    return 1
   fi
   pid="$(lease_value "$holder_file" pid || true)"
   boot="$(lease_value "$holder_file" boot_id || true)"
@@ -762,6 +776,7 @@ runtime_lock_release_dir() {
 
 runtime_lock_release_all() {
   local index
+  [[ -z "$RUNTIME_LOCK_OWNER_BASHPID" || "$BASHPID" == "$RUNTIME_LOCK_OWNER_BASHPID" ]] || return 0
   for index in "${!RUNTIME_LOCK_DIRS[@]}"; do
     runtime_lock_release_dir "${RUNTIME_LOCK_DIRS[$index]}" "${RUNTIME_LOCK_HOLDERS[$index]}"
   done
@@ -787,6 +802,7 @@ boot_id=$BOOT_ID
 pid=$$"
   RUNTIME_LOCK_DIRS+=("$dir")
   RUNTIME_LOCK_HOLDERS+=("$holder")
+  RUNTIME_LOCK_OWNER_BASHPID="$BASHPID"
   trap runtime_lock_release_all EXIT
   printf -v "$__holder_outvar" '%s' "$holder"
 }
@@ -828,6 +844,10 @@ emit_slot_busy() {
 
 emit_slot_required() {
   emit_envelope true recovering false false slot.slot_required "$(public_message_for_reason slot.slot_required '')" 'gpt-webai-lifecycle status' '' 0 >&3
+}
+
+emit_send_unknown_session() {
+  emit_envelope true recovering false false send.unknown_session "$(public_message_for_reason send.unknown_session '')" 'gpt-webai-lifecycle status' '' 0 >&3
 }
 
 runtime_lock_release() {
@@ -955,9 +975,10 @@ try {
         .filter(visible)
         .map(node => (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim())
         .filter(text => /^log in$/i.test(text) || /^sign up/i.test(text));
-      const composer = document.querySelector('#prompt-textarea, textarea[name="prompt-textarea"], .ProseMirror, [contenteditable="true"]');
+      const composer = Array.from(document.querySelectorAll('#prompt-textarea, textarea[name="prompt-textarea"], .ProseMirror, [contenteditable="true"]'))
+        .some(visible);
       return {
-        composer: Boolean(composer && visible(composer)),
+        composer,
         login: loginCopy || loginButtons.length > 0,
       };
     }).catch(() => ({ composer: false, login: false }));
@@ -1066,11 +1087,35 @@ cmd_browser() {
 }
 
 cmd_test() {
+  local test_lock_holder="" lock_dir="" substitution=""
   case "${1:-}" in
     atomic-write)
       [[ $# -eq 3 ]] || die_usage '__test atomic-write PATH CONTENT'
       init_state
       atomic_write_rel "$2" "$3"
+      ;;
+    lock-substitution)
+      [[ $# -eq 1 ]] || die_usage '__test lock-substitution'
+      init_state
+      runtime_lock_acquire test-substitution test_lock_holder
+      lock_dir="$(runtime_lock_dir test-substitution)"
+      substitution="$(utc_now)"
+      [[ -n "$substitution" ]] || die_hard 'test substitution failed'
+      if [[ -f "$lock_dir/holder" ]]; then
+        printf 'lock_survived=1\n'
+      else
+        printf 'lock_survived=0\n'
+      fi
+      runtime_lock_release test-substitution "$test_lock_holder"
+      if [[ ! -e "$lock_dir" ]]; then
+        printf 'lock_released=1\n'
+      else
+        printf 'lock_released=0\n'
+      fi
+      ;;
+    send-retry-delays)
+      [[ $# -eq 1 ]] || die_usage '__test send-retry-delays'
+      send_session_retry_delays
       ;;
     *) usage; exit "$EX_USAGE" ;;
   esac
@@ -1354,6 +1399,25 @@ status=$status
 updated_at=$(utc_now)
 "
   record_event "session.$status" "$status" session.record "$sid" "$fingerprint" "$(basename "$record")" || true
+}
+
+mark_send_unknown_session() {
+  local record="$1" kind="$2" model="$3" effort="$4" fingerprint="$5"
+  if [[ -z "${CURRENT_SLOT_ID:-}" && -f "$record" ]]; then
+    CURRENT_SLOT_ID="$(lease_value "$record" slotId || true)"
+    CURRENT_SLOT_CONTAINER="$(lease_value "$record" slotContainer || true)"
+    CURRENT_SLOT_STATE_PATH="$(lease_value "$record" slotStatePath || true)"
+  fi
+  if [[ -n "${CURRENT_SLOT_ID:-}" && -z "${CURRENT_SLOT_CONTAINER:-}" ]]; then
+    CURRENT_SLOT_CONTAINER="$(slot_container_for_id "$CURRENT_SLOT_ID")"
+  fi
+  if [[ -n "${CURRENT_SLOT_ID:-}" && -z "${CURRENT_SLOT_STATE_PATH:-}" ]]; then
+    CURRENT_SLOT_STATE_PATH="$(slot_state_dir "$CURRENT_SLOT_ID")"
+  fi
+  write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "" send_unknown_session
+  if [[ -n "${CURRENT_SLOT_ID:-}" ]]; then
+    write_slot_state "$CURRENT_SLOT_ID" ready "" 0
+  fi
 }
 
 record_attachment_count() {
@@ -1757,6 +1821,27 @@ slot_repair_delay_seconds() {
   local delay="${GPT_WEBAI_SLOT_REPAIR_BACKOFF_SECONDS:-60}"
   [[ "$delay" =~ ^[0-9]+$ ]] || delay=60
   printf '%s' "$delay"
+}
+
+send_session_retry_delays() {
+  local raw="${GPT_WEBAI_SEND_SESSION_RETRY_DELAYS:-}" retries delay index value
+  if [[ -z "$raw" && -n "${GPT_WEBAI_SEND_SESSION_RETRY_ATTEMPTS:-}${GPT_WEBAI_SEND_SESSION_RETRY_DELAY_SECONDS:-}" ]]; then
+    retries="${GPT_WEBAI_SEND_SESSION_RETRY_ATTEMPTS:-5}"
+    delay="${GPT_WEBAI_SEND_SESSION_RETRY_DELAY_SECONDS:-3}"
+    [[ "$retries" =~ ^[0-9]+$ && "$retries" -gt 0 ]] || retries=5
+    [[ "$delay" =~ ^[0-9]+$ ]] || delay=3
+    for ((index = 1; index <= retries; index++)); do
+      printf '%s\n' "$delay"
+    done
+    return 0
+  fi
+  raw="${raw:-1 3 5 10 15}"
+  raw="${raw//,/ }"
+  for value in $raw; do
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$value"
+    fi
+  done
 }
 
 slot_repair_action_allowed() {
@@ -2353,8 +2438,12 @@ poll_session() {
 send_for_session() {
   local __outvar="$1" record="$2" kind="$3" model="$4" effort="$5" fingerprint="$6" prompt="$7"
   shift 7
-  local output status session_id="" record_status=""
+  local output status session_id="" record_status="" attempt=1 retry_index=0 delay
+  local -a retry_delays=()
 
+  while IFS= read -r delay || [[ -n "$delay" ]]; do
+    [[ -n "$delay" ]] && retry_delays+=("$delay")
+  done < <(send_session_retry_delays)
   while :; do
     if session_id="$(record_session_id "$record" 2>/dev/null || true)"; [[ -n "$session_id" ]]; then
       CURRENT_SESSION_ID="$session_id"
@@ -2363,9 +2452,6 @@ send_for_session() {
       return 0
     fi
     record_status="$(session_record_status "$record" 2>/dev/null || true)"
-    if [[ "$record_status" == send_started ]]; then
-      die_hard "send started without sessionId for $fingerprint"
-    fi
 
     write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "" send_started
     if agbrowse_send output "$model" "$effort" "$prompt" "$@"; then
@@ -2380,7 +2466,6 @@ send_for_session() {
       if json_is_valid "$output" && json_auth_required "$output"; then
         die_hard "auth_required during send: $output"
       fi
-      die_hard "send unknown session after send_started: $output"
     else
       status=$?
     fi
@@ -2392,7 +2477,18 @@ send_for_session() {
       printf -v "$__outvar" '%s' "$session_id"
       return 0
     fi
-    die_hard "send unknown session after send_started: exit=$status output=$output"
+    if [[ "$retry_index" -ge "${#retry_delays[@]}" ]]; then
+      mark_send_unknown_session "$record" "$kind" "$model" "$effort" "$fingerprint"
+      die_hard "send unknown session after $attempt send attempt(s): exit=${status:-0} output=$output"
+    fi
+    delay="${retry_delays[$retry_index]}"
+    record_event send.unknown_session recovering session.send_retry "" "$fingerprint" "$(basename "$record")" || true
+    retry_index=$((retry_index + 1))
+    attempt=$((attempt + 1))
+    if [[ "$delay" -gt 0 ]]; then
+      sleep "$delay"
+    fi
+    ensure_browser_quiet
   done
 }
 
@@ -2444,9 +2540,6 @@ cmd_run() {
 
   sid="$(record_session_id "$record" 2>/dev/null || true)"
   record_status="$(session_record_status "$record" 2>/dev/null || true)"
-  if [[ -z "$sid" && "$record_status" == send_started ]]; then
-    die_hard "send started without sessionId for $fingerprint"
-  fi
 
   if [[ -n "$sid" ]]; then
     CURRENT_SESSION_ID="$sid"
@@ -2622,9 +2715,6 @@ cmd_queue() {
     fi
     poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
     return 0
-  fi
-  if [[ "$status" == send_started ]]; then
-    die_hard "send started without sessionId for $fingerprint"
   fi
   found_slot="$(session_record_value "$record" slotId || true)"
   if [[ -n "$found_slot" ]]; then

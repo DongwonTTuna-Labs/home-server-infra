@@ -54,12 +54,38 @@ Use this only when `gptpro`, `gptxhigh`, or `gpt-webai-lifecycle` returns a brow
   the page shows login/signup or anonymous-use copy, the slot is
   `auth.needs_login`/`reseed_login`; do not treat responses, attachments, or
   sidebar history from that slot as authenticated Pro work.
-- `send_started` without `sessionId` is a no-resend state. Do not resend merely
-  because staging, docker exec, provider JSON parsing, or session capture failed
-  after `send_started`; follow `send.unknown_session` recovery or an explicit
-  operator clear procedure.
+- A send attempt without `sessionId` is not proof that ChatGPT received the
+  prompt. Lifecycle retries this pre-session failure with bounded backoff
+  before returning `send.unknown_session`. Treat `send.unknown_session` as "not
+  complete"; do not count it as a provider answer or attachment verdict.
 - `browser ensure` without `--slot` is not a GPT delegation recovery path in
   slot-only mode.
+
+## Slot Release Contract
+
+- Every GPT slot use must enter and leave through `gptpro`, `gptxhigh`, or
+  `gpt-webai-lifecycle`. Do not raw-use `agbrowse web-ai` or leave a manual
+  Chrome/CDP session as the operational path.
+- A supervised use is not finished when the answer text is visible. It is
+  finished only after the wrapper/lifecycle command exits and the slot runtime
+  lease is released.
+- After any interruption, aborted terminal, SSH disconnect, manual CDP bridge,
+  or operator browser probe, run:
+  ```bash
+  gpt-webai-lifecycle status
+  ```
+  If it reports stale holders or stale locks, run:
+  ```bash
+  gpt-webai-lifecycle cleanup --apply
+  gpt-webai-lifecycle status
+  ```
+- The required release evidence is `holders=0`, `locks=0`, and the affected
+  slot status back to `ready`. Do not start a new manual slot action until this
+  is true.
+- Current lifecycle release writes the slot `ready` state and releases its
+  runtime lock. It does not stop Chromium or the slot container. Browser
+  shutdown-on-release is a separate implementation requirement; do not document
+  or assume per-use browser clean-start behavior until that code exists.
 
 ## Attachments
 
@@ -186,4 +212,7 @@ If the wrapper reports `CDP connection failed`, `ECONNREFUSED 127.0.0.1:9222`, `
 - `status` and `cleanup --dry-run` are enough as evidence. Do not loop on manual probes.
 - If a wrapper process is still running, keep polling that exec session.
 - If a free slot exists, a new request may start even while another slot is busy.
-- Never kill Chrome, delete slot browser state, prune sessions, or call raw `agbrowse web-ai` outside supervisor/slot cleanup.
+- Never kill Chrome, delete slot browser state, prune sessions, or call raw
+  `agbrowse web-ai` outside supervisor/slot cleanup. If a future lifecycle
+  release command owns browser shutdown, use that command instead of ad hoc
+  process kills.

@@ -60,6 +60,8 @@ The supervisor owns:
 - `sessionId -> slotId` pinning for resume/poll
 - duplicate-send prevention by request fingerprint
 - slot-specific `docker exec` execution
+- slot lease release at the end of every supervised `run`, `resume`, or
+  `queue resume`
 - attachment capsule staging into `/broker-attachments`
 - compound extension preservation for files such as `.tar.gz`
 - `ATTACHMENT_ACCESS_GATE` prompts and `provider.attachment_unavailable`
@@ -243,11 +245,22 @@ result as a file-based review success.
 - A `sessionId` maps to the original `slotId`; resumes stay on that slot.
 - If all slots are busy or repairing, the supervisor returns a queued envelope
   with `queue resume --request REQUEST_FINGERPRINT`.
-- If a send starts but no `sessionId` is recorded, do not resend the same
-  fingerprint. Follow the `send.unknown_session` recovery envelope.
+- If a send attempt returns without a `sessionId`, the lifecycle treats it as
+  not proven to have reached ChatGPT and retries before returning
+  `send.unknown_session`.
 - If a slot is `repairing`, `warming`, `reseed_login`, or `degraded`, the broker
   will not allocate it for new work.
 - Login state is part of readiness. Composer visibility alone is not enough.
+- Completion is not only "got an answer". A supervised use is not operationally
+  complete until the wrapper/lifecycle process exits and `gpt-webai-lifecycle
+  status` shows `holders=0`, `locks=0`, and the used slot back at `ready`.
+- Do not leave a manual/debug slot session half-open. After any interrupted
+  wrapper, SSH disconnect, manual browser probe, or operator CDP bridge, run
+  `gpt-webai-lifecycle status`; if stale holders or locks are reported, run
+  `gpt-webai-lifecycle cleanup --apply`, then re-check status.
+- Current release semantics mark the slot `ready` and release the runtime lock;
+  they do not stop the slot Chromium process. Do not claim browser-per-request
+  shutdown/clean-start behavior until lifecycle implements it explicitly.
 
 ## Security Notes
 
@@ -265,15 +278,29 @@ result as a file-based review success.
 bash -n stacks/gpt-webai-slot-pool/bin/gpt-webai-lifecycle
 bash -n stacks/gpt-webai-slot-pool/scripts/slot-entrypoint.sh
 bash -n stacks/gpt-webai-slot-pool/scripts/slot-healthcheck.sh
+```
+
+Run static repository checks with the existing fake lifecycle suite:
+
+```bash
 docker compose -f stacks/gpt-webai-slot-pool/compose.yaml config --services
 GPT_WEBAI_TEST_ROOT="$PWD/.omo/evidence/gpt-webai-lifecycle/local" \
   stacks/gpt-webai-slot-pool/tests/gpt-webai-lifecycle/test.sh all
 ```
 
-For a real end-to-end smoke, first complete manual login for at least one slot,
-then run:
+Live smoke is provider-facing by default and creates real ChatGPT Pro
+conversations. Complete login or auth seeding first, then run the default
+`qa-fast` matrix:
 
 ```bash
-gpt-webai-lifecycle browser ensure --slot slot-01
-gptpro "Reply with exactly: GPT_SLOT_OK"
+stacks/gpt-webai-slot-pool/scripts/live-smoke.sh
 ```
+
+Run the full 1/5/10-width matrix explicitly:
+
+```bash
+stacks/gpt-webai-slot-pool/scripts/live-smoke.sh --case qa-full
+```
+
+For the live smoke matrix, see
+`stacks/gpt-webai-slot-pool/SMOKE_TESTS.md`.

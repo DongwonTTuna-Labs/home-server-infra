@@ -80,6 +80,7 @@ run_supervisor() {
     GPT_WEBAI_FAKE_AUTH_STATE="${fake_auth_state-}" \
     GPT_WEBAI_BROWSER_READY_ATTEMPTS="${ready_attempts:-5}" \
     GPT_WEBAI_BROWSER_READY_DELAY="${ready_delay:-0}" \
+    GPT_WEBAI_SEND_SESSION_RETRY_DELAYS="${send_session_retry_delays:-1 3 5 10 15}" \
     GPTPRO_TIMEOUT="${GPTPRO_TIMEOUT-}" \
     GPTXHIGH_TIMEOUT="${GPTXHIGH_TIMEOUT-}" \
     CHROME_BINARY_PATH="${chrome_binary:-$test_root/fake-chrome}" \
@@ -131,9 +132,18 @@ state_core() {
   assert_contains 'EX_USAGE=2' "$constants_out"
   assert_contains 'EX_LOCK=75' "$constants_out"
 
+  retry_delays_out="$test_root/send-retry-delays.out"
+  run_supervisor __test send-retry-delays > "$retry_delays_out"
+  assert_eq "$(paste -sd, "$retry_delays_out")" "1,3,5,10,15"
+
   run_supervisor __test atomic-write records/session.json '{"sessionId":"sid-ok"}'
   assert_file "$state_dir/records/session.json"
   assert_eq "$(<"$state_dir/records/session.json")" '{"sessionId":"sid-ok"}'
+
+  lock_subshell_out="$test_root/lock-substitution.out"
+  run_supervisor __test lock-substitution > "$lock_subshell_out"
+  assert_contains 'lock_survived=1' "$lock_subshell_out"
+  assert_contains 'lock_released=1' "$lock_subshell_out"
 
   if GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP=1 run_supervisor __test atomic-write records/session.json '{bad-json'; then
     fail 'interrupted atomic write unexpectedly succeeded'
@@ -194,6 +204,7 @@ reset_session_case() {
   display_value=":99"
   ready_attempts=5
   ready_delay=0
+  send_session_retry_delays="0 0 0 0 0"
   fake_auth_state=authenticated
 
   safe_rm_rf "$case_root"
@@ -604,6 +615,15 @@ EOF
   assert_contains 'BROWSER_AGENT_HOME='"$state_dir"'/slots/slot-02/state CDP_PORT=9224' "$fake_agbrowse_root/browser-agent-home-calls"
   assert_session_record_contains sid-slot-two 'slotId=slot-02'
 
+  reset_slot_case slot-missing-holder-lock-not-stolen
+  mkdir -p "$state_dir/locks/runtime-slot-slot-01.lock"
+  write_fake_sequence send-sequence sid:sid-slot-missing-holder
+  write_fake_sequence poll-sequence done:missing-holder
+  run_supervisor run --kind pro --prompt 'slot missing holder' > "$case_root/out" 2> "$case_root/err"
+  assert_contains '"sessionId":"sid-slot-missing-holder"' "$case_root/out"
+  assert_contains 'BROWSER_AGENT_HOME='"$state_dir"'/slots/slot-02/state CDP_PORT=9224' "$fake_agbrowse_root/browser-agent-home-calls"
+  assert_session_record_contains sid-slot-missing-holder 'slotId=slot-02'
+
   local blocked_status
   for blocked_status in repairing warming reseed_login degraded; do
     reset_slot_case "slot-skip-$blocked_status"
@@ -835,19 +855,39 @@ EOF
   assert_success_envelope_fields "$case_root/out" input.invalid_file needs_user_action
   assert_command_count 'web-ai send' 0
 
-  reset_slot_case slot-send-started-no-resend
-  write_fake_sequence send-sequence crash-no-sid sid:must-not-send
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'slot unknown sid')"
+  reset_slot_case slot-send-no-session-retries
+  unknown_fp="$(request_fingerprint_fixture pro pro extended 'slot no sid retry')"
+  write_fake_sequence send-sequence crash-no-sid provider-missing-fields sid:sid-after-retry
+  write_fake_sequence poll-sequence done:no-session-recovered
+  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'slot no sid retry')"
+  assert_eq "$exit_code" 0
+  assert_contains '"sessionId":"sid-after-retry"' "$case_root/out"
+  assert_command_count 'web-ai send' 3
+  assert_command_count 'web-ai poll' 1
+  assert_contains 'status=done' "$state_dir/sessions/$unknown_fp.record"
+  assert_session_record_contains sid-after-retry 'slotId=slot-01'
+  assert_event_reason send.unknown_session
+  run_supervisor status > "$case_root/status.out" 2> "$case_root/status.err"
+  assert_contains 'slot_01_status=ready' "$case_root/status.out"
+
+  reset_slot_case slot-send-no-session-retry-exhausted
+  send_session_retry_delays="0 0"
+  unknown_fp="$(request_fingerprint_fixture pro pro extended 'slot no sid exhausted')"
+  write_fake_sequence send-sequence crash-no-sid provider-missing-fields crash-no-sid sid:sid-exhausted-rerun
+  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'slot no sid exhausted')"
   assert_eq "$exit_code" 0
   assert_success_envelope_fields "$case_root/out" send.unknown_session recovering
   json_field_absent "$case_root/out" resumeCommand
-  assert_command_count 'web-ai send' 1
-  write_fake_sequence send-sequence fail-if-called
-  exit_code="$(run_nonnetwork_command "$case_root/reuse.out" "$case_root/reuse.err" run_supervisor run --kind pro --prompt 'slot unknown sid')"
+  assert_command_count 'web-ai send' 3
+  assert_contains 'status=send_unknown_session' "$state_dir/sessions/$unknown_fp.record"
+  run_supervisor status > "$case_root/status.out" 2> "$case_root/status.err"
+  assert_contains 'slot_01_status=ready' "$case_root/status.out"
+  write_fake_sequence poll-sequence done:exhausted-rerun
+  exit_code="$(run_nonnetwork_command "$case_root/reuse.out" "$case_root/reuse.err" run_supervisor run --kind pro --prompt 'slot no sid exhausted')"
   assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/reuse.out" send.unknown_session recovering
-  json_field_absent "$case_root/reuse.out" resumeCommand
-  assert_command_count 'web-ai send' 1
+  assert_contains '"sessionId":"sid-exhausted-rerun"' "$case_root/reuse.out"
+  assert_command_count 'web-ai send' 4
+  assert_command_count 'web-ai poll' 1
 
   printf 'PASS slot-broker\n'
   printf 'cleanup: fake slot broker cases retained under %s; no real Docker/Chrome/ChatGPT used\n' "$test_root"
