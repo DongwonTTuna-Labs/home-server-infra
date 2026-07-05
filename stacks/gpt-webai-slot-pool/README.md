@@ -38,6 +38,50 @@ gpt-webai-lifecycle queue resume --request REQUEST_FINGERPRINT
 Do not use raw `agbrowse web-ai` or MCP `web_ai_*` tools for ordinary GPT
 delegation. Those paths bypass the slot ledger and duplicate-send guardrails.
 
+## Included Supervisor
+
+This stack also vendors the lifecycle supervisor used by the slot broker:
+
+```text
+stacks/gpt-webai-slot-pool/bin/gpt-webai-lifecycle
+```
+
+Install or refresh the operator copy with:
+
+```bash
+install -m 0755 \
+  stacks/gpt-webai-slot-pool/bin/gpt-webai-lifecycle \
+  "$HOME/.local/bin/gpt-webai-lifecycle"
+```
+
+The supervisor owns:
+
+- ready-slot allocation and queued envelopes
+- `sessionId -> slotId` pinning for resume/poll
+- duplicate-send prevention by request fingerprint
+- slot-specific `docker exec` execution
+- attachment capsule staging into `/broker-attachments`
+- compound extension preservation for files such as `.tar.gz`
+- `ATTACHMENT_ACCESS_GATE` prompts and `provider.attachment_unavailable`
+  recovery envelopes
+- ChatGPT login-state gating; a visible login/signup UI makes the slot
+  `auth.needs_login`/`reseed_login`, not `ready`
+
+Offline regression tests live under:
+
+```text
+stacks/gpt-webai-slot-pool/tests/gpt-webai-lifecycle
+```
+
+The repo copy of the operator runbook is:
+
+```text
+stacks/gpt-webai-slot-pool/docs/gpt-webai-lifecycle-runbook.md
+```
+
+If the active Codex runbook needs to be refreshed from this repo, copy it to
+`$HOME/.codex/runbooks/gpt-webai-lifecycle.md`.
+
 ## Bootstrap
 
 Let the lifecycle supervisor create the host state directories with the same
@@ -218,9 +262,12 @@ result as a file-based review success.
 ## Smoke Checks
 
 ```bash
+bash -n stacks/gpt-webai-slot-pool/bin/gpt-webai-lifecycle
 bash -n stacks/gpt-webai-slot-pool/scripts/slot-entrypoint.sh
 bash -n stacks/gpt-webai-slot-pool/scripts/slot-healthcheck.sh
 docker compose -f stacks/gpt-webai-slot-pool/compose.yaml config --services
+GPT_WEBAI_TEST_ROOT="$PWD/.omo/evidence/gpt-webai-lifecycle/local" \
+  stacks/gpt-webai-slot-pool/tests/gpt-webai-lifecycle/test.sh all
 ```
 
 For a real end-to-end smoke, first complete manual login for at least one slot,

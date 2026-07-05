@@ -1,0 +1,2704 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+exec 3>&1
+
+EX_OK=0
+EX_USAGE=2
+EX_HARD=70
+EX_LOCK=75
+
+STATE_DIR=""
+TMPDIR=""
+BOOT_ID=""
+CURRENT_KIND=""
+CURRENT_SESSION_ID=""
+CURRENT_TARGET_ID=""
+CURRENT_CONVERSATION_URL=""
+CURRENT_SLOT_ID=""
+CURRENT_SLOT_CONTAINER=""
+CURRENT_SLOT_STATE_PATH=""
+CURRENT_RUN_ID=""
+CURRENT_FENCING_TOKEN=""
+CURRENT_REQUEST_DIR=""
+CURRENT_ATTACHMENT_CAPSULE=""
+CURRENT_ATTACHMENT_STAGE=""
+CURRENT_REQUEST_ID=""
+ENVELOPE_CONTEXT=0
+CURRENT_COMMAND=""
+RUNTIME_LOCK_DIRS=()
+RUNTIME_LOCK_HOLDERS=()
+ATTACHMENT_SOURCE_PATHS=()
+ATTACHMENT_SHA256S=()
+ATTACHMENT_SIZES=()
+ATTACHMENT_SAFE_EXTS=()
+ATTACHMENT_STAGED_NAMES=()
+
+usage_text() {
+  cat <<'EOF'
+Usage: gpt-webai-lifecycle status
+       gpt-webai-lifecycle cleanup --dry-run|--apply
+       gpt-webai-lifecycle constants
+       gpt-webai-lifecycle browser ensure --slot SLOT_ID
+       gpt-webai-lifecycle run --kind pro|xhigh [--file PATH ...] --prompt PROMPT
+       gpt-webai-lifecycle resume --kind pro|xhigh --session SID
+       gpt-webai-lifecycle queue resume --request FINGERPRINT
+EOF
+}
+
+usage() {
+  usage_text >&2
+}
+
+json_quote() {
+  local value="$1"
+  python3 - "$value" <<'PY'
+import json
+import sys
+
+print(json.dumps(sys.argv[1], ensure_ascii=False), end="")
+PY
+}
+
+compact_message() {
+  local value="$1"
+  value="${value//$'\n'/ }"
+  value="${value//$'\r'/ }"
+  if [[ "${#value}" -gt 500 ]]; then
+    value="${value:0:497}..."
+  fi
+  printf '%s' "$value"
+}
+
+network_disconnected_evidence() {
+  local text="${1,,}"
+  case "$text" in
+    *err_internet_disconnected*|*dns_probe_finished_no_internet*|*dns_probe_finished_nxdomain*|*dns\ lookup\ failed*|*dns\ failure*|*dns\ resolution\ failed*|*getaddrinfo\ enotfound*|*getaddrinfo\ eai_again*|*enotfound*|*eai_again*|*network\ is\ unreachable*|*no\ route\ to\ host*|*temporary\ failure\ in\ name\ resolution*|*network\ disconnected*|*internet\ disconnected*|*network\ offline*|*status\ offline*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+reason_code_for_message() {
+  local message="${1,,}"
+  if network_disconnected_evidence "$message"; then
+    printf 'network.disconnected'
+  elif [[ "$message" == *'missing chrome binary'* ]]; then
+    printf 'browser.missing_chrome'
+  elif [[ "$message" == *'display unavailable'* ]]; then
+    printf 'browser.missing_display'
+  elif [[ "$message" == *'browser readiness timed out'* || "$message" == *'cdp connection failed'* || "$message" == *'agbrowse status failed'* || "$message" == *'agbrowse start failed'* || "$message" == *'slot browser repair failed'* ]]; then
+    printf 'browser.cdp_unreachable'
+  elif [[ "$message" == *'blank tab'* || "$message" == *'about:blank'* ]]; then
+    printf 'browser.blank_tab'
+  elif [[ "$message" == *'could not classify browser status'* || "$message" == *'malformed browser status'* ]]; then
+    printf 'browser.malformed_status'
+  elif [[ "$message" == *'browser cdp reachable but not headed'* ]]; then
+    printf 'browser.not_headed'
+  elif [[ "$message" == *'state dir unavailable'* || "$message" == *'refusing supervisor state under /tmp'* ]]; then
+    printf 'state.unavailable'
+  elif [[ "$message" == *'malformed '* && "$message" == *' json'* ]]; then
+    printf 'provider.malformed_json'
+  elif [[ "$message" == *'send json did not contain sessionid'* || "$message" == *'poll json did not contain sessionid'* || "$message" == *'unexpected provider status'* ]]; then
+    printf 'provider.schema_drift'
+  elif [[ "$message" == *'attachment unavailable'* || "$message" == *'attachment missing'* ]]; then
+    printf 'provider.attachment_unavailable'
+  elif [[ "$message" == *'send failed before sessionid'* ]]; then
+    printf 'send.no_session_id'
+  elif [[ "$message" == *'send started without sessionid'* || "$message" == *'send unknown session'* ]]; then
+    printf 'send.unknown_session'
+  elif [[ "$message" == *'slot pool busy'* || "$message" == *'all slots busy'* ]]; then
+    printf 'slot.pool_busy'
+  elif [[ "$message" == *'attachment changed'* ]]; then
+    printf 'input.attachment_changed'
+  elif [[ "$message" == *'attachment too large'* ]]; then
+    printf 'input.attachment_too_large'
+  elif [[ "$message" == *'sessions show failed'* ]]; then
+    printf 'session.show_failed'
+  elif [[ "$message" == *'sessions resume failed'* ]]; then
+    printf 'session.resume_failed'
+  elif [[ "$message" == *'poll failed'* ]]; then
+    printf 'session.poll_recovery_exhausted'
+  elif [[ "$message" == *'login_required'* || "$message" == *'auth_required'* || "$message" == *'login required'* ]]; then
+    printf 'auth.needs_login'
+  else
+    printf 'lifecycle.recovering'
+  fi
+}
+
+status_for_reason() {
+  case "$1" in
+    session.running)
+      printf 'running'
+      ;;
+    slot.pool_busy)
+      printf 'queued'
+      ;;
+    auth.needs_login|browser.missing_chrome|browser.missing_display|browser.not_headed|state.*)
+      printf 'needs_user_action'
+      ;;
+    *)
+      printf 'recovering'
+      ;;
+  esac
+}
+
+next_command_for_reason() {
+  case "$1" in
+    input.*)
+      printf 'gpt-webai-lifecycle --help'
+      ;;
+    browser.*)
+      if [[ -n "${CURRENT_SLOT_ID:-}" ]]; then
+        printf 'gpt-webai-lifecycle browser ensure --slot %s' "$CURRENT_SLOT_ID"
+      else
+        printf 'gpt-webai-lifecycle status'
+      fi
+      ;;
+    *)
+      printf 'gpt-webai-lifecycle status'
+      ;;
+  esac
+}
+
+extract_session_id_from_message() {
+  local message="$1"
+  if [[ "$message" =~ for[[:space:]]+([A-Za-z0-9._:-]+) ]]; then
+    local sid="${BASH_REMATCH[1]}"
+    printf '%s' "${sid%:}"
+    return 0
+  fi
+  return 1
+}
+
+resume_command_for_session() {
+  local sid="$1"
+  [[ -n "$sid" && -n "$CURRENT_KIND" ]] || return 1
+  printf 'gpt-webai-lifecycle resume --kind %s --session %s' "$CURRENT_KIND" "$sid"
+}
+
+public_message_for_reason() {
+  local reason="$1" message="$2"
+  case "$reason" in
+    network.disconnected)
+      printf 'network disconnected evidence observed'
+      ;;
+    provider.malformed_json)
+      printf 'provider returned malformed JSON'
+      ;;
+    provider.schema_drift)
+      printf 'provider response did not include the required session fields'
+      ;;
+    provider.attachment_unavailable)
+      printf 'provider did not expose attached files to the model; do not trust this response as a file-based result'
+      ;;
+    send.no_session_id)
+      printf 'send failed before a sessionId was recorded'
+      ;;
+    send.unknown_session)
+      printf 'send may have started but no sessionId was recorded; do not resend this fingerprint'
+      ;;
+    slot.pool_busy)
+      printf 'all GPT slots are busy or repairing; queued for a later supervised retry'
+      ;;
+    slot.pool_unavailable)
+      printf 'slot-backed session requires its original slot pool'
+      ;;
+    slot.busy)
+      printf 'slot is busy; retry slot-specific recovery later'
+      ;;
+    slot.slot_required)
+      printf 'slot mode browser recovery requires an explicit slot'
+      ;;
+    input.attachment_changed)
+      printf 'attachment changed while preparing the request'
+      ;;
+    input.attachment_too_large)
+      printf 'attachment exceeds the configured size limit'
+      ;;
+    session.show_failed)
+      printf 'session lookup failed; retry by resuming the same session'
+      ;;
+    session.resume_failed)
+      printf 'session resume failed; retry the same session later'
+      ;;
+    session.poll_recovery_exhausted)
+      printf 'poll recovery attempts were exhausted; resume the same session later'
+      ;;
+    session.running)
+      printf 'session is still running; resume the same session later'
+      ;;
+    auth.needs_login)
+      printf 'provider requires login; reseed or authenticate the slot before delegating Pro work'
+      ;;
+    *)
+      compact_message "$message"
+      ;;
+  esac
+}
+
+emit_envelope() {
+  local ok="$1" status="$2" hard_failure="$3" network_disconnected="$4" reason="$5" message="$6" next_command="${7:-}" resume_command="${8:-}" usage_error="${9:-0}"
+
+  record_event "$reason" "$status" envelope || true
+  printf '{"ok":%s,"status":%s,"hardFailure":%s,"networkDisconnected":%s,"reason":%s,"message":%s' \
+    "$ok" \
+    "$(json_quote "$status")" \
+    "$hard_failure" \
+    "$network_disconnected" \
+    "$(json_quote "$reason")" \
+    "$(json_quote "$message")"
+  if [[ -n "$next_command" ]]; then
+    printf ',"nextCommand":%s' "$(json_quote "$next_command")"
+  fi
+  if [[ -n "$resume_command" ]]; then
+    printf ',"resumeCommand":%s' "$(json_quote "$resume_command")"
+  fi
+  if [[ -n "${CURRENT_REQUEST_ID:-}" ]]; then
+    printf ',"requestId":%s' "$(json_quote "$CURRENT_REQUEST_ID")"
+  fi
+  if [[ "$usage_error" = 1 ]]; then
+    printf ',"usageError":true'
+  fi
+  printf '}\n'
+}
+
+public_usage() {
+  local reason="$1" message="$2"
+  emit_envelope true needs_user_action false false "$reason" "$message" 'gpt-webai-lifecycle --help' '' 1
+  exit "$EX_OK"
+}
+
+die_usage() {
+  printf '%s\n' "$*" >&2
+  exit "$EX_USAGE"
+}
+
+die_hard() {
+  local message="$*" reason status next_command resume_command="" sid=""
+
+  if network_disconnected_evidence "$message"; then
+    emit_envelope true recovering false true network.disconnected 'network disconnected evidence observed' 'gpt-webai-lifecycle status' >&3
+    exit "$EX_OK"
+  fi
+
+  if [[ "${BASH_SUBSHELL:-0}" -gt 0 ]]; then
+    printf '%s\n' "$message" >&2
+    exit "$EX_HARD"
+  fi
+
+  if [[ "$ENVELOPE_CONTEXT" != 1 ]]; then
+    printf '%s\n' "$message" >&2
+    exit "$EX_HARD"
+  fi
+
+  reason="$(reason_code_for_message "$message")"
+  status="$(status_for_reason "$reason")"
+  next_command="$(next_command_for_reason "$reason")"
+  case "$reason" in
+    send.no_session_id|send.unknown_session)
+      sid=""
+      ;;
+    session.*|auth.needs_login|provider.*)
+      sid="$(extract_session_id_from_message "$message" || true)"
+      [[ -n "$sid" ]] || sid="$CURRENT_SESSION_ID"
+      ;;
+    *)
+      sid="$CURRENT_SESSION_ID"
+      ;;
+  esac
+  if [[ -n "$sid" ]]; then
+    resume_command="$(resume_command_for_session "$sid" || true)"
+  fi
+  emit_envelope true "$status" false false "$reason" "$(public_message_for_reason "$reason" "$message")" "$next_command" "$resume_command" 0 >&3
+  exit "$EX_OK"
+}
+
+valid_id() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9._:-]+$ ]]
+}
+
+require_id() {
+  local label="$1"
+  local value="$2"
+  valid_id "$value" || die_usage "invalid id for $label: $value"
+}
+
+current_boot_id() {
+  local value=""
+  if [[ -n "${GPT_WEBAI_BOOT_ID:-}" ]]; then
+    value="$GPT_WEBAI_BOOT_ID"
+  elif [[ -n "${GPT_WEBAI_BOOT_ID_FILE:-}" && -r "$GPT_WEBAI_BOOT_ID_FILE" ]]; then
+    IFS= read -r value < "$GPT_WEBAI_BOOT_ID_FILE" || true
+  elif [[ -r /proc/sys/kernel/random/boot_id ]]; then
+    IFS= read -r value < /proc/sys/kernel/random/boot_id || true
+  fi
+
+  if [[ -z "$value" ]]; then
+    value="host:$(hostname 2>/dev/null || printf unknown)"
+  fi
+
+  printf '%s' "$value"
+}
+
+state_default() {
+  printf '%s/gpt-webai-lifecycle' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+
+agbrowse_bin() {
+  local candidate="${GPT_WEBAI_AGBROWSE_BIN:-}"
+  if [[ -z "$candidate" ]]; then
+    candidate="/home/dongwonttuna/.local/nodejs/node-v24.16.0-linux-x64/bin/agbrowse"
+  fi
+  [[ -x "$candidate" ]] || die_hard "agbrowse driver unavailable: $candidate"
+  printf '%s' "$candidate"
+}
+
+safe_state_dir() {
+  local __outvar="${1:-}" raw="${GPT_WEBAI_STATE_DIR:-$(state_default)}" resolved
+  case "$raw" in
+    /tmp|/tmp/*)
+      die_hard 'refusing supervisor state under /tmp'
+      ;;
+  esac
+
+  if ! mkdir -p "$raw" 2>/dev/null; then
+    die_hard "state dir unavailable: $raw"
+  fi
+  if ! cd "$raw" >/dev/null 2>&1; then
+    die_hard "state dir unavailable: $raw"
+  fi
+  [[ -w . ]] || die_hard "state dir unavailable: $raw"
+  resolved="$(pwd)"
+  if [[ -n "$__outvar" ]]; then
+    printf -v "$__outvar" '%s' "$resolved"
+  else
+    printf '%s\n' "$resolved"
+  fi
+}
+
+atomic_write_abs() {
+  local target="$1"
+  local content="$2"
+  local target_dir base tmp attempt
+
+  case "$target" in
+    "$STATE_DIR"/*) ;;
+    *) die_usage "atomic target outside state dir: $target" ;;
+  esac
+
+  target_dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  mkdir -p "$target_dir" "$STATE_DIR/tmp"
+
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    tmp="$STATE_DIR/tmp/.atomic-${base//[^A-Za-z0-9._-]/_}.$$.$attempt"
+    if ( set -o noclobber; : > "$tmp" ) 2>/dev/null; then
+      break
+    fi
+    tmp=""
+  done
+
+  [[ -n "${tmp:-}" ]] || die_hard 'could not allocate state temp file'
+  printf '%s' "$content" > "$tmp"
+
+  if [[ "${GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP:-0}" = 1 ]]; then
+    printf 'interrupted after state temp write: %s\n' "$tmp" >&2
+    return 97
+  fi
+
+  mv -f "$tmp" "$target"
+  chmod 0600 "$target" 2>/dev/null || true
+}
+
+state_path() {
+  local rel="$1"
+  case "$rel" in
+    ''|/*|../*|*/../*|*/..)
+      die_usage "invalid state path: $rel"
+      ;;
+  esac
+  printf '%s/%s' "$STATE_DIR" "$rel"
+}
+
+atomic_write_rel() {
+  atomic_write_abs "$(state_path "$1")" "$2"
+}
+
+event_state_dir() {
+  local raw resolved
+  if [[ -z "$STATE_DIR" ]]; then
+    raw="${GPT_WEBAI_STATE_DIR:-$(state_default)}"
+    case "$raw" in
+      /tmp|/tmp/*)
+        return 1
+        ;;
+    esac
+    mkdir -p "$raw" 2>/dev/null || return 1
+    resolved="$(cd "$raw" >/dev/null 2>&1 && pwd)" || return 1
+    [[ -w "$resolved" ]] || return 1
+    STATE_DIR="$resolved"
+  fi
+
+  case "$STATE_DIR" in
+    /tmp|/tmp/*)
+      return 1
+      ;;
+  esac
+  mkdir -p "$STATE_DIR/events" 2>/dev/null || return 1
+  printf '%s\n' "$STATE_DIR/events"
+}
+
+record_event() {
+  local reason="$1" status="$2" event="$3" sid="${4:-$CURRENT_SESSION_ID}" fingerprint="${5:-}" record_key="${6:-}"
+  local event_dir event_file
+
+  event_dir="$(event_state_dir 2>/dev/null)" || return 0
+  event_file="$event_dir/lifecycle.jsonl"
+  python3 - "$event_file" "$event" "$reason" "$status" "${CURRENT_COMMAND:-}" "${CURRENT_KIND:-}" "$sid" "$fingerprint" "$record_key" <<'PY' || return 0
+import json
+import re
+import sys
+import time
+
+path, event, reason, status, command, kind, session_id, fingerprint, record_key = sys.argv[1:]
+
+def safe(value, pattern=r"^[A-Za-z0-9._:-]{1,200}$"):
+    return value if value and re.match(pattern, value) else ""
+
+payload = {
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "event": safe(event),
+    "reason": safe(reason),
+    "status": safe(status),
+}
+for key, value in (
+    ("command", safe(command, r"^[A-Za-z0-9._:-]{1,80}$")),
+    ("kind", safe(kind, r"^[A-Za-z0-9._:-]{1,40}$")),
+    ("sessionId", safe(session_id)),
+    ("fingerprint", safe(fingerprint, r"^[A-Za-z0-9._:-]{1,128}$")),
+    ("record", safe(record_key, r"^[A-Za-z0-9._:-]{1,180}$")),
+):
+    if value:
+        payload[key] = value
+
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+lease_value() {
+  local file="$1"
+  local key="$2"
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "$key="*) printf '%s' "${line#*=}"; return 0 ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+pid_alive() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+prune_holders_internal() {
+  local current_boot="$1"
+  local pruned=0
+  local file pid boot
+
+  shopt -s nullglob
+  for file in "$STATE_DIR"/holders/*.lease; do
+    pid="$(lease_value "$file" pid || true)"
+    boot="$(lease_value "$file" boot_id || true)"
+    if [[ "$boot" != "$current_boot" ]] || ! pid_alive "$pid"; then
+      rm -f "$file"
+      pruned=$((pruned + 1))
+    fi
+  done
+  shopt -u nullglob
+
+  printf '%s' "$pruned"
+}
+
+init_state() {
+  local should_prune="${1:-1}"
+  local interrupt_was_set=0
+  local interrupt_value=""
+  local slot_total slot_index slot_id slot_state slot_attachments
+
+  safe_state_dir STATE_DIR
+  mkdir -p "$STATE_DIR/tmp" "$STATE_DIR/holders" "$STATE_DIR/locks" "$STATE_DIR/sessions" "$STATE_DIR/records" "$STATE_DIR/run" "$STATE_DIR/requests" "$STATE_DIR/attachment-capsules" "$STATE_DIR/slots" "$STATE_DIR/auth-seed"
+  chmod 0700 "$STATE_DIR" "$STATE_DIR/tmp" "$STATE_DIR/holders" "$STATE_DIR/locks" "$STATE_DIR/sessions" "$STATE_DIR/records" "$STATE_DIR/run" "$STATE_DIR/requests" "$STATE_DIR/attachment-capsules" "$STATE_DIR/slots" "$STATE_DIR/auth-seed" 2>/dev/null || true
+  slot_total="$(slot_count)"
+  for ((slot_index = 1; slot_index <= slot_total; slot_index++)); do
+    slot_id="$(slot_id_for_index "$slot_index")"
+    slot_state="$STATE_DIR/slots/$slot_id/state"
+    slot_attachments="$STATE_DIR/slots/$slot_id/attachments"
+    mkdir -p "$slot_state" "$slot_attachments"
+    chmod 0700 "$slot_state" "$slot_attachments" 2>/dev/null || true
+  done
+  export TMPDIR="$STATE_DIR/tmp"
+  BOOT_ID="$(current_boot_id)"
+  if [[ "$should_prune" = 1 ]]; then
+    prune_holders_internal "$BOOT_ID" >/dev/null
+  fi
+  if [[ -n "${GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP+x}" ]]; then
+    interrupt_was_set=1
+    interrupt_value="$GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP"
+    unset GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP
+  fi
+  atomic_write_abs "$STATE_DIR/boot-id" "$BOOT_ID"
+  if [[ "$interrupt_was_set" -eq 1 ]]; then
+    export GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP="$interrupt_value"
+  fi
+}
+
+holder_count() {
+  local count=0
+  local file
+  shopt -s nullglob
+  for file in "$STATE_DIR"/holders/*.lease; do
+    count=$((count + 1))
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
+}
+
+lock_count() {
+  local count=0
+  local dir
+  shopt -s nullglob
+  for dir in "$STATE_DIR"/locks/*.lock; do
+    [[ -d "$dir" ]] && count=$((count + 1))
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
+}
+
+holder_stale_reason() {
+  local file="$1" current_boot="$2" pid boot
+  pid="$(lease_value "$file" pid || true)"
+  boot="$(lease_value "$file" boot_id || true)"
+  if [[ "$boot" != "$current_boot" ]]; then
+    printf 'previous-boot'
+    return 0
+  fi
+  if ! pid_alive "$pid"; then
+    printf 'dead-pid'
+    return 0
+  fi
+  return 1
+}
+
+lock_stale_reason() {
+  local dir="$1" current_boot="$2" holder_file="$dir/holder" pid boot
+  if [[ ! -f "$holder_file" ]]; then
+    printf 'missing-holder'
+    return 0
+  fi
+  pid="$(lease_value "$holder_file" pid || true)"
+  boot="$(lease_value "$holder_file" boot_id || true)"
+  if [[ "$boot" != "$current_boot" ]]; then
+    printf 'previous-boot'
+    return 0
+  fi
+  if ! pid_alive "$pid"; then
+    printf 'dead-pid'
+    return 0
+  fi
+  return 1
+}
+
+stale_holder_count() {
+  local count=0 file
+  shopt -s nullglob
+  for file in "$STATE_DIR"/holders/*.lease; do
+    if holder_stale_reason "$file" "$BOOT_ID" >/dev/null; then
+      count=$((count + 1))
+    fi
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
+}
+
+stale_lock_count() {
+  local count=0 dir
+  shopt -s nullglob
+  for dir in "$STATE_DIR"/locks/*.lock; do
+    if [[ -d "$dir" ]] && lock_stale_reason "$dir" "$BOOT_ID" >/dev/null; then
+      count=$((count + 1))
+    fi
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
+}
+
+one_line() {
+  local value="$1"
+  value="${value//$'\n'/ }"
+  printf '%s' "$value"
+}
+
+recoverable_job_count() {
+  local count=0 file status
+  shopt -s nullglob
+  for file in "$STATE_DIR"/sessions/*.record; do
+    status="$(lease_value "$file" status || true)"
+    case "$status" in
+      sent|running|resumed|timeout)
+        count=$((count + 1))
+        ;;
+    esac
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
+}
+
+print_recovery_summary() {
+  printf 'recoverable_jobs=%s\n' "$(recoverable_job_count)"
+}
+
+print_slot_summary() {
+  local enabled=0 count index slot_id state_file repair_file status="absent" attempts max_attempts next_retry
+  if slot_pool_enabled; then
+    enabled=1
+  fi
+  count="$(slot_count)"
+  printf 'slot_pool_enabled=%s\n' "$enabled"
+  printf 'slot_pool_total=%s\n' "$count"
+  for ((index = 1; index <= count; index++)); do
+    slot_id="$(slot_id_for_index "$index")"
+    state_file="$(slot_state_file "$slot_id")"
+    if slot_has_active_record "$slot_id"; then
+      status=busy
+    elif [[ -f "$state_file" ]]; then
+      status="$(lease_value "$state_file" status || printf unknown)"
+    else
+      status=ready
+    fi
+    printf '%s_status=%s\n' "${slot_id/-/_}" "$status"
+    repair_file="$(slot_repair_file "$slot_id")"
+    if [[ -f "$repair_file" ]]; then
+      attempts="$(lease_value "$repair_file" attempts || printf 0)"
+      max_attempts="$(lease_value "$repair_file" maxAttempts || slot_repair_max_attempts)"
+      next_retry="$(lease_value "$repair_file" nextRetryAt || true)"
+      printf '%s_repair_attempts=%s\n' "${slot_id/-/_}" "$attempts"
+      printf '%s_repair_max_attempts=%s\n' "${slot_id/-/_}" "$max_attempts"
+      [[ -n "$next_retry" ]] && printf '%s_next_retry_at=%s\n' "${slot_id/-/_}" "$next_retry"
+    fi
+  done
+}
+
+print_browser_record_summary() {
+  printf 'browser_owner=slot-only\n'
+}
+
+print_status_external_summaries() {
+  printf 'browser_cdp=not-checked\n'
+  printf 'sessions_total=0\n'
+  printf 'sessions_sent=0\n'
+  printf 'sessions_running=0\n'
+  printf 'sessions_timeout=0\n'
+  printf 'tabs_cleanup_candidates=0\n'
+  printf 'singleton_candidates=0\n'
+}
+
+cmd_status() {
+  local prior_boot="" boot_mismatch=0 pre_stale_holders=0
+  CURRENT_COMMAND=status
+  ENVELOPE_CONTEXT=1
+  safe_state_dir STATE_DIR
+  BOOT_ID="$(current_boot_id)"
+  if [[ -f "$STATE_DIR/boot-id" ]]; then
+    IFS= read -r prior_boot < "$STATE_DIR/boot-id" || true
+  fi
+  pre_stale_holders="$(stale_holder_count)"
+  init_state
+  if [[ -n "$prior_boot" && "$prior_boot" != "$BOOT_ID" ]]; then
+    boot_mismatch=1
+  fi
+  printf 'state=idle\n'
+  printf 'state_dir=%s\n' "$STATE_DIR"
+  printf 'tmpdir=%s\n' "$TMPDIR"
+  printf 'boot_id=%s\n' "$BOOT_ID"
+  printf 'boot_mismatch=%s\n' "$boot_mismatch"
+  printf 'holders=%s\n' "$(holder_count)"
+  printf 'stale_holders=%s\n' "$pre_stale_holders"
+  printf 'locks=%s\n' "$(lock_count)"
+  printf 'stale_locks=%s\n' "$(stale_lock_count)"
+  print_recovery_summary
+  print_slot_summary
+  print_browser_record_summary
+  print_status_external_summaries
+}
+
+cmd_constants() {
+  printf 'EX_OK=%s\n' "$EX_OK"
+  printf 'EX_USAGE=%s\n' "$EX_USAGE"
+  printf 'EX_HARD=%s\n' "$EX_HARD"
+  printf 'EX_LOCK=%s\n' "$EX_LOCK"
+}
+
+runtime_lock_dir() {
+  local key="$1"
+  printf '%s/locks/runtime-%s.lock' "$STATE_DIR" "$(safe_file_key "$key")"
+}
+
+runtime_lock_release_dir() {
+  local dir="$1" holder="$2" owner=""
+  [[ -d "$dir" ]] || return 0
+  if [[ -f "$dir/holder" ]]; then
+    owner="$(lease_value "$dir/holder" holder || true)"
+  fi
+  [[ "$owner" == "$holder" ]] || return 0
+  rm -f "$dir/holder"
+  rmdir "$dir" 2>/dev/null || true
+}
+
+runtime_lock_release_all() {
+  local index
+  for index in "${!RUNTIME_LOCK_DIRS[@]}"; do
+    runtime_lock_release_dir "${RUNTIME_LOCK_DIRS[$index]}" "${RUNTIME_LOCK_HOLDERS[$index]}"
+  done
+}
+
+runtime_lock_acquire() {
+  local key="$1" __holder_outvar="$2" dir holder reason
+  dir="$(runtime_lock_dir "$key")"
+  holder="runtime-$(safe_file_key "$key")-$$"
+
+  if ! mkdir "$dir" 2>/dev/null; then
+    if reason="$(lock_stale_reason "$dir" "$BOOT_ID" 2>/dev/null)" && ! lock_dir_has_extra_entries "$dir"; then
+      rm -f "$dir/holder"
+      rmdir "$dir" 2>/dev/null || true
+      mkdir "$dir" 2>/dev/null || return 1
+    else
+      return 1
+    fi
+  fi
+
+  atomic_write_abs "$dir/holder" "holder=$holder
+boot_id=$BOOT_ID
+pid=$$"
+  RUNTIME_LOCK_DIRS+=("$dir")
+  RUNTIME_LOCK_HOLDERS+=("$holder")
+  trap runtime_lock_release_all EXIT
+  printf -v "$__holder_outvar" '%s' "$holder"
+}
+
+runtime_lock_acquire_wait() {
+  local key="$1" __holder_outvar="$2" wait_seconds="${3:-0}"
+  local start now acquired_holder
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || wait_seconds=0
+  start="$(date +%s)"
+  while :; do
+    if runtime_lock_acquire "$key" acquired_holder; then
+      printf -v "$__holder_outvar" '%s' "$acquired_holder"
+      return 0
+    fi
+    now="$(date +%s)"
+    [[ $((now - start)) -lt "$wait_seconds" ]] || return 1
+    sleep 1
+  done
+}
+
+emit_slot_pool_busy() {
+  local fingerprint="$1"
+  CURRENT_REQUEST_ID="$fingerprint"
+  emit_envelope true queued false false slot.pool_busy "$(public_message_for_reason slot.pool_busy '')" "gpt-webai-lifecycle queue resume --request $fingerprint" '' 0 >&3
+}
+
+emit_slot_pool_unavailable() {
+  local sid="${1:-}" resume_command=""
+  if [[ -n "$sid" ]]; then
+    CURRENT_SESSION_ID="$sid"
+    resume_command="$(resume_command_for_session "$sid" || true)"
+  fi
+  emit_envelope true recovering false false slot.pool_unavailable "$(public_message_for_reason slot.pool_unavailable '')" 'gpt-webai-lifecycle status' "$resume_command" 0 >&3
+}
+
+emit_slot_busy() {
+  emit_envelope true recovering false false slot.busy "$(public_message_for_reason slot.busy '')" 'gpt-webai-lifecycle status' '' 0 >&3
+}
+
+emit_slot_required() {
+  emit_envelope true recovering false false slot.slot_required "$(public_message_for_reason slot.slot_required '')" 'gpt-webai-lifecycle status' '' 0 >&3
+}
+
+runtime_lock_release() {
+  local key="$1" holder="$2"
+  runtime_lock_release_dir "$(runtime_lock_dir "$key")" "$holder"
+}
+
+emit_session_lock_busy() {
+  local sid="${1:-}" resume_command=""
+  if [[ -n "$sid" ]]; then
+    CURRENT_SESSION_ID="$sid"
+    resume_command="$(resume_command_for_session "$sid" || true)"
+  fi
+  emit_envelope true running false false session.running "$(public_message_for_reason session.running '')" "$(next_command_for_reason session.running)" "$resume_command" 0 >&3
+}
+
+agbrowse_status_json() {
+  local __outvar="${1:-}" output
+  if ! agbrowse_status_json_capture output; then
+    die_hard "agbrowse status failed: $output"
+  fi
+  if [[ -n "$__outvar" ]]; then
+    printf -v "$__outvar" '%s' "$output"
+  else
+    printf '%s' "$output"
+  fi
+}
+
+browser_status_kind() {
+  local json="$1"
+  python3 -c '
+import json
+import sys
+
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    print("unknown")
+    raise SystemExit(0)
+
+status = data.get("status")
+url = data.get("url")
+if isinstance(url, str) and url.lower() == "about:blank":
+    print("blank")
+    raise SystemExit(0)
+if isinstance(status, str):
+    status = status.lower()
+    if status in {"auth_required", "login_required", "needs_login"}:
+        print("login_required")
+        raise SystemExit(0)
+    if status == "ready":
+        print("ready")
+        raise SystemExit(0)
+    if status in {"headless", "browser_headless"}:
+        print("headless")
+        raise SystemExit(0)
+    if status in {"unreachable", "browser_unreachable", "cdp_unreachable", "no_browser"}:
+        print("unreachable")
+        raise SystemExit(0)
+
+cdp = data.get("cdp")
+if isinstance(cdp, str):
+    cdp = cdp.lower()
+reachable = data.get("reachable")
+headed = data.get("headed")
+headless = data.get("headless")
+
+if cdp == "reachable" or reachable is True:
+    if headed is False or headless is True:
+        print("headless")
+    elif headed is True or headless is False:
+        print("ready")
+    else:
+        print("unknown")
+elif cdp == "unreachable" or reachable is False:
+    print("unreachable")
+else:
+    print("unknown")
+' <<< "$json"
+}
+
+slot_auth_status_kind() {
+  local __outvar="$1" state="" slot_index slot_port container uid gid output status
+  if [[ "${GPT_WEBAI_SLOT_MODE:-auto}" == fake || "${GPT_WEBAI_SLOT_FAKE_LOCAL:-0}" = 1 ]]; then
+    state="${GPT_WEBAI_FAKE_AUTH_STATE:-authenticated}"
+    case "$state" in
+      authenticated|login_required|unknown) ;;
+      *) state=unknown ;;
+    esac
+    printf -v "$__outvar" '%s' "$state"
+    return 0
+  fi
+  [[ -n "${CURRENT_SLOT_ID:-}" ]] || { printf -v "$__outvar" '%s' unknown; return 1; }
+  slot_index="$(slot_index_from_id "$CURRENT_SLOT_ID")"
+  slot_port="$(slot_port_for_index "$slot_index")"
+  container="${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$CURRENT_SLOT_ID")}"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  set +e
+  output="$(docker exec -i --user "$uid:$gid" --env "CDP_PORT=$slot_port" "$container" sh -lc 'cd /usr/local/lib/node_modules/agbrowse && node --input-type=module' <<'NODE'
+import { chromium } from 'playwright-core';
+
+const port = process.env.CDP_PORT || '9222';
+const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+try {
+  const pages = browser.contexts().flatMap(context => context.pages());
+  let sawChatGpt = false;
+  let sawComposer = false;
+  let sawLogin = false;
+  for (const page of pages) {
+    const url = page.url();
+    if (!/^https:\/\/chatgpt\.com\//.test(url)) continue;
+    sawChatGpt = true;
+    const state = await page.evaluate(() => {
+      const visible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle?.(node);
+        return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0');
+      };
+      const bodyText = document.body?.innerText || '';
+      const loginCopy = /Thanks for trying ChatGPT|Log in or sign up|Log in to get answers|Sign up for free|get smarter responses, upload files/i.test(bodyText);
+      const loginButtons = Array.from(document.querySelectorAll('button, a'))
+        .filter(visible)
+        .map(node => (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim())
+        .filter(text => /^log in$/i.test(text) || /^sign up/i.test(text));
+      const composer = document.querySelector('#prompt-textarea, textarea[name="prompt-textarea"], .ProseMirror, [contenteditable="true"]');
+      return {
+        composer: Boolean(composer && visible(composer)),
+        login: loginCopy || loginButtons.length > 0,
+      };
+    }).catch(() => ({ composer: false, login: false }));
+    if (state.composer) sawComposer = true;
+    if (state.login) sawLogin = true;
+  }
+  if (sawLogin) console.log('login_required');
+  else if (sawChatGpt && sawComposer) console.log('authenticated');
+  else console.log('unknown');
+} finally {
+  await browser.close().catch(() => undefined);
+}
+NODE
+)"
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    printf -v "$__outvar" '%s' unknown
+    return 1
+  fi
+  case "$output" in
+    authenticated|login_required|unknown)
+      printf -v "$__outvar" '%s' "$output"
+      ;;
+    *)
+      printf -v "$__outvar" '%s' unknown
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+ensure_slot_authenticated() {
+  local auth_state=""
+  if ! slot_auth_status_kind auth_state; then
+    write_slot_state "${CURRENT_SLOT_ID:-unknown}" degraded auth.unknown 0
+    die_hard "login_required: could not verify authenticated ChatGPT state for slot ${CURRENT_SLOT_ID:-unknown}"
+  fi
+  case "$auth_state" in
+    authenticated)
+      return 0
+      ;;
+    login_required)
+      write_slot_state "${CURRENT_SLOT_ID:-unknown}" reseed_login auth.needs_login 0
+      die_hard "login_required for slot ${CURRENT_SLOT_ID:-unknown}"
+      ;;
+    *)
+      write_slot_state "${CURRENT_SLOT_ID:-unknown}" degraded auth.unknown 0
+      die_hard "login_required: unknown ChatGPT auth state for slot ${CURRENT_SLOT_ID:-unknown}"
+      ;;
+  esac
+}
+
+singleton_pid() {
+  local lock="$1"
+  local value=""
+  if [[ -L "$lock" ]]; then
+    value="$(readlink "$lock" 2>/dev/null || true)"
+  elif [[ -f "$lock" ]]; then
+    IFS= read -r value < "$lock" || true
+  fi
+  if [[ "$value" =~ ([0-9]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+cmd_browser() {
+  local slot_lock_holder=""
+  case "${1:-}" in
+    ensure)
+      shift
+      CURRENT_COMMAND=browser.ensure
+      if [[ "${1:-}" == --slot ]]; then
+        (($# >= 2)) || public_usage input.missing_slot 'browser ensure --slot requires slot id'
+        valid_id "$2" || public_usage input.invalid_slot "invalid slot id: $2"
+        [[ "$2" =~ ^slot-[0-9][0-9]$ ]] || public_usage input.invalid_slot "invalid slot id: $2"
+        [[ $# -eq 2 ]] || public_usage input.unknown_argument 'browser ensure --slot takes one slot id'
+        ENVELOPE_CONTEXT=1
+        init_state
+        CURRENT_SLOT_ID="$2"
+        CURRENT_SLOT_CONTAINER="$(slot_container_for_id "$CURRENT_SLOT_ID")"
+        if slot_has_active_record "$CURRENT_SLOT_ID"; then
+          emit_slot_busy
+          return 0
+        fi
+        if ! acquire_specific_slot_lease slot_lock_holder "$CURRENT_SLOT_ID"; then
+          emit_slot_busy
+          return 0
+        fi
+        ensure_slot_browser_quiet
+        release_slot_lease "$slot_lock_holder"
+        printf 'slot=%s\n' "$CURRENT_SLOT_ID"
+        printf 'browser_ready=1\n'
+        return 0
+      fi
+      [[ $# -eq 0 ]] || public_usage input.unknown_argument 'browser ensure takes no arguments'
+      ENVELOPE_CONTEXT=1
+      init_state
+      emit_slot_required
+      return 0
+      ;;
+    *) CURRENT_COMMAND=browser; public_usage input.usage "unknown browser command: ${1:-}" ;;
+  esac
+}
+
+cmd_test() {
+  case "${1:-}" in
+    atomic-write)
+      [[ $# -eq 3 ]] || die_usage '__test atomic-write PATH CONTENT'
+      init_state
+      atomic_write_rel "$2" "$3"
+      ;;
+    *) usage; exit "$EX_USAGE" ;;
+  esac
+}
+
+kind_model() {
+  case "$1" in
+    pro) printf 'pro' ;;
+    xhigh) printf 'thinking' ;;
+    *) die_usage "unknown kind: $1" ;;
+  esac
+}
+
+kind_effort() {
+  case "$1" in
+    pro) printf 'extended' ;;
+    xhigh) printf 'heavy' ;;
+    *) die_usage "unknown kind: $1" ;;
+  esac
+}
+
+kind_timeout() {
+  case "$1" in
+    pro) printf '%s' "${GPTPRO_TIMEOUT:-10800}" ;;
+    xhigh) printf '%s' "${GPTXHIGH_TIMEOUT:-300}" ;;
+    *) die_usage "unknown kind: $1" ;;
+  esac
+}
+
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+safe_file_key() {
+  local value="$1"
+  printf '%s' "${value//[^A-Za-z0-9._-]/_}"
+}
+
+sha256_text() {
+  local value="$1"
+  python3 - "$value" <<'PY'
+import hashlib
+import sys
+print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())
+PY
+}
+
+safe_attachment_ext() {
+  local path="$1" base ext
+  base="$(basename -- "$path")"
+  python3 - "$base" <<'PY'
+import re
+import sys
+name = sys.argv[1]
+lower = name.lower()
+compound_exts = (
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tar.zst",
+    ".tar.br",
+    ".tgz",
+    ".tbz2",
+    ".txz",
+)
+ext = ""
+for candidate in compound_exts:
+    if lower.endswith(candidate):
+        ext = candidate
+        break
+if not ext and "." in name and not name.startswith("."):
+    ext = "." + name.rsplit(".", 1)[1]
+ext = re.sub(r"[^A-Za-z0-9._-]", "_", ext)[:16]
+if not ext or ext == ".":
+    ext = ".bin"
+if not ext.startswith("."):
+    ext = "." + ext
+print(ext.lower())
+PY
+}
+
+prepare_attachment_metadata() {
+  local path index=0 size max_file max_total total=0 before after sha safe_ext staged
+  ATTACHMENT_SOURCE_PATHS=()
+  ATTACHMENT_SHA256S=()
+  ATTACHMENT_SIZES=()
+  ATTACHMENT_SAFE_EXTS=()
+  ATTACHMENT_STAGED_NAMES=()
+  max_file="${GPT_WEBAI_ATTACHMENT_MAX_FILE_BYTES:-104857600}"
+  max_total="${GPT_WEBAI_ATTACHMENT_MAX_TOTAL_BYTES:-262144000}"
+  [[ "$max_file" =~ ^[0-9]+$ ]] || max_file=104857600
+  [[ "$max_total" =~ ^[0-9]+$ ]] || max_total=262144000
+
+  for path in "$@"; do
+    index=$((index + 1))
+    before="$(stat -Lc '%d:%i:%s:%Y' -- "$path")" || die_hard "attachment unavailable"
+    size="$(stat -Lc '%s' -- "$path")" || die_hard "attachment unavailable"
+    if [[ "$size" -gt "$max_file" ]]; then
+      die_hard "attachment too large: file exceeds GPT_WEBAI_ATTACHMENT_MAX_FILE_BYTES"
+    fi
+    total=$((total + size))
+    if [[ "$total" -gt "$max_total" ]]; then
+      die_hard "attachment too large: total exceeds GPT_WEBAI_ATTACHMENT_MAX_TOTAL_BYTES"
+    fi
+    sha="$(sha256sum -- "$path" | awk '{print $1}')"
+    after="$(stat -Lc '%d:%i:%s:%Y' -- "$path")" || die_hard "attachment unavailable"
+    if [[ "$before" != "$after" ]]; then
+      die_hard "attachment changed while preparing request"
+    fi
+    safe_ext="$(safe_attachment_ext "$path")"
+    staged="$(printf '%03d-%s%s' "$index" "${sha:0:16}" "$safe_ext")"
+    ATTACHMENT_SOURCE_PATHS+=("$path")
+    ATTACHMENT_SHA256S+=("$sha")
+    ATTACHMENT_SIZES+=("$size")
+    ATTACHMENT_SAFE_EXTS+=("$safe_ext")
+    ATTACHMENT_STAGED_NAMES+=("$staged")
+  done
+}
+
+normalize_attachment_file() {
+  local __outvar="$1" path="$2" resolved="" seed_root=""
+
+  [[ -n "$path" ]] || public_usage input.invalid_file '--file requires a path'
+  [[ -e "$path" ]] || public_usage input.invalid_file "attachment file does not exist: $path"
+  [[ -f "$path" ]] || public_usage input.invalid_file "attachment path is not a regular file: $path"
+  [[ -r "$path" ]] || public_usage input.invalid_file "attachment file is not readable: $path"
+  if ! resolved="$(readlink -f -- "$path" 2>/dev/null)"; then
+    public_usage input.invalid_file "could not resolve attachment file: $path"
+  fi
+  seed_root="$(readlink -f -- "${GPT_WEBAI_AUTH_SEED_DIR:-${GPT_WEBAI_STATE_DIR:-$(state_default)}/auth-seed}" 2>/dev/null || true)"
+  if [[ -n "$seed_root" ]]; then
+    case "$resolved" in
+      "$seed_root"|"$seed_root"/*)
+        public_usage input.invalid_file 'attachment path is under auth seed state'
+        ;;
+    esac
+  fi
+  printf -v "$__outvar" '%s' "$resolved"
+}
+
+attachment_descriptor_args() {
+  local index
+  for index in "${!ATTACHMENT_SOURCE_PATHS[@]}"; do
+    printf '%s:%s:%s:%s\n' \
+      "$((index + 1))" \
+      "${ATTACHMENT_SIZES[$index]}" \
+      "${ATTACHMENT_SHA256S[$index]}" \
+      "${ATTACHMENT_SAFE_EXTS[$index]}"
+  done
+}
+
+current_attachment_count() {
+  if declare -p ATTACHMENT_STAGED_NAMES >/dev/null 2>&1; then
+    printf '%s' "${#ATTACHMENT_STAGED_NAMES[@]}"
+  else
+    printf '0'
+  fi
+}
+
+with_attachment_access_gate() {
+  local prompt="$1" index staged sha size
+  if [[ "$(current_attachment_count)" -eq 0 ]]; then
+    printf '%s' "$prompt"
+    return 0
+  fi
+
+  printf '%s\n\n' "$prompt"
+  printf 'ATTACHMENT_ACCESS_GATE:\n'
+  printf 'Lifecycle attached the following generated file names. Before doing the substantive task, verify that you can inspect every expected attachment below. If any expected attachment is unavailable or unreadable, reply exactly ATTACHMENT_MISSING and stop.\n'
+  printf 'Expected attachments:\n'
+  for index in "${!ATTACHMENT_STAGED_NAMES[@]}"; do
+    staged="${ATTACHMENT_STAGED_NAMES[$index]}"
+    sha="${ATTACHMENT_SHA256S[$index]}"
+    size="${ATTACHMENT_SIZES[$index]}"
+    printf -- '- %s size=%s sha256=%s\n' "$staged" "$size" "$sha"
+  done
+  printf 'Only proceed with the requested answer after this attachment access check passes.\n'
+}
+
+request_fingerprint() {
+  local kind="$1" model="$2" effort="$3" prompt="$4"
+  shift 4
+  python3 - "$kind" "$model" "$effort" "$(sha256_text "$prompt")" "$@" <<'PY'
+import hashlib
+import json
+import sys
+
+kind, model, effort, prompt_sha = sys.argv[1:5]
+attachments = []
+for raw in sys.argv[5:]:
+    ordinal, size, sha, safe_ext = raw.split(":", 3)
+    attachments.append({"ordinal": int(ordinal), "size": int(size), "sha256": sha, "safeExt": safe_ext})
+payload = {"effort": effort, "kind": kind, "model": model, "promptSha256": prompt_sha}
+if attachments:
+    payload["attachments"] = attachments
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+print(hashlib.sha256(encoded).hexdigest())
+PY
+}
+
+json_session_id() {
+  local output="$1"
+  python3 -c '
+import json
+import re
+import sys
+
+text = sys.stdin.read()
+
+def find_sid(value):
+    if isinstance(value, dict):
+        sid = value.get("sessionId") or value.get("id")
+        if isinstance(sid, str) and sid:
+            return sid
+        session = value.get("session")
+        if isinstance(session, dict):
+            sid = session.get("sessionId") or session.get("id")
+            if isinstance(sid, str) and sid:
+                return sid
+    return None
+
+for candidate in [text, *text.splitlines()]:
+    candidate = candidate.strip()
+    if not candidate.startswith("{"):
+        continue
+    try:
+        sid = find_sid(json.loads(candidate))
+    except Exception:
+        continue
+    if sid:
+        print(sid)
+        sys.exit(0)
+
+match = re.search(r"\"sessionId\"\s*:\s*\"([^\"]+)\"", text)
+if match:
+    print(match.group(1))
+    sys.exit(0)
+sys.exit(1)
+' <<< "$output"
+}
+
+json_is_valid() {
+  local output="$1"
+  python3 -c 'import json, sys; json.loads(sys.stdin.read())' <<< "$output" >/dev/null 2>&1
+}
+
+write_session_record() {
+  local record="$1" kind="$2" model="$3" effort="$4" fingerprint="$5" sid="$6" status="$7"
+  local record_run_id="${CURRENT_RUN_ID:-}" record_request_dir="${CURRENT_REQUEST_DIR:-}"
+  local record_capsule="${CURRENT_ATTACHMENT_CAPSULE:-}" record_stage="${CURRENT_ATTACHMENT_STAGE:-}"
+  local attachment_count
+  attachment_count="$(current_attachment_count)"
+  if [[ -f "$record" ]]; then
+    [[ -n "$record_run_id" ]] || record_run_id="$(lease_value "$record" runId || true)"
+    [[ -n "$record_request_dir" ]] || record_request_dir="$(lease_value "$record" requestDir || true)"
+    [[ -n "$record_capsule" ]] || record_capsule="$(lease_value "$record" attachmentCapsule || true)"
+    [[ -n "$record_stage" ]] || record_stage="$(lease_value "$record" attachmentStage || true)"
+    if [[ "$attachment_count" -eq 0 ]]; then
+      attachment_count="$(lease_value "$record" attachmentCount || printf '0')"
+      [[ "$attachment_count" =~ ^[0-9]+$ ]] || attachment_count=0
+    fi
+  fi
+  atomic_write_abs "$record" "sessionId=$sid
+kind=$kind
+model=$model
+effort=$effort
+fingerprint=$fingerprint
+promptFingerprint=$fingerprint
+slotId=${CURRENT_SLOT_ID:-}
+slotContainer=${CURRENT_SLOT_CONTAINER:-}
+slotStatePath=${CURRENT_SLOT_STATE_PATH:-}
+runId=$record_run_id
+fencingToken=${CURRENT_FENCING_TOKEN:-}
+requestDir=$record_request_dir
+attachmentCapsule=$record_capsule
+attachmentStage=$record_stage
+attachmentCount=$attachment_count
+targetId=${CURRENT_TARGET_ID:-}
+conversationUrl=${CURRENT_CONVERSATION_URL:-}
+status=$status
+updated_at=$(utc_now)
+"
+  record_event "session.$status" "$status" session.record "$sid" "$fingerprint" "$(basename "$record")" || true
+}
+
+record_attachment_count() {
+  local record="$1" count
+  count="$(session_record_value "$record" attachmentCount 2>/dev/null || true)"
+  if [[ "$count" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$count"
+    return 0
+  fi
+  current_attachment_count
+}
+
+session_record_status() {
+  local record="$1"
+  [[ -f "$record" ]] || return 1
+  lease_value "$record" status
+}
+
+session_record_value() {
+  local record="$1" key="$2"
+  [[ -f "$record" ]] || return 1
+  lease_value "$record" "$key"
+}
+
+find_session_record_by_id() {
+  local sid="$1" file value
+  shopt -s nullglob
+  for file in "$STATE_DIR"/sessions/*.record; do
+    value="$(lease_value "$file" sessionId || true)"
+    if [[ "$value" == "$sid" ]]; then
+      printf '%s' "$file"
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+slot_pool_enabled() {
+  case "${GPT_WEBAI_SLOT_MODE:-auto}" in
+    0|off|false)
+      return 1
+      ;;
+    1|on|docker|fake)
+      return 0
+      ;;
+    auto)
+      docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'gpt-webai-slot-01'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+slot_count() {
+  local count="${GPT_WEBAI_SLOT_COUNT:-10}"
+  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || count=10
+  printf '%s' "$count"
+}
+
+slot_id_for_index() {
+  printf 'slot-%02d' "$1"
+}
+
+slot_container_for_id() {
+  local slot_id="$1"
+  printf '%s%s' "${GPT_WEBAI_SLOT_CONTAINER_PREFIX:-gpt-webai-}" "$slot_id"
+}
+
+slot_port_for_index() {
+  printf '%s' "$((9222 + $1))"
+}
+
+slot_index_from_id() {
+  local slot_id="$1" index
+  index="${slot_id#slot-}"
+  printf '%d' "$((10#$index))"
+}
+
+slot_state_dir() {
+  local slot_id="$1"
+  printf '%s/slots/%s/state' "$STATE_DIR" "$slot_id"
+}
+
+slot_attachment_dir() {
+  local slot_id="$1"
+  printf '%s/slots/%s/attachments' "$STATE_DIR" "$slot_id"
+}
+
+slot_state_file() {
+  local slot_id="$1"
+  printf '%s/slots/%s.state' "$STATE_DIR" "$slot_id"
+}
+
+slot_repair_file() {
+  local slot_id="$1"
+  printf '%s/slots/%s.repair' "$STATE_DIR" "$slot_id"
+}
+
+slot_recorded_status() {
+  local slot_id="$1" file
+  file="$(slot_state_file "$slot_id")"
+  [[ -f "$file" ]] || return 1
+  lease_value "$file" status
+}
+
+slot_status_allows_allocation() {
+  local slot_id="$1" status
+  status="$(slot_recorded_status "$slot_id" || true)"
+  case "$status" in
+    repairing|warming|reseed_login|degraded)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+slot_has_active_record() {
+  local slot_id="$1" file status record_slot
+  shopt -s nullglob
+  for file in "$STATE_DIR"/sessions/*.record; do
+    record_slot="$(lease_value "$file" slotId || true)"
+    [[ "$record_slot" == "$slot_id" ]] || continue
+    status="$(lease_value "$file" status || true)"
+    case "$status" in
+      send_started|sent|running|resumed|timeout|queued)
+        shopt -u nullglob
+        return 0
+        ;;
+    esac
+  done
+  shopt -u nullglob
+  return 1
+}
+
+slot_lease_deadline() {
+  local seconds="${GPT_WEBAI_SLOT_LEASE_DEADLINE_SECONDS:-}"
+  if [[ -z "$seconds" && -n "${CURRENT_KIND:-}" ]]; then
+    seconds="$(kind_timeout "$CURRENT_KIND")"
+  fi
+  [[ "$seconds" =~ ^[0-9]+$ && "$seconds" -gt 0 ]] || seconds=300
+  date -u -d "+$seconds seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || utc_now
+}
+
+write_slot_busy_state() {
+  local slot_id="$1" container="$2"
+  atomic_write_abs "$(slot_state_file "$slot_id")" "status=busy
+slotId=$slot_id
+container=$container
+runId=${CURRENT_RUN_ID:-}
+fencingToken=${CURRENT_FENCING_TOKEN:-}
+sessionId=${CURRENT_SESSION_ID:-}
+pid=$$
+boot_id=$BOOT_ID
+heartbeatAt=$(utc_now)
+leaseDeadline=$(slot_lease_deadline)
+updated_at=$(utc_now)"
+}
+
+acquire_slot_lease() {
+  local __holder_outvar="$1" wait_seconds="${2:-0}"
+  local start now count index slot_id acquired_holder container
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || wait_seconds=0
+  count="$(slot_count)"
+  start="$(date +%s)"
+  while :; do
+    for ((index = 1; index <= count; index++)); do
+      slot_id="$(slot_id_for_index "$index")"
+      slot_status_allows_allocation "$slot_id" || continue
+      slot_has_active_record "$slot_id" && continue
+      if runtime_lock_acquire "slot-$slot_id" acquired_holder; then
+        container="$(slot_container_for_id "$slot_id")"
+        CURRENT_SLOT_ID="$slot_id"
+        CURRENT_SLOT_CONTAINER="$container"
+        CURRENT_SLOT_STATE_PATH="$(slot_state_dir "$slot_id")"
+        mkdir -p "$CURRENT_SLOT_STATE_PATH" "$(slot_attachment_dir "$slot_id")"
+        printf -v "$__holder_outvar" '%s' "$acquired_holder"
+        write_slot_busy_state "$slot_id" "$container"
+        record_event slot.lease_acquired busy slot.lease "$CURRENT_SESSION_ID" "$slot_id" || true
+        return 0
+      fi
+    done
+    now="$(date +%s)"
+    [[ $((now - start)) -lt "$wait_seconds" ]] || return 1
+    sleep 1
+  done
+}
+
+acquire_specific_slot_lease() {
+  local __holder_outvar="$1" slot_id="$2" acquired_holder container
+  if ! runtime_lock_acquire "slot-$slot_id" acquired_holder; then
+    return 1
+  fi
+  container="${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$slot_id")}"
+  CURRENT_SLOT_ID="$slot_id"
+  CURRENT_SLOT_CONTAINER="$container"
+  CURRENT_SLOT_STATE_PATH="$(slot_state_dir "$slot_id")"
+  mkdir -p "$CURRENT_SLOT_STATE_PATH" "$(slot_attachment_dir "$slot_id")"
+  printf -v "$__holder_outvar" '%s' "$acquired_holder"
+  write_slot_busy_state "$slot_id" "$container"
+  record_event slot.lease_acquired busy slot.lease "$CURRENT_SESSION_ID" "$slot_id" || true
+  return 0
+}
+
+release_slot_lease() {
+  local holder="$1"
+  [[ -n "${CURRENT_SLOT_ID:-}" && -n "$holder" ]] || return 0
+  if slot_has_active_record "$CURRENT_SLOT_ID"; then
+    write_slot_busy_state "$CURRENT_SLOT_ID" "${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$CURRENT_SLOT_ID")}"
+    runtime_lock_release "slot-$CURRENT_SLOT_ID" "$holder"
+    return 0
+  fi
+  atomic_write_abs "$(slot_state_file "$CURRENT_SLOT_ID")" "status=ready
+slotId=$CURRENT_SLOT_ID
+container=${CURRENT_SLOT_CONTAINER:-}
+updated_at=$(utc_now)"
+  runtime_lock_release "slot-$CURRENT_SLOT_ID" "$holder"
+}
+
+new_run_id() {
+  printf '%s-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$" "$RANDOM"
+}
+
+write_attachment_manifest() {
+  local target="$1" schema="$2" root="$3"
+  python3 - "$target" "$schema" "$root" "${ATTACHMENT_STAGED_NAMES[@]}" -- "${ATTACHMENT_SHA256S[@]}" -- "${ATTACHMENT_SIZES[@]}" <<'PY'
+import json
+import sys
+target, schema, root = sys.argv[1:4]
+rest = sys.argv[4:]
+first = rest.index("--")
+second = first + 1 + rest[first + 1:].index("--")
+names = rest[:first]
+shas = rest[first + 1:second]
+sizes = rest[second + 1:]
+files = []
+for idx, (name, sha, size) in enumerate(zip(names, shas, sizes), 1):
+    item = {"ordinal": idx, "stagedName": name, "sha256": sha, "size": int(size)}
+    if root:
+        item["containerPath"] = f"{root.rstrip('/')}/files/{name}"
+    files.append(item)
+payload = {"schema": schema, "files": files, "sourcePathsRedacted": True}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+}
+
+create_request_capsule() {
+  local fingerprint="$1" kind="$2" model="$3" effort="$4" prompt="$5"
+  local request_dir capsule_dir tmp_request tmp_capsule files_dir index src dst staged sha verify
+  [[ -n "${CURRENT_RUN_ID:-}" ]] || CURRENT_RUN_ID="$(new_run_id)"
+  request_dir="$STATE_DIR/requests/$fingerprint/$CURRENT_RUN_ID"
+  capsule_dir="$STATE_DIR/attachment-capsules/$fingerprint/$CURRENT_RUN_ID"
+  tmp_request="$request_dir.tmp.$$"
+  tmp_capsule="$capsule_dir.tmp.$$"
+  rm -rf "$tmp_request" "$tmp_capsule"
+  mkdir -p "$tmp_request" "$tmp_capsule/files"
+  chmod 0700 "$tmp_request" "$tmp_capsule" "$tmp_capsule/files"
+  printf '%s' "$prompt" > "$tmp_request/prompt.txt"
+  chmod 0600 "$tmp_request/prompt.txt"
+  atomic_write_abs "$tmp_request/request.env" "kind=$kind
+model=$model
+effort=$effort
+fingerprint=$fingerprint
+runId=$CURRENT_RUN_ID
+attachmentCount=${#ATTACHMENT_SOURCE_PATHS[@]}
+created_at=$(utc_now)
+"
+  : > "$tmp_request/attachments.tsv"
+  chmod 0600 "$tmp_request/attachments.tsv"
+  for index in "${!ATTACHMENT_SOURCE_PATHS[@]}"; do
+    src="${ATTACHMENT_SOURCE_PATHS[$index]}"
+    staged="${ATTACHMENT_STAGED_NAMES[$index]}"
+    sha="${ATTACHMENT_SHA256S[$index]}"
+    dst="$tmp_capsule/files/$staged"
+    cp --reflink=auto -- "$src" "$dst" 2>/dev/null || cp -- "$src" "$dst"
+    verify="$(sha256sum -- "$dst" | awk '{print $1}')"
+    [[ "$verify" == "$sha" ]] || die_hard 'attachment changed while preparing request'
+    chmod 0400 "$dst"
+    printf '%s\t%s\t%s\t%s\n' "$staged" "${ATTACHMENT_SIZES[$index]}" "$sha" "${ATTACHMENT_SAFE_EXTS[$index]}" >> "$tmp_request/attachments.tsv"
+  done
+  write_attachment_manifest "$tmp_capsule/manifest.json" gpt-webai-attachment-capsule.v1 ""
+  chmod 0400 "$tmp_capsule/manifest.json"
+  mkdir -p "$(dirname "$request_dir")" "$(dirname "$capsule_dir")"
+  mv -f "$tmp_request" "$request_dir"
+  mv -f "$tmp_capsule" "$capsule_dir"
+  CURRENT_REQUEST_DIR="$request_dir"
+  CURRENT_ATTACHMENT_CAPSULE="$capsule_dir"
+}
+
+load_request_capsule() {
+  local fingerprint="$1" record="$STATE_DIR/sessions/$fingerprint.record" request_dir line staged size sha safe_ext
+  request_dir="$(session_record_value "$record" requestDir || true)"
+  [[ -n "$request_dir" && -d "$request_dir" ]] || die_hard "queued request capsule unavailable"
+  CURRENT_REQUEST_DIR="$request_dir"
+  CURRENT_RUN_ID="$(lease_value "$request_dir/request.env" runId || true)"
+  CURRENT_ATTACHMENT_CAPSULE="$(session_record_value "$record" attachmentCapsule || true)"
+  ATTACHMENT_SOURCE_PATHS=()
+  ATTACHMENT_SHA256S=()
+  ATTACHMENT_SIZES=()
+  ATTACHMENT_SAFE_EXTS=()
+  ATTACHMENT_STAGED_NAMES=()
+  while IFS=$'\t' read -r staged size sha safe_ext || [[ -n "$staged" ]]; do
+    [[ -n "$staged" ]] || continue
+    ATTACHMENT_STAGED_NAMES+=("$staged")
+    ATTACHMENT_SIZES+=("$size")
+    ATTACHMENT_SHA256S+=("$sha")
+    ATTACHMENT_SAFE_EXTS+=("$safe_ext")
+    ATTACHMENT_SOURCE_PATHS+=("$CURRENT_ATTACHMENT_CAPSULE/files/$staged")
+  done < "$request_dir/attachments.tsv"
+}
+
+expose_attachments_to_slot() {
+  local fingerprint="$1" slot_id="$2" stage_dir tmp_dir index staged src dst sha verify
+  [[ "${#ATTACHMENT_STAGED_NAMES[@]}" -gt 0 ]] || return 0
+  stage_dir="$(slot_attachment_dir "$slot_id")/$fingerprint/$CURRENT_RUN_ID"
+  tmp_dir="$(slot_attachment_dir "$slot_id")/.tmp/$CURRENT_RUN_ID.$$"
+  rm -rf "$tmp_dir"
+  mkdir -p "$tmp_dir/files"
+  chmod 0700 "$tmp_dir" "$tmp_dir/files"
+  for index in "${!ATTACHMENT_STAGED_NAMES[@]}"; do
+    staged="${ATTACHMENT_STAGED_NAMES[$index]}"
+    src="$CURRENT_ATTACHMENT_CAPSULE/files/$staged"
+    dst="$tmp_dir/files/$staged"
+    sha="${ATTACHMENT_SHA256S[$index]}"
+    ln "$src" "$dst" 2>/dev/null || cp -- "$src" "$dst"
+    verify="$(sha256sum -- "$dst" | awk '{print $1}')"
+    [[ "$verify" == "$sha" ]] || die_hard 'attachment changed while staging for slot'
+    chmod 0400 "$dst"
+  done
+  write_attachment_manifest "$tmp_dir/manifest.json" gpt-webai-attachment-exposure.v1 "/broker-attachments/$fingerprint/$CURRENT_RUN_ID"
+  chmod 0400 "$tmp_dir/manifest.json"
+  mkdir -p "$(dirname "$stage_dir")"
+  rm -rf "$stage_dir"
+  mv -f "$tmp_dir" "$stage_dir"
+  chmod 0500 "$stage_dir" "$stage_dir/files"
+  CURRENT_ATTACHMENT_STAGE="$stage_dir"
+}
+
+container_attachment_paths() {
+  local fingerprint="$1" index
+  for index in "${!ATTACHMENT_STAGED_NAMES[@]}"; do
+    printf '/broker-attachments/%s/%s/files/%s\n' "$fingerprint" "$CURRENT_RUN_ID" "${ATTACHMENT_STAGED_NAMES[$index]}"
+  done
+}
+
+verify_slot_attachment_visibility() {
+  local fingerprint="$1" index staged expected path output uid gid
+  [[ "${#ATTACHMENT_STAGED_NAMES[@]}" -gt 0 ]] || return 0
+  for index in "${!ATTACHMENT_STAGED_NAMES[@]}"; do
+    staged="${ATTACHMENT_STAGED_NAMES[$index]}"
+    expected="${ATTACHMENT_SHA256S[$index]}"
+    path="/broker-attachments/$fingerprint/$CURRENT_RUN_ID/files/$staged"
+    if [[ "${GPT_WEBAI_SLOT_MODE:-auto}" == fake || "${GPT_WEBAI_SLOT_FAKE_LOCAL:-0}" = 1 ]]; then
+      output="$(sha256sum -- "$CURRENT_ATTACHMENT_STAGE/files/$staged" | awk '{print $1}')"
+    else
+      uid="$(id -u)"
+      gid="$(id -g)"
+      output="$(docker exec -i --user "$uid:$gid" "${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$CURRENT_SLOT_ID")}" sh -c 'test -r "$1" && sha256sum "$1" | cut -d " " -f 1' sh "$path" 2>&1)" || die_hard "slot attachment visibility failed"
+    fi
+    [[ "$output" == "$expected" ]] || die_hard "slot attachment visibility failed"
+  done
+}
+
+slot_repair_max_attempts() {
+  local max="${GPT_WEBAI_SLOT_REPAIR_MAX_ATTEMPTS:-3}"
+  [[ "$max" =~ ^[0-9]+$ && "$max" -gt 0 ]] || max=3
+  printf '%s' "$max"
+}
+
+slot_repair_failure_status() {
+  local attempts="$1" max
+  max="$(slot_repair_max_attempts)"
+  if [[ "$attempts" -ge "$max" ]]; then
+    printf 'degraded'
+  else
+    printf 'repairing'
+  fi
+}
+
+slot_repair_attempts() {
+  local slot_id="$1" reason="$2" action="${3:-repair}" file attempts=0 previous_reason="" previous_action=""
+  file="$(slot_repair_file "$slot_id")"
+  if [[ -f "$file" ]]; then
+    previous_reason="$(lease_value "$file" reason || true)"
+    previous_action="$(lease_value "$file" action || true)"
+    attempts="$(lease_value "$file" attempts || printf 0)"
+  fi
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=0
+  if [[ "$previous_reason" == "$reason" && "$previous_action" == "$action" ]]; then
+    printf '%s' "$attempts"
+  else
+    printf '0'
+  fi
+}
+
+slot_repair_delay_seconds() {
+  local delay="${GPT_WEBAI_SLOT_REPAIR_BACKOFF_SECONDS:-60}"
+  [[ "$delay" =~ ^[0-9]+$ ]] || delay=60
+  printf '%s' "$delay"
+}
+
+slot_repair_action_allowed() {
+  local slot_id="$1" reason="$2" action="$3" file previous_reason="" previous_action="" status="" attempts=0 max next_epoch="" next_retry="" now
+  file="$(slot_repair_file "$slot_id")"
+  [[ -f "$file" ]] || return 0
+  previous_reason="$(lease_value "$file" reason || true)"
+  previous_action="$(lease_value "$file" action || true)"
+  [[ "$previous_reason" == "$reason" && "$previous_action" == "$action" ]] || return 0
+  status="$(lease_value "$file" status || true)"
+  attempts="$(lease_value "$file" attempts || printf 0)"
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=0
+  max="$(slot_repair_max_attempts)"
+  if [[ "$status" == degraded || "$attempts" -ge "$max" ]]; then
+    write_slot_state "$slot_id" degraded "$reason" "$attempts"
+    printf 'repair attempts exhausted'
+    return 1
+  fi
+  next_epoch="$(lease_value "$file" nextRetryAtEpoch || true)"
+  next_retry="$(lease_value "$file" nextRetryAt || true)"
+  now="$(date -u +%s)"
+  if [[ "$next_epoch" =~ ^[0-9]+$ && "$now" -lt "$next_epoch" ]]; then
+    printf 'repair backoff active until %s' "$next_retry"
+    return 1
+  fi
+  return 0
+}
+
+write_slot_state() {
+  local slot_id="$1" status="$2" reason="${3:-}" attempts="${4:-0}" container
+  container="${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$slot_id")}"
+  atomic_write_abs "$(slot_state_file "$slot_id")" "status=$status
+slotId=$slot_id
+container=$container
+reason=$reason
+attempts=$attempts
+updated_at=$(utc_now)"
+}
+
+record_slot_repair() {
+  local reason="$1" action="${2:-repair}" preferred_status="${3:-repairing}" slot_id file attempts status max next_retry next_epoch delay now
+  slot_id="${CURRENT_SLOT_ID:-unknown}"
+  file="$(slot_repair_file "$slot_id")"
+  attempts="$(( $(slot_repair_attempts "$slot_id" "$reason" "$action") + 1 ))"
+  max="$(slot_repair_max_attempts)"
+  status="$preferred_status"
+  delay="$(slot_repair_delay_seconds)"
+  now="$(date -u +%s)"
+  next_epoch="$((now + delay))"
+  next_retry="$(date -u -d "@$next_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || utc_now)"
+  atomic_write_abs "$file" "slotId=$slot_id
+status=$status
+reason=$reason
+action=$action
+attempts=$attempts
+maxAttempts=$max
+attempted_at=$(utc_now)
+nextRetryAt=$next_retry
+nextRetryAtEpoch=$next_epoch"
+  write_slot_state "$slot_id" "$status" "$reason" "$attempts"
+}
+
+record_slot_warming() {
+  local reason="$1" action="${2:-repair}" slot_id attempts
+  slot_id="${CURRENT_SLOT_ID:-unknown}"
+  attempts="$(slot_repair_attempts "$slot_id" "$reason" "$action")"
+  write_slot_state "$slot_id" warming "$reason" "$attempts"
+}
+
+record_slot_repair_failed() {
+  local reason="$1" action="${2:-repair}" slot_id file attempts status max next_retry next_epoch attempted_at
+  slot_id="${CURRENT_SLOT_ID:-unknown}"
+  file="$(slot_repair_file "$slot_id")"
+  attempts="$(slot_repair_attempts "$slot_id" "$reason" "$action")"
+  max="$(slot_repair_max_attempts)"
+  status="$(slot_repair_failure_status "$attempts")"
+  next_retry="$(lease_value "$file" nextRetryAt || utc_now)"
+  next_epoch="$(lease_value "$file" nextRetryAtEpoch || date -u +%s)"
+  attempted_at="$(lease_value "$file" attempted_at || utc_now)"
+  atomic_write_abs "$file" "slotId=$slot_id
+status=$status
+reason=$reason
+action=$action
+attempts=$attempts
+maxAttempts=$max
+attempted_at=$attempted_at
+nextRetryAt=$next_retry
+nextRetryAtEpoch=$next_epoch"
+  write_slot_state "$slot_id" "$status" "$reason" "$attempts"
+}
+
+record_slot_ready() {
+  local slot_id current_status
+  slot_id="${CURRENT_SLOT_ID:-unknown}"
+  current_status="$(slot_recorded_status "$slot_id" || true)"
+  if [[ "$current_status" == busy && "${CURRENT_COMMAND:-}" != browser.ensure ]]; then
+    rm -f "$(slot_repair_file "$slot_id")"
+    return 0
+  fi
+  write_slot_state "$slot_id" ready "" 0
+  rm -f "$(slot_repair_file "$slot_id")"
+}
+
+ensure_slot_browser_quiet() {
+  local status kind uid gid container attempts warmup_attempts warmup_delay attempt repair_block="" repair_reason=browser.cdp_unreachable repair_action=restart repair_file repair_status
+  if agbrowse_status_json_capture status && json_is_valid "$status"; then
+    kind="$(browser_status_kind "$status")"
+    if [[ "$kind" == ready ]]; then
+      ensure_slot_authenticated
+      record_slot_ready
+      return 0
+    elif [[ "$kind" == login_required ]]; then
+      write_slot_state "${CURRENT_SLOT_ID:-unknown}" reseed_login auth.needs_login 0
+      die_hard "login_required for slot $CURRENT_SLOT_ID"
+    fi
+  fi
+  if ! repair_block="$(slot_repair_action_allowed "${CURRENT_SLOT_ID:-unknown}" "$repair_reason" "$repair_action")"; then
+    repair_file="$(slot_repair_file "${CURRENT_SLOT_ID:-unknown}")"
+    repair_status="$(lease_value "$repair_file" status || printf repairing)"
+    attempts="$(slot_repair_attempts "${CURRENT_SLOT_ID:-unknown}" "$repair_reason" "$repair_action")"
+    write_slot_state "${CURRENT_SLOT_ID:-unknown}" "$repair_status" "$repair_reason" "$attempts"
+    die_hard "browser readiness timed out for slot $CURRENT_SLOT_ID: $repair_block"
+  fi
+  record_slot_repair "$repair_reason" "$repair_action" repairing
+  attempts="$(slot_repair_attempts "${CURRENT_SLOT_ID:-unknown}" "$repair_reason" "$repair_action")"
+  if [[ "${GPT_WEBAI_SLOT_MODE:-auto}" != fake && "${GPT_WEBAI_SLOT_FAKE_LOCAL:-0}" != 1 ]]; then
+    container="${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$CURRENT_SLOT_ID")}"
+    if ! docker restart "$container" >/dev/null 2>&1; then
+      record_slot_repair_failed "$repair_reason" "$repair_action"
+      die_hard "slot browser repair failed"
+    fi
+    record_slot_warming "$repair_reason" "$repair_action"
+    uid="$(id -u)"
+    gid="$(id -g)"
+    warmup_attempts="${GPT_WEBAI_SLOT_WARMUP_ATTEMPTS:-10}"
+    warmup_delay="${GPT_WEBAI_SLOT_WARMUP_DELAY:-1}"
+    [[ "$warmup_attempts" =~ ^[0-9]+$ && "$warmup_attempts" -gt 0 ]] || warmup_attempts=10
+    for ((attempt = 1; attempt <= warmup_attempts; attempt++)); do
+      if ! docker exec -i --user "$uid:$gid" "$container" gpt-webai-slot-healthcheck >/dev/null 2>&1; then
+        if [[ "$attempt" -lt "$warmup_attempts" && "$warmup_delay" != 0 ]]; then
+          sleep "$warmup_delay"
+        fi
+        continue
+      fi
+      if agbrowse_status_json_capture status && json_is_valid "$status"; then
+        kind="$(browser_status_kind "$status")"
+        case "$kind" in
+          ready)
+            ensure_slot_authenticated
+            record_slot_ready
+            return 0
+            ;;
+          login_required)
+            write_slot_state "${CURRENT_SLOT_ID:-unknown}" reseed_login auth.needs_login 0
+            die_hard "login_required for slot $CURRENT_SLOT_ID"
+            ;;
+          blank)
+            record_slot_repair_failed "$repair_reason" "$repair_action"
+            die_hard "browser status blank tab for slot $CURRENT_SLOT_ID: $status"
+            ;;
+          headless)
+            record_slot_repair_failed "$repair_reason" "$repair_action"
+            die_hard "browser CDP reachable but not headed for slot $CURRENT_SLOT_ID: $status"
+            ;;
+        esac
+      fi
+      if [[ "$attempt" -lt "$warmup_attempts" && "$warmup_delay" != 0 ]]; then
+        sleep "$warmup_delay"
+      fi
+    done
+  fi
+  record_slot_repair_failed "$repair_reason" "$repair_action"
+  die_hard "browser readiness timed out for slot $CURRENT_SLOT_ID"
+}
+
+record_session_id() {
+  local record="$1"
+  [[ -f "$record" ]] || return 1
+  lease_value "$record" sessionId
+}
+
+run_capture() {
+  local __outvar="$1"
+  shift
+  local captured_output exit_status stdout_file stderr_file bin slot_bin slot_index slot_port slot_home uid gid
+  if [[ -z "$STATE_DIR" ]]; then
+    safe_state_dir STATE_DIR
+    mkdir -p "$STATE_DIR/tmp"
+    export TMPDIR="$STATE_DIR/tmp"
+  fi
+  stdout_file="$STATE_DIR/tmp/.capture-${CURRENT_COMMAND:-cmd}.$$.$RANDOM.out"
+  stderr_file="$STATE_DIR/tmp/.capture-${CURRENT_COMMAND:-cmd}.$$.$RANDOM.err"
+  bin="$(agbrowse_bin)"
+  if [[ "${1:-}" == agbrowse ]]; then
+    shift
+  fi
+  set +e
+  if [[ -n "${CURRENT_SLOT_ID:-}" ]]; then
+    slot_index="$(slot_index_from_id "$CURRENT_SLOT_ID")"
+    slot_port="$(slot_port_for_index "$slot_index")"
+    slot_home="/state/$CURRENT_SLOT_ID"
+    if [[ "${GPT_WEBAI_SLOT_MODE:-auto}" == fake || "${GPT_WEBAI_SLOT_FAKE_LOCAL:-0}" = 1 ]]; then
+      env BROWSER_AGENT_HOME="$CURRENT_SLOT_STATE_PATH" CDP_PORT="$slot_port" "$bin" "$@" > "$stdout_file" 2> "$stderr_file"
+      exit_status=$?
+    else
+      uid="$(id -u)"
+      gid="$(id -g)"
+      slot_bin="${GPT_WEBAI_SLOT_AGBROWSE_BIN:-agbrowse}"
+      docker exec -i --user "$uid:$gid" \
+        --env "BROWSER_AGENT_HOME=$slot_home" \
+        --env "CDP_PORT=$slot_port" \
+        "${CURRENT_SLOT_CONTAINER:-$(slot_container_for_id "$CURRENT_SLOT_ID")}" \
+        "$slot_bin" "$@" > "$stdout_file" 2> "$stderr_file"
+      exit_status=$?
+    fi
+  else
+    printf 'slot id is required for agbrowse calls\n' > "$stderr_file"
+    exit_status=70
+  fi
+  set -e
+  if [[ "$exit_status" -eq 0 ]]; then
+    captured_output="$(cat "$stdout_file" 2>/dev/null || true)"
+  else
+    captured_output="$(cat "$stdout_file" "$stderr_file" 2>/dev/null || true)"
+  fi
+  rm -f "$stdout_file" "$stderr_file"
+  printf -v "$__outvar" '%s' "$captured_output"
+  return "$exit_status"
+}
+
+agbrowse_status_json_capture() {
+  local __outvar="$1"
+  local status_output="" exit_status old_auto="${AGBROWSE_WEB_AI_AUTO_START-}" had_old_auto=0
+  [[ -n "${AGBROWSE_WEB_AI_AUTO_START+x}" ]] && had_old_auto=1
+  export AGBROWSE_WEB_AI_AUTO_START=0
+  set +e
+  run_capture status_output web-ai status --vendor chatgpt --json
+  exit_status=$?
+  set -e
+  if [[ "$had_old_auto" -eq 1 ]]; then
+    export AGBROWSE_WEB_AI_AUTO_START="$old_auto"
+  else
+    unset AGBROWSE_WEB_AI_AUTO_START
+  fi
+  printf -v "$__outvar" '%s' "$status_output"
+  return "$exit_status"
+}
+
+agbrowse_sessions_list() {
+  local __outvar="$1" limit="${GPT_WEBAI_STATUS_SESSION_LIMIT:-50}"
+  [[ "$limit" =~ ^[0-9]+$ && "$limit" -gt 0 ]] || limit=50
+  run_capture "$__outvar" web-ai sessions list --vendor chatgpt --limit "$limit" --json
+}
+
+agbrowse_tab_cleanup_dry_run() {
+  local __outvar="$1"
+  run_capture "$__outvar" tab-cleanup --dry-run --json
+}
+
+agbrowse_send() {
+  local __outvar="$1" model="$2" effort="$3" prompt="$4"
+  shift 4
+  local -a args=(web-ai send --vendor chatgpt --model "$model" --effort "$effort")
+  if [[ $# -eq 0 ]]; then
+    args+=(--inline-only)
+  else
+    local file
+    for file in "$@"; do
+      args+=(--file "$file")
+    done
+  fi
+  args+=(--parallel --prompt "$prompt" --json)
+  run_capture "$__outvar" "${args[@]}"
+}
+
+agbrowse_poll() {
+  local __outvar="$1" sid="$2" timeout="$3"
+  run_capture "$__outvar" web-ai poll --vendor chatgpt --session "$sid" --timeout "$timeout" --json
+}
+
+agbrowse_sessions_show() {
+  local __outvar="$1" sid="$2"
+  run_capture "$__outvar" web-ai sessions show "$sid" --json
+}
+
+agbrowse_sessions_resume() {
+  local __outvar="$1" sid="$2"
+  run_capture "$__outvar" web-ai sessions resume "$sid" --json
+}
+
+ensure_browser_quiet() {
+  local prior_command="$CURRENT_COMMAND"
+  if [[ -z "${CURRENT_SLOT_ID:-}" ]]; then
+    die_hard 'slot id is required for browser ensure'
+  fi
+  ensure_slot_browser_quiet >/dev/null
+  CURRENT_COMMAND="$prior_command"
+}
+
+capture_or_die_valid_json() {
+  local label="$1" output="$2"
+  if ! json_is_valid "$output"; then
+    die_hard "malformed $label JSON: $output"
+  fi
+}
+
+json_response_status() {
+  local output="$1"
+  python3 -c '
+import json
+import sys
+
+data = json.loads(sys.stdin.read() or "{}")
+
+def status_from(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ("status", "state"):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            return item.lower()
+    for key in ("session", "provider", "message"):
+        item = status_from(value.get(key))
+        if item:
+            return item
+    return None
+
+status = status_from(data)
+if not status:
+    sys.exit(1)
+print(status)
+' <<< "$output"
+}
+
+json_first_string() {
+  local output="$1"
+  shift
+  python3 -c '
+import json
+import sys
+
+keys = sys.argv[1:]
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(1)
+
+def walk(value):
+    if isinstance(value, dict):
+        for key in keys:
+            item = value.get(key)
+            if isinstance(item, str) and item:
+                print(item)
+                raise SystemExit(0)
+        for item in value.values():
+            walk(item)
+    elif isinstance(value, list):
+        for item in value:
+            walk(item)
+
+walk(data)
+sys.exit(1)
+' "$@" <<< "$output"
+}
+
+json_answer_text() {
+  local output="$1"
+  json_first_string "$output" answerText answer text content 2>/dev/null || true
+}
+
+json_attachment_missing_answer() {
+  local output="$1" text
+  text="$(json_answer_text "$output")"
+  [[ "${text^^}" == *ATTACHMENT_MISSING* ]]
+}
+
+update_session_target_from_json() {
+  local output="$1" target="" url=""
+  target="$(json_first_string "$output" targetId tabId 2>/dev/null || true)"
+  url="$(json_first_string "$output" conversationUrl url originalUrl 2>/dev/null || true)"
+  [[ -n "$target" ]] && CURRENT_TARGET_ID="$target"
+  [[ -n "$url" ]] && CURRENT_CONVERSATION_URL="$url"
+  return 0
+}
+
+hydrate_session_target_from_provider() {
+  local sid="$1" show_output=""
+  [[ -n "$sid" ]] || return 0
+  [[ -n "${CURRENT_TARGET_ID:-}" && -n "${CURRENT_CONVERSATION_URL:-}" ]] && return 0
+  if ! agbrowse_sessions_show show_output "$sid"; then
+    return 0
+  fi
+  json_is_valid "$show_output" || return 0
+  update_session_target_from_json "$show_output"
+  return 0
+}
+
+json_auth_required() {
+  local status
+  status="$(json_response_status "$1" 2>/dev/null || true)"
+  case "$status" in
+    login_required|auth_required|needs_login|unauthenticated|unauthorized)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+emit_session_running() {
+  local record="$1" kind="$2" model="$3" effort="$4" fingerprint="$5" sid="$6"
+  local resume_command
+  write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$sid" running
+  resume_command="$(resume_command_for_session "$sid" || true)"
+  emit_envelope true running false false session.running "$(public_message_for_reason session.running '')" "$(next_command_for_reason session.running)" "$resume_command" 0 >&3
+}
+
+emit_attachment_unavailable() {
+  local sid="$1"
+  CURRENT_SESSION_ID="$sid"
+  emit_envelope true recovering false false provider.attachment_unavailable "$(public_message_for_reason provider.attachment_unavailable '')" 'gpt-webai-lifecycle status' '' 0 >&3
+}
+
+handle_poll_output() {
+  local sid="$1" record="$2" kind="$3" model="$4" effort="$5" fingerprint="$6" output="$7"
+  local output_sid response_status
+  CURRENT_SESSION_ID="$sid"
+  capture_or_die_valid_json 'poll' "$output"
+  update_session_target_from_json "$output"
+  hydrate_session_target_from_provider "$sid"
+  if json_auth_required "$output"; then
+    die_hard "auth_required for $sid: $output"
+  fi
+  output_sid="$(json_session_id "$output" 2>/dev/null || true)"
+  if [[ "$output_sid" != "$sid" ]]; then
+    die_hard "poll JSON did not contain sessionId for $sid: $output"
+  fi
+  response_status="$(json_response_status "$output" 2>/dev/null || true)"
+  case "$response_status" in
+    done|complete|completed|success|succeeded)
+      if [[ "$(record_attachment_count "$record")" -gt 0 ]] && json_attachment_missing_answer "$output"; then
+        write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$sid" attachment_missing
+        emit_attachment_unavailable "$sid"
+        return 0
+      fi
+      write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$sid" done
+      printf '%s\n' "$output"
+      ;;
+    running|timeout|incomplete|pending|queued|in_progress|processing|streaming|sent)
+      emit_session_running "$record" "$kind" "$model" "$effort" "$fingerprint" "$sid"
+      ;;
+    *)
+      die_hard "unexpected provider status for $sid: ${response_status:-missing}: $output"
+      ;;
+  esac
+}
+
+cleanup_holders() {
+  local mode="$1" file name reason
+  CLEANUP_REMOVED_HOLDERS=0
+  shopt -s nullglob
+  for file in "$STATE_DIR"/holders/*.lease; do
+    if reason="$(holder_stale_reason "$file" "$BOOT_ID")"; then
+      name="$(basename "$file" .lease)"
+      printf 'cleanup_holder=%s:%s\n' "$name" "$reason"
+      if [[ "$mode" == apply ]]; then
+        rm -f "$file"
+        CLEANUP_REMOVED_HOLDERS=$((CLEANUP_REMOVED_HOLDERS + 1))
+      fi
+    fi
+  done
+  shopt -u nullglob
+}
+
+report_cleanup_skip() {
+  local scope="$1" reason="$2" target="$3"
+  CLEANUP_SKIPPED=$((CLEANUP_SKIPPED + 1))
+  printf 'skipped_cleanup=%s:%s:%s\n' "$scope" "$reason" "$(one_line "$target")"
+}
+
+lock_dir_has_extra_entries() {
+  local dir="$1" entry base
+  shopt -s nullglob dotglob
+  for entry in "$dir"/*; do
+    base="$(basename "$entry")"
+    if [[ "$base" != holder ]]; then
+      shopt -u nullglob dotglob
+      return 0
+    fi
+  done
+  shopt -u nullglob dotglob
+  return 1
+}
+
+cleanup_locks() {
+  local mode="$1" dir name reason
+  CLEANUP_REMOVED_LOCKS=0
+  shopt -s nullglob
+  for dir in "$STATE_DIR"/locks/*.lock; do
+    [[ -d "$dir" ]] || continue
+    if reason="$(lock_stale_reason "$dir" "$BOOT_ID")"; then
+      name="$(basename "$dir")"
+      printf 'cleanup_lock=%s:%s\n' "$name" "$reason"
+      if [[ "$mode" == apply ]]; then
+        if lock_dir_has_extra_entries "$dir"; then
+          report_cleanup_skip lock "$name:not-empty" "$dir"
+          continue
+        fi
+        rm -f "$dir/holder"
+        if ! rmdir "$dir" 2>/dev/null; then
+          report_cleanup_skip lock "$name:rmdir-failed" "$dir"
+          continue
+        fi
+        CLEANUP_REMOVED_LOCKS=$((CLEANUP_REMOVED_LOCKS + 1))
+      fi
+    fi
+  done
+  shopt -u nullglob
+}
+
+cmd_cleanup() {
+  local mode=""
+  CURRENT_COMMAND=cleanup
+  case "${1:-}" in
+    --dry-run) mode=dry-run ;;
+    --apply) mode=apply ;;
+    *) public_usage input.usage 'cleanup requires --dry-run or --apply' ;;
+  esac
+  [[ $# -eq 1 ]] || public_usage input.unknown_argument 'cleanup takes exactly one mode'
+
+  ENVELOPE_CONTEXT=1
+  CLEANUP_SKIPPED=0
+  init_state 0
+  printf 'cleanup_mode=%s\n' "$mode"
+  printf 'boot_id=%s\n' "$BOOT_ID"
+  cleanup_holders "$mode"
+  cleanup_locks "$mode"
+  CLEANUP_REMOVED_SINGLETONS=0
+  printf 'sessions_total=0\n'
+  printf 'sessions_sent=0\n'
+  printf 'sessions_running=0\n'
+  printf 'sessions_timeout=0\n'
+  printf 'tabs_cleanup_candidates=0\n'
+  printf 'removed_holders=%s\n' "${CLEANUP_REMOVED_HOLDERS:-0}"
+  printf 'removed_locks=%s\n' "${CLEANUP_REMOVED_LOCKS:-0}"
+  printf 'removed_singletons=%s\n' "${CLEANUP_REMOVED_SINGLETONS:-0}"
+  printf 'skipped_cleanups=%s\n' "${CLEANUP_SKIPPED:-0}"
+}
+
+recover_same_session() {
+  local sid="$1" show_output resume_output
+  CURRENT_SESSION_ID="$sid"
+  if ! agbrowse_sessions_show show_output "$sid"; then
+    die_hard "sessions show failed for $sid: $show_output"
+  fi
+  capture_or_die_valid_json 'sessions show' "$show_output"
+  update_session_target_from_json "$show_output"
+  ensure_browser_quiet
+  if ! agbrowse_sessions_resume resume_output "$sid"; then
+    die_hard "sessions resume failed for $sid: $resume_output"
+  fi
+  capture_or_die_valid_json 'sessions resume' "$resume_output"
+  update_session_target_from_json "$resume_output"
+}
+
+poll_session() {
+  local sid="$1" record="$2" kind="$3" model="$4" effort="$5" fingerprint="$6"
+  local recoveries="${GPT_WEBAI_POLL_RECOVERIES:-2}"
+  local attempt=0 output status timeout
+  [[ "$recoveries" =~ ^[0-9]+$ ]] || recoveries=2
+  timeout="$(kind_timeout "$kind")"
+  CURRENT_SESSION_ID="$sid"
+
+  while :; do
+    write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$sid" running
+    if agbrowse_poll output "$sid" "$timeout"; then
+      handle_poll_output "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint" "$output"
+      return 0
+    else
+      status=$?
+    fi
+    if [[ "$attempt" -ge "$recoveries" ]]; then
+      if json_is_valid "$output"; then
+        handle_poll_output "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint" "$output"
+        return 0
+      fi
+      die_hard "poll failed for $sid after recovery attempts: exit=$status output=$output"
+    fi
+    record_event session.poll_recovering recovering session.recovery "$sid" "$fingerprint" "$(basename "$record")" || true
+    recover_same_session "$sid"
+    attempt=$((attempt + 1))
+  done
+}
+
+send_for_session() {
+  local __outvar="$1" record="$2" kind="$3" model="$4" effort="$5" fingerprint="$6" prompt="$7"
+  shift 7
+  local output status session_id="" record_status=""
+
+  while :; do
+    if session_id="$(record_session_id "$record" 2>/dev/null || true)"; [[ -n "$session_id" ]]; then
+      CURRENT_SESSION_ID="$session_id"
+      hydrate_session_target_from_provider "$session_id"
+      printf -v "$__outvar" '%s' "$session_id"
+      return 0
+    fi
+    record_status="$(session_record_status "$record" 2>/dev/null || true)"
+    if [[ "$record_status" == send_started ]]; then
+      die_hard "send started without sessionId for $fingerprint"
+    fi
+
+    write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "" send_started
+    if agbrowse_send output "$model" "$effort" "$prompt" "$@"; then
+      if session_id="$(json_session_id "$output" 2>/dev/null || true)"; [[ -n "$session_id" ]]; then
+        CURRENT_SESSION_ID="$session_id"
+        update_session_target_from_json "$output"
+        hydrate_session_target_from_provider "$session_id"
+        write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$session_id" sent
+        printf -v "$__outvar" '%s' "$session_id"
+        return 0
+      fi
+      if json_is_valid "$output" && json_auth_required "$output"; then
+        die_hard "auth_required during send: $output"
+      fi
+      die_hard "send unknown session after send_started: $output"
+    else
+      status=$?
+    fi
+    if session_id="$(json_session_id "$output" 2>/dev/null || true)"; [[ -n "$session_id" ]]; then
+      CURRENT_SESSION_ID="$session_id"
+      update_session_target_from_json "$output"
+      hydrate_session_target_from_provider "$session_id"
+      write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$session_id" sent
+      printf -v "$__outvar" '%s' "$session_id"
+      return 0
+    fi
+    die_hard "send unknown session after send_started: exit=$status output=$output"
+  done
+}
+
+cmd_run() {
+  local kind="" prompt="" prompt_set=0 model effort fingerprint record sid fingerprint_lock_holder="" slot_lock_holder=""
+  local record_status="" record_slot="" record_container="" descriptor
+  local normalized_file=""
+  local -a file_paths=() descriptor_args=() send_file_paths=()
+  CURRENT_COMMAND=run
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kind) (($# >= 2)) || public_usage input.missing_kind 'run requires --kind pro|xhigh'; kind="$2"; shift 2 ;;
+      --prompt) (($# >= 2)) || public_usage input.empty_prompt 'run requires --prompt PROMPT'; prompt="$2"; prompt_set=1; shift 2 ;;
+      --file) (($# >= 2)) || public_usage input.invalid_file '--file requires a path'; normalize_attachment_file normalized_file "$2"; file_paths+=("$normalized_file"); shift 2 ;;
+      --file=*) normalize_attachment_file normalized_file "${1#--file=}"; file_paths+=("$normalized_file"); shift ;;
+      *) public_usage input.unknown_argument "unknown run argument: $1" ;;
+    esac
+  done
+
+  case "$kind" in
+    '') public_usage input.missing_kind 'run requires --kind pro|xhigh' ;;
+    pro|xhigh) ;;
+    *) public_usage input.bad_kind 'run --kind must be pro or xhigh' ;;
+  esac
+  [[ "$prompt_set" -eq 1 && -n "$prompt" ]] || public_usage input.empty_prompt 'run requires --prompt PROMPT'
+  ENVELOPE_CONTEXT=1
+  CURRENT_KIND="$kind"
+  model="$(kind_model "$kind")"
+  effort="$(kind_effort "$kind")"
+  init_state
+  prepare_attachment_metadata "${file_paths[@]}"
+  prompt="$(with_attachment_access_gate "$prompt")"
+  while IFS= read -r descriptor || [[ -n "$descriptor" ]]; do
+    [[ -n "$descriptor" ]] && descriptor_args+=("$descriptor")
+  done < <(attachment_descriptor_args)
+  fingerprint="$(request_fingerprint "$kind" "$model" "$effort" "$prompt" "${descriptor_args[@]}")"
+  CURRENT_REQUEST_ID="$fingerprint"
+  record="$STATE_DIR/sessions/$fingerprint.record"
+
+  if ! runtime_lock_acquire "fingerprint-$fingerprint" fingerprint_lock_holder; then
+    if sid="$(record_session_id "$record" 2>/dev/null || true)"; [[ -n "$sid" ]]; then
+      CURRENT_SESSION_ID="$sid"
+      emit_session_lock_busy "$sid"
+    else
+      emit_envelope true running false false session.running "$(public_message_for_reason session.running '')" 'gpt-webai-lifecycle status' '' 0 >&3
+    fi
+    return 0
+  fi
+
+  sid="$(record_session_id "$record" 2>/dev/null || true)"
+  record_status="$(session_record_status "$record" 2>/dev/null || true)"
+  if [[ -z "$sid" && "$record_status" == send_started ]]; then
+    die_hard "send started without sessionId for $fingerprint"
+  fi
+
+  if [[ -n "$sid" ]]; then
+    CURRENT_SESSION_ID="$sid"
+    record_slot="$(session_record_value "$record" slotId || true)"
+    if [[ -n "$record_slot" ]]; then
+      if ! slot_pool_enabled; then
+        CURRENT_SLOT_ID="$record_slot"
+        record_container="$(session_record_value "$record" slotContainer || true)"
+        CURRENT_SLOT_CONTAINER="${record_container:-$(slot_container_for_id "$record_slot")}"
+        emit_slot_pool_unavailable "$sid"
+        return 0
+      fi
+      record_container="$(session_record_value "$record" slotContainer || true)"
+      CURRENT_SLOT_CONTAINER="${record_container:-$(slot_container_for_id "$record_slot")}"
+      if ! acquire_specific_slot_lease slot_lock_holder "$record_slot"; then
+        emit_session_lock_busy "$sid"
+        return 0
+      fi
+      poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+      release_slot_lease "$slot_lock_holder"
+      return 0
+    fi
+    emit_slot_pool_unavailable "$sid"
+    return 0
+  fi
+
+  if ! slot_pool_enabled; then
+    emit_slot_pool_unavailable ""
+    return 0
+  fi
+  [[ -n "${CURRENT_RUN_ID:-}" ]] || CURRENT_RUN_ID="$(new_run_id)"
+  CURRENT_FENCING_TOKEN="$(sha256_text "$fingerprint:$CURRENT_RUN_ID:$$:$RANDOM")"
+  if [[ "$record_status" == queued ]]; then
+    load_request_capsule "$fingerprint"
+    prompt="$(cat "$CURRENT_REQUEST_DIR/prompt.txt")"
+  else
+    create_request_capsule "$fingerprint" "$kind" "$model" "$effort" "$prompt"
+    write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "" accepted
+  fi
+  if ! acquire_slot_lease slot_lock_holder "${GPT_WEBAI_SLOT_QUEUE_WAIT:-0}"; then
+    write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "" queued
+    emit_slot_pool_busy "$fingerprint"
+    return 0
+  fi
+  expose_attachments_to_slot "$fingerprint" "$CURRENT_SLOT_ID"
+  verify_slot_attachment_visibility "$fingerprint"
+  while IFS= read -r descriptor || [[ -n "$descriptor" ]]; do
+    [[ -n "$descriptor" ]] && send_file_paths+=("$descriptor")
+  done < <(container_attachment_paths "$fingerprint")
+  ensure_browser_quiet
+  send_for_session sid "$record" "$kind" "$model" "$effort" "$fingerprint" "$prompt" "${send_file_paths[@]}"
+  CURRENT_SESSION_ID="$sid"
+  poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+  release_slot_lease "$slot_lock_holder"
+}
+
+cmd_resume() {
+  local kind="" sid="" model effort record fingerprint resume_output resume_lock_key resume_lock_holder="" slot_lock_holder=""
+  local found_record="" found_slot="" found_container=""
+  CURRENT_COMMAND=resume
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kind) (($# >= 2)) || public_usage input.missing_kind 'resume requires --kind pro|xhigh'; kind="$2"; shift 2 ;;
+      --session) (($# >= 2)) || public_usage input.missing_session 'resume requires --session SID'; sid="$2"; shift 2 ;;
+      *) public_usage input.unknown_argument "unknown resume argument: $1" ;;
+    esac
+  done
+
+  case "$kind" in
+    '') public_usage input.missing_kind 'resume requires --kind pro|xhigh' ;;
+    pro|xhigh) ;;
+    *) public_usage input.bad_kind 'resume --kind must be pro or xhigh' ;;
+  esac
+  [[ -n "$sid" ]] || public_usage input.missing_session 'resume requires --session SID'
+  valid_id "$sid" || public_usage input.invalid_session "invalid id for session: $sid"
+  ENVELOPE_CONTEXT=1
+  CURRENT_KIND="$kind"
+  model="$(kind_model "$kind")"
+  effort="$(kind_effort "$kind")"
+  init_state
+  found_record="$(find_session_record_by_id "$sid" || true)"
+  if [[ -n "$found_record" ]]; then
+    found_slot="$(session_record_value "$found_record" slotId || true)"
+  fi
+  if [[ -n "$found_slot" ]]; then
+    record="$found_record"
+    fingerprint="$(basename "$record" .record)"
+    CURRENT_SESSION_ID="$sid"
+    CURRENT_SLOT_ID="$found_slot"
+    found_container="$(session_record_value "$record" slotContainer || true)"
+    CURRENT_SLOT_CONTAINER="${found_container:-$(slot_container_for_id "$found_slot")}"
+    if ! slot_pool_enabled; then
+      emit_slot_pool_unavailable "$sid"
+      return 0
+    fi
+    resume_lock_key="resume-$sid"
+    if ! runtime_lock_acquire "$resume_lock_key" resume_lock_holder; then
+      emit_session_lock_busy "$sid"
+      return 0
+    fi
+    if ! acquire_specific_slot_lease slot_lock_holder "$found_slot"; then
+      runtime_lock_release "$resume_lock_key" "$resume_lock_holder"
+      emit_session_lock_busy "$sid"
+      return 0
+    fi
+    write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "$sid" resumed
+    ensure_browser_quiet
+    if ! agbrowse_sessions_resume resume_output "$sid"; then
+      die_hard "sessions resume failed for $sid: $resume_output"
+    fi
+    capture_or_die_valid_json 'sessions resume' "$resume_output"
+    update_session_target_from_json "$resume_output"
+    poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+    release_slot_lease "$slot_lock_holder"
+    runtime_lock_release "$resume_lock_key" "$resume_lock_holder"
+    return 0
+  fi
+  CURRENT_SESSION_ID="$sid"
+  emit_slot_pool_unavailable "$sid"
+}
+
+cmd_queue() {
+  local action="${1:-}" request="" fingerprint="" record="" kind="" model="" effort="" prompt="" sid="" status="" fingerprint_lock_holder="" slot_lock_holder="" found_slot="" found_container=""
+  local descriptor
+  CURRENT_COMMAND=queue.resume
+  case "$action" in
+    resume) shift ;;
+    *) public_usage input.usage "unknown queue command: ${1:-}" ;;
+  esac
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --request) (($# >= 2)) || public_usage input.missing_request 'queue resume requires --request FINGERPRINT'; request="$2"; shift 2 ;;
+      *) public_usage input.unknown_argument "unknown queue resume argument: $1" ;;
+    esac
+  done
+  [[ -n "$request" ]] || public_usage input.missing_request 'queue resume requires --request FINGERPRINT'
+  valid_id "$request" || public_usage input.invalid_request "invalid request id: $request"
+  ENVELOPE_CONTEXT=1
+  init_state
+  fingerprint="$request"
+  CURRENT_REQUEST_ID="$fingerprint"
+  record="$STATE_DIR/sessions/$fingerprint.record"
+  [[ -f "$record" ]] || die_hard "queued request capsule unavailable"
+  kind="$(session_record_value "$record" kind || true)"
+  model="$(session_record_value "$record" model || true)"
+  effort="$(session_record_value "$record" effort || true)"
+  CURRENT_KIND="$kind"
+  [[ -n "$kind" && -n "$model" && -n "$effort" ]] || die_hard "queued request capsule unavailable"
+  if ! runtime_lock_acquire "fingerprint-$fingerprint" fingerprint_lock_holder; then
+    emit_envelope true running false false session.running "$(public_message_for_reason session.running '')" 'gpt-webai-lifecycle status' '' 0 >&3
+    return 0
+  fi
+  sid="$(record_session_id "$record" 2>/dev/null || true)"
+  status="$(session_record_status "$record" 2>/dev/null || true)"
+  if [[ -n "$sid" ]]; then
+    CURRENT_SESSION_ID="$sid"
+    found_slot="$(session_record_value "$record" slotId || true)"
+    if [[ -n "$found_slot" ]]; then
+      found_container="$(session_record_value "$record" slotContainer || true)"
+      CURRENT_SLOT_CONTAINER="${found_container:-$(slot_container_for_id "$found_slot")}"
+      CURRENT_SLOT_ID="$found_slot"
+      if ! slot_pool_enabled; then
+        emit_slot_pool_unavailable "$sid"
+        return 0
+      fi
+      if ! acquire_specific_slot_lease slot_lock_holder "$found_slot"; then
+        emit_session_lock_busy "$sid"
+        return 0
+      fi
+      poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+      release_slot_lease "$slot_lock_holder"
+      return 0
+    fi
+    poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+    return 0
+  fi
+  if [[ "$status" == send_started ]]; then
+    die_hard "send started without sessionId for $fingerprint"
+  fi
+  found_slot="$(session_record_value "$record" slotId || true)"
+  if [[ -n "$found_slot" ]]; then
+    found_container="$(session_record_value "$record" slotContainer || true)"
+    CURRENT_SLOT_ID="$found_slot"
+    CURRENT_SLOT_CONTAINER="${found_container:-$(slot_container_for_id "$found_slot")}"
+    if ! slot_pool_enabled; then
+      emit_slot_pool_unavailable ""
+      return 0
+    fi
+    if ! acquire_specific_slot_lease slot_lock_holder "$found_slot"; then
+      emit_slot_busy
+      return 0
+    fi
+    load_request_capsule "$fingerprint"
+    prompt="$(cat "$CURRENT_REQUEST_DIR/prompt.txt")"
+    expose_attachments_to_slot "$fingerprint" "$CURRENT_SLOT_ID"
+    verify_slot_attachment_visibility "$fingerprint"
+    local -a pinned_send_file_paths=()
+    while IFS= read -r descriptor || [[ -n "$descriptor" ]]; do
+      [[ -n "$descriptor" ]] && pinned_send_file_paths+=("$descriptor")
+    done < <(container_attachment_paths "$fingerprint")
+    ensure_browser_quiet
+    send_for_session sid "$record" "$kind" "$model" "$effort" "$fingerprint" "$prompt" "${pinned_send_file_paths[@]}"
+    CURRENT_SESSION_ID="$sid"
+    poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+    release_slot_lease "$slot_lock_holder"
+    return 0
+  fi
+  if ! slot_pool_enabled; then
+    emit_slot_pool_unavailable ""
+    return 0
+  fi
+  load_request_capsule "$fingerprint"
+  prompt="$(cat "$CURRENT_REQUEST_DIR/prompt.txt")"
+  if ! acquire_slot_lease slot_lock_holder "${GPT_WEBAI_SLOT_QUEUE_WAIT:-0}"; then
+    write_session_record "$record" "$kind" "$model" "$effort" "$fingerprint" "" queued
+    emit_slot_pool_busy "$fingerprint"
+    return 0
+  fi
+  expose_attachments_to_slot "$fingerprint" "$CURRENT_SLOT_ID"
+  verify_slot_attachment_visibility "$fingerprint"
+  local -a send_file_paths=()
+  while IFS= read -r descriptor || [[ -n "$descriptor" ]]; do
+    [[ -n "$descriptor" ]] && send_file_paths+=("$descriptor")
+  done < <(container_attachment_paths "$fingerprint")
+  ensure_browser_quiet
+  send_for_session sid "$record" "$kind" "$model" "$effort" "$fingerprint" "$prompt" "${send_file_paths[@]}"
+  CURRENT_SESSION_ID="$sid"
+  poll_session "$sid" "$record" "$kind" "$model" "$effort" "$fingerprint"
+  release_slot_lease "$slot_lock_holder"
+}
+
+cmd_future() {
+  init_state
+  printf '%s is not implemented in the task-1 state core yet\n' "$1" >&2
+  exit "$EX_HARD"
+}
+
+main() {
+  CURRENT_COMMAND="${1:-}"
+  case "${1:-}" in
+    status) shift; [[ $# -eq 0 ]] || public_usage input.unknown_argument 'status takes no arguments'; cmd_status ;;
+    constants) shift; CURRENT_COMMAND=constants; [[ $# -eq 0 ]] || public_usage input.unknown_argument 'constants takes no arguments'; cmd_constants ;;
+    browser) shift; cmd_browser "$@" ;;
+    __test) shift; cmd_test "$@" ;;
+    run) shift; cmd_run "$@" ;;
+    resume) shift; cmd_resume "$@" ;;
+    queue) shift; cmd_queue "$@" ;;
+    cleanup) shift; cmd_cleanup "$@" ;;
+    -h|--help) usage; exit "$EX_OK" ;;
+    '') public_usage input.usage 'missing command' ;;
+    *) public_usage input.usage "unknown command: $1" ;;
+  esac
+}
+
+main "$@"
