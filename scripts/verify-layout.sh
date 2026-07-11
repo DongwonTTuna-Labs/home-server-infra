@@ -29,6 +29,7 @@ required=(
   stacks/paca/caddy/Caddyfile
   stacks/paca/relay-ai-enforce.sql
   stacks/paca/mcp-local-servers.sql
+  stacks/paca/overrides/ai-agent/enforce_xhigh.py
   stacks/coding/README.md
   stacks/coding/systemd/coding-tools.target
   stacks/coding/systemd/codex-cli-update.service
@@ -199,11 +200,11 @@ if ! grep -q '127[.]0[.]0[.]1:3080:80' stacks/paca/compose.yaml; then
   exit 1
 fi
 if [ -e stacks/paca/overrides/ai-agent/builder.py ]; then
-  printf 'Paca must not source-override auto-updated ai-agent code\n' >&2
+  printf 'Paca must not freeze the complete auto-updated ai-agent builder\n' >&2
   exit 1
 fi
-if grep -q 'overrides/ai-agent' stacks/paca/compose.yaml stacks/paca/docker-compose.override.yaml; then
-  printf 'Paca compose must not bind-mount ai-agent source overrides\n' >&2
+if grep -q 'builder.py:/app/src/agent/builder.py' stacks/paca/compose.yaml stacks/paca/docker-compose.override.yaml; then
+  printf 'Paca compose must not bind-mount a complete ai-agent builder override\n' >&2
   exit 1
 fi
 paca_watchtower_true_services_actual="$(paca_watchtower_true_services)"
@@ -228,6 +229,64 @@ if grep -Eq '127[.]0[.]0[.]1:830[123]|localhost:830[123]' stacks/paca/mcp-local-
   printf 'Paca MCP seed must not use host loopback URLs\n' >&2
   exit 1
 fi
+if ! grep -q "deleted_at IS NOT NULL" stacks/paca/relay-ai-enforce.sql; then
+  printf 'Paca relay constraint must tolerate retained soft-deleted rows\n' >&2
+  exit 1
+fi
+if ! grep -q "http://codex-lb:2455/v1" stacks/paca/relay-ai-enforce.sql; then
+  printf 'Paca relay policy must route agents through local codex-lb\n' >&2
+  exit 1
+fi
+for doc in stacks/paca/README.md docs/restore.md; do
+  if ! grep -q 'relay-ai-enforce.sql' "$doc"; then
+    printf 'Paca deployment docs must apply relay enforcement: %s\n' "$doc" >&2
+    exit 1
+  fi
+  if [ "$(grep -Fc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' "$doc")" -lt 2 ]; then
+    printf 'Paca SQL commands must expand database names inside the container: %s\n' "$doc" >&2
+    exit 1
+  fi
+done
+if ! grep -q 'external:[[:space:]]*true' stacks/paca/compose.yaml; then
+  printf 'Paca shared network must be independently managed\n' >&2
+  exit 1
+fi
+if ! grep -q 'enforce_xhigh.py' stacks/paca/compose.yaml; then
+  printf 'Paca ai-agent must install the fail-closed xhigh patch\n' >&2
+  exit 1
+fi
+if ! grep -q 'ghcr.io/paca-ai/paca-agent-server' stacks/paca/compose.yaml; then
+  printf 'Paca sandboxes must default to the Paca agent-server image\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'pg_dump "$$DATABASE_URL" --clean --if-exists --no-owner' stacks/paca/compose.yaml; then
+  printf 'Paca backups must support clean transactional restore\n' >&2
+  exit 1
+fi
+if ! grep -A8 'Backup failed' stacks/paca/compose.yaml | grep -q 'exit 1'; then
+  printf 'Paca backup failures must exit non-zero\n' >&2
+  exit 1
+fi
+if ! grep -q -- '--single-transaction' docs/restore.md; then
+  printf 'Paca restore must be transactional and fail closed\n' >&2
+  exit 1
+fi
+if ! grep -A3 '^  default:' stacks/paca/compose.yaml | grep -q 'external:[[:space:]]*true'; then
+  printf 'Paca default network must be independently managed\n' >&2
+  exit 1
+fi
+for compose in stacks/codex-lb/compose.yaml stacks/mcp-suite/compose.yaml; do
+  if ! grep -A3 '^  paca_mcp_internal:' "$compose" | grep -q 'external:[[:space:]]*true'; then
+    printf 'Shared Paca network must be external in %s\n' "$compose" >&2
+    exit 1
+  fi
+done
+for doc in docs/restore.md stacks/codex-lb/README.md stacks/mcp-suite/README.md stacks/paca/README.md; do
+  if ! grep -q 'docker network create paca_mcp_internal' "$doc"; then
+    printf 'Shared Paca network bootstrap missing from %s\n' "$doc" >&2
+    exit 1
+  fi
+done
 cat > "$tmpdir/paca.env" <<'EOF'
 ENVIRONMENT=production
 PUBLIC_URL=https://paca.dongwontuna.net

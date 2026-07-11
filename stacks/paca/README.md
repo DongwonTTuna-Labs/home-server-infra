@@ -15,6 +15,7 @@ stacks/paca/
   caddy/Caddyfile
   relay-ai-enforce.sql
   mcp-local-servers.sql
+  overrides/ai-agent/enforce_xhigh.py
 ```
 
 `stacks/paca/.env.example` documents required names. `stacks/paca/.env` holds
@@ -46,21 +47,30 @@ ls -lh stacks/paca/backups/paca-*.sql.gz
 ## Run
 
 ```sh
+docker network inspect paca_mcp_internal >/dev/null 2>&1 || docker network create paca_mcp_internal
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml up -d
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml stop
 ```
 
 Don't delete volumes during normal stop, restart, rollback, or restore.
 
-## MCP Seed
+The shared `paca_mcp_internal` network is independently managed and must exist
+before Paca, codex-lb, or mcp-suite starts. Compose teardown must not remove it.
+
+## Database Policies And MCP Seed
 
 Paca uses the private Docker network `paca_mcp_internal`. `mcp-suite` joins that
-network as `mcp-suite`, and Paca agents use per-agent MCP rows seeded by
-`mcp-local-servers.sql`.
+network as `mcp-suite`. After the API has applied its schema migrations, apply
+the idempotent relay policy first and then seed per-agent MCP rows:
 
 ```sh
-docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < stacks/paca/mcp-local-servers.sql
+docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < stacks/paca/relay-ai-enforce.sql
+docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < stacks/paca/mcp-local-servers.sql
 ```
+
+The first command updates active agents, installs the relay trigger, and adds a
+constraint that leaves retained soft-deleted rows valid. Both commands fail on
+the first SQL error. Re-run them after a database restore.
 
 The seed registers `lsp`, `codegraph`, and `agbrowse` with these private URLs:
 
@@ -69,6 +79,14 @@ The seed registers `lsp`, `codegraph`, and `agbrowse` with these private URLs:
 - `http://mcp-suite:8303/mcp`
 
 These URLs stay off Cloudflare Tunnel.
+
+## Xhigh Enforcement
+
+The ai-agent start command runs `enforce_xhigh.py` before uvicorn. The patcher
+adds only the `reasoning_effort="xhigh"` argument to the image's current
+`build_llm()` implementation, preserving upstream builder updates. It is
+idempotent and fails startup if that upstream call shape drifts, so Watchtower
+cannot silently drop the xhigh contract.
 
 ## ENCRYPTION_KEY
 
@@ -107,5 +125,5 @@ ignored.
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml ps
 curl -fsS http://127.0.0.1:3080/api/healthz
 curl -fsS https://paca.dongwontuna.net/api/healthz
-docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```

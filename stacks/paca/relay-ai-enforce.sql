@@ -28,7 +28,10 @@ WHERE deleted_at IS NULL;
 
 ALTER TABLE agents ADD CONSTRAINT agents_relay_ai_llm_only
 CHECK (
-    llm_provider = 'ai-relay'
-    AND llm_model = 'gpt-5.5'
-    AND llm_base_url = 'http://codex-lb:2455/v1'
+    deleted_at IS NOT NULL
+    OR (
+        llm_provider = 'ai-relay'
+        AND llm_model = 'gpt-5.5'
+        AND llm_base_url = 'http://codex-lb:2455/v1'
+    )
 );

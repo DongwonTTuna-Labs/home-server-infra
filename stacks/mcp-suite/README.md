@@ -18,6 +18,7 @@ local stdio runtimes and do not benefit from wrapping in this container.
 ## Run
 
 ```sh
+docker network inspect paca_mcp_internal >/dev/null 2>&1 || docker network create paca_mcp_internal
 docker compose -f stacks/mcp-suite/compose.yaml up -d --build
 docker exec mcp-suite mcp-suite-healthcheck
 docker exec mcp-suite mcp-suite-smoke
@@ -28,10 +29,10 @@ proxy binds inside the container on all interfaces so Docker port publishing can
 reach it, but the host-side listener remains loopback-only. Do not add these
 ports to Cloudflare Tunnel ingress.
 
-For Paca containers, `mcp-suite` also joins the external Docker network
-`paca_mcp_internal` as `mcp-suite`. `stacks/paca/compose.yaml` creates that
-network; live attach or restart only after Paca has created it. Paca-internal
-URLs are:
+For Paca containers, `mcp-suite` also joins the independently managed external
+Docker network `paca_mcp_internal` as `mcp-suite`. Create it once with the
+command above before starting Paca, codex-lb, or mcp-suite. Compose teardown
+must not remove it. Paca-internal URLs are:
 
 - `http://mcp-suite:8301/mcp`
 - `http://mcp-suite:8302/mcp`

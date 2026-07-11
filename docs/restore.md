@@ -12,17 +12,24 @@ This repository restores configuration, not live data.
    restore OpenCode DNS or ingress.
 3. Restore Docker volumes `codex-lb-data` and
    `codex-lb_codex-lb-postgres-data`.
-4. Start PostgreSQL only. Do not start `codex-lb-stack.service` or the full
+4. Create the independently managed private network shared with Paca and
+   mcp-suite:
+
+   ```sh
+   docker network inspect paca_mcp_internal >/dev/null 2>&1 || docker network create paca_mcp_internal
+   ```
+
+5. Start PostgreSQL only. Do not start `codex-lb-stack.service` or the full
    Compose stack yet because application startup applies migrations:
 
    ```sh
    docker compose -f stacks/codex-lb/compose.yaml up -d postgres
    ```
 
-5. Create a new backup of the restored state, classify the Alembic revision and
+6. Create a new backup of the restored state, classify the Alembic revision and
    physical schema, and complete the fail-closed migration preflight in
    `stacks/codex-lb/README.md`.
-6. Only after `current` reports the pinned image's target head and `check`
+7. Only after `current` reports the pinned image's target head and `check`
    reports `migration_policy=ok` plus `schema_drift=none`, start the application
    and validate/recreate the tunnel connector:
 
@@ -33,18 +40,18 @@ This repository restores configuration, not live data.
    docker compose -f stacks/tunnel-apps/compose.yaml up -d --force-recreate cloudflared-apps
    ```
 
-7. Restore `CODEX_LB_HOME_API_KEY` in both the user-systemd environment and all
+8. Restore `CODEX_LB_HOME_API_KEY` in both the user-systemd environment and all
    login/SSH shell startup surfaces listed in `docs/secrets.md`. Import or
    restart the user manager as needed, then restart every existing Codex client
    process so it inherits the restored value.
-8. Before changing DNS, verify the new connector has active connections:
+9. Before changing DNS, verify the new connector has active connections:
 
    ```sh
    cloudflared tunnel info tunnel-apps
    docker logs cloudflared-apps 2>&1 | grep 'Registered tunnel connection'
    ```
 
-9. Route the retained hostnames and verify the local and public surfaces:
+10. Route the retained hostnames and verify the local and public surfaces:
 
    ```sh
    cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
@@ -55,7 +62,7 @@ This repository restores configuration, not live data.
    curl -fsS https://paca.dongwontuna.net/api/healthz
    ```
 
-10. Finish with a real Codex response and confirm its matching relay request log
+11. Finish with a real Codex response and confirm its matching relay request log
    reports a successful WebSocket upstream.
 
 The retired `${HOME}/.cloudflared/codex-lb.json` credential is not required for
@@ -82,11 +89,14 @@ project and its existing Docker volumes. Don't use volume deletion commands.
 ### Safe Stop And Start
 
 ```sh
+docker network inspect paca_mcp_internal >/dev/null 2>&1 || docker network create paca_mcp_internal
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml stop
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml up -d
 ```
 
-Restart `mcp-suite` only after Paca has created the internal network:
+The network is independently managed. Create it before starting any of the
+three attached stacks; Paca teardown must not remove it. Restart `mcp-suite`
+after the network exists:
 
 ```sh
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml up -d
@@ -110,11 +120,13 @@ contents into evidence.
 ### Restore Postgres Data
 
 Restore only after explicit approval and backup evidence. Stop app writers,
-keep Postgres running, then load the selected dump through stdin:
+keep Postgres running, then load the selected clean dump through stdin. The
+backup contains `DROP ... IF EXISTS` statements, and the restore aborts and
+rolls back on the first SQL error:
 
 ```sh
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml stop api realtime ai-agent gateway web db-backup
-gunzip -c stacks/paca/backups/paca-YYYYMMDD-HHMMSS.sql.gz | docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+gunzip -c stacks/paca/backups/paca-YYYYMMDD-HHMMSS.sql.gz | docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 --single-transaction -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml up -d
 ```
 
@@ -127,25 +139,25 @@ the terminal log or task evidence.
 `agents.llm_api_key_secret` values in Postgres and is read by both `api` and
 `ai-agent`.
 
-Safe options:
+Restore the exact previous value. Rotation is blocked unless a reviewed
+transaction decrypts every affected row with the old key, re-encrypts it with
+the new 64 hex char key, and proves the before/after row counts. If any decrypt
+or count check fails, roll back the transaction and stop the restore.
 
-1. Run a transaction that decrypts every existing agent LLM key with the old
-   key, re-encrypts it with the new 64 hex char key, verifies the row count,
-   then updates `stacks/paca/.env`.
-2. Abort before changing `ENCRYPTION_KEY`, then manually re-enter each affected
-   agent LLM key through Paca after cutover.
-
-If any decrypt fails, abort. Don't keep going with a blind key change.
-
-### MCP Seed Procedure
+### Relay Policy And MCP Seed Procedure
 
 Paca reaches local MCP servers over the private Docker network
-`paca_mcp_internal`. Seed per-agent MCP rows from `mcp-local-servers.sql` after
-Paca and `mcp-suite` are on that network:
+`paca_mcp_internal`. After API migrations or a database restore, apply the
+relay-only agent policy and then seed per-agent MCP rows:
 
 ```sh
-docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < stacks/paca/mcp-local-servers.sql
+docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < stacks/paca/relay-ai-enforce.sql
+docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < stacks/paca/mcp-local-servers.sql
 ```
+
+The relay script installs the trigger/check constraint and updates active agent
+rows to `ai-relay`, `gpt-5.5`, and the private codex-lb URL. Both commands stop
+on the first SQL error.
 
 The seed should add or update `lsp`, `codegraph`, and `agbrowse` rows with
 `http://mcp-suite:8301/mcp`, `http://mcp-suite:8302/mcp`, and
@@ -158,7 +170,7 @@ Cloudflare Tunnel.
 docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml ps
 curl -fsS http://127.0.0.1:3080/api/healthz
 curl -fsS https://paca.dongwontuna.net/api/healthz
-docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+docker compose --env-file stacks/paca/.env -f stacks/paca/compose.yaml exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 docker ps --filter 'label=com.centurylinklabs.watchtower.enable=true' --format '{{.Names}}'
 ```
 

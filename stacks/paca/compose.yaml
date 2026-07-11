@@ -47,13 +47,14 @@ services:
         ts="$$(date +%Y%m%d-%H%M%S)"
         tmp="/backups/.paca-$${ts}.sql.gz.tmp"
         out="/backups/paca-$${ts}.sql.gz"
-        if pg_dump "$$DATABASE_URL" --no-owner | gzip > "$$tmp"; then
+        if pg_dump "$$DATABASE_URL" --clean --if-exists --no-owner | gzip > "$$tmp"; then
           mv "$$tmp" "$$out"
           echo "Backup written: $$out"
           find /backups -maxdepth 1 -name 'paca-*.sql.gz' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
         else
           echo "Backup failed at $${ts}" >&2
           rm -f "$$tmp"
+          exit 1
         fi
         EOS
         chmod +x /usr/local/bin/run-backup.sh
@@ -208,7 +209,7 @@ services:
       GATEWAY_BASE_URL: http://gateway
       PACA_API_KEY: ${AGENT_API_KEY:?AGENT_API_KEY is required}
       DOCKER_SOCKET: /var/run/docker.sock
-      AGENT_SERVER_IMAGE: ${AGENT_SERVER_IMAGE:-ghcr.io/openhands/agent-server:latest-python}
+      AGENT_SERVER_IMAGE: ${AGENT_SERVER_IMAGE:-ghcr.io/paca-ai/paca-agent-server:latest}
       PORT_POOL_START: ${PORT_POOL_START:-10000}
       PORT_POOL_SIZE: ${PORT_POOL_SIZE:-100}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-10}
@@ -216,6 +217,13 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required; rotate only after decrypt/re-encrypt migration}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./overrides/ai-agent/enforce_xhigh.py:/opt/paca/enforce_xhigh.py:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        python /opt/paca/enforce_xhigh.py
+        exec uvicorn src.main:app --host 0.0.0.0 --port 8080
     depends_on:
       postgres:
         condition: service_healthy
@@ -237,4 +245,5 @@ volumes:
 
 networks:
   default:
+    external: true
     name: paca_mcp_internal
