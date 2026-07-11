@@ -8,7 +8,6 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 
 | Hostname | Origin |
 | --- | --- |
-| `opencode.dongwontuna.net` | `http://localhost:4096` |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
 | `paca.dongwontuna.net` | `http://localhost:3080` |
 
@@ -16,25 +15,41 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 
 Host state required before starting the stack:
 
-- `${HOME}/.cloudflared/opencode.json`, mounted read-only as the credentials
-  file for tunnel `7a1eb69a-992a-4d3d-9eca-bf0e3c4cb916`
+- `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`, mounted
+  read-only as the credentials file for tunnel `tunnel-apps`
 
 ```sh
-docker compose -f stacks/tunnel-apps/compose.yaml up -d
 cloudflared tunnel --config stacks/tunnel-apps/cloudflared/tunnel-apps.yml ingress validate
+docker compose -f stacks/tunnel-apps/compose.yaml config --quiet
+docker compose -f stacks/tunnel-apps/compose.yaml up -d --force-recreate cloudflared-apps
+cloudflared tunnel info tunnel-apps
 ```
+
+Do not move DNS until `tunnel info` reports active connections and the
+connector logs contain `Registered tunnel connection` without a subsequent
+connection failure.
 
 Move DNS routes only after local origins pass smoke tests:
 
 ```sh
-cloudflared tunnel route dns --overwrite-dns opencode opencode.dongwontuna.net
-cloudflared tunnel route dns --overwrite-dns opencode relay-ai.dongwontuna.net
-cloudflared tunnel route dns --overwrite-dns opencode paca.dongwontuna.net
+cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
+cloudflared tunnel route dns --overwrite-dns tunnel-apps paca.dongwontuna.net
 ```
 
-After `tunnel-apps` is healthy, retire the old non-SSH tunnel runners:
-`cloudflared-opencode.service` and `cloudflared-codex-lb`. Do not stop
-`cloudflared` from `stacks/agent-stack`; it carries the SSH tunnel token.
+Verify both public routes after the DNS change:
+
+```sh
+curl -fsS https://relay-ai.dongwontuna.net/health
+curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
+curl -fsS https://paca.dongwontuna.net/api/healthz
+```
+
+The previous shared tunnel was deleted and cannot be used as a rollback
+target. If this tunnel is revoked or deleted, create another named tunnel,
+update its credential mount and tunnel ID together, establish active
+connections, and then reroute both DNS records. Do not restore OpenCode DNS or
+ingress. Do not stop `cloudflared` from `stacks/agent-stack`; it carries the
+SSH tunnel token.
 
 Image updates are handled by the single Watchtower instance in
 `stacks/maintenance` through the `cloudflared-apps` update label.

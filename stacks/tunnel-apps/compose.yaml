@@ -13,4 +13,4 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - ./cloudflared/tunnel-apps.yml:/etc/cloudflared/tunnel-apps.yml:ro
-      - ${HOME}/.cloudflared/opencode.json:/etc/cloudflared/opencode.json:ro
+      - ${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json:/etc/cloudflared/tunnel-apps.json:ro

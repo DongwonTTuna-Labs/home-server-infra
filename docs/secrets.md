@@ -11,12 +11,8 @@ external secret store.
   - Legacy Cloudflare tunnel credentials for the retired codex-lb tunnel runner
 - `${HOME}/.cloudflared/bbc484d5-7aa8-4caf-9ec5-15f64c6f5610.json`
   - Legacy Cloudflare tunnel credentials for the retired codex-lb-local tunnel runner
-- `${HOME}/.cloudflared/opencode.json`
-  - Cloudflare tunnel credentials for the non-SSH `tunnel-apps` domain
-- `${HOME}/.config/opencode/opencode.env`
-  - OpenCode native server/update environment, including `OPENCODE_SERVER_PASSWORD`
-- `${HOME}/.opencode/`
-  - OpenCode native runtime, auth-adjacent state, and installed binary cache
+- `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`
+  - Cloudflare tunnel credential for the relay/Paca `tunnel-apps` domain
 - `${HOME}/.config/mcp-suite/`
   - User systemd update script for rebuilding the local MCP suite image
 - `${HOME}/.codex/ai-relay.env`
