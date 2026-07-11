@@ -47,9 +47,76 @@ for path in "${required[@]}"; do
   fi
 done
 
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
 scripts/scan-secrets.sh
-CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
+CODEX_LB_POSTGRES_PASSWORD=placeholder \
+  docker compose -f stacks/codex-lb/compose.yaml config --format json \
+  >"$tmpdir/codex-lb-compose.json"
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
+
+python3 - "$tmpdir/codex-lb-compose.json" dotfiles/codex/config.toml <<'PY'
+import json
+import sys
+import tomllib
+
+EXPECTED_IMAGE = (
+    "ghcr.io/soju06/codex-lb:1.21.0-beta.2@"
+    "sha256:fa931eee760f3a6e8875ef7347d24993c899fedbf261066783e162f633d659ab"
+)
+EXPECTED_PROVIDER = {
+    "name": "openai",
+    "base_url": "http://127.0.0.1:2455/backend-api/codex",
+    "wire_api": "responses",
+    "env_key": "CODEX_LB_HOME_API_KEY",
+    "supports_websockets": True,
+    "requires_openai_auth": True,
+}
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(message)
+
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    compose = json.load(handle)
+service = compose["services"]["codex-lb"]
+require(service.get("image") == EXPECTED_IMAGE, "codex-lb image pin changed")
+require(service.get("pull_policy") == "missing", "codex-lb pull policy must remain missing")
+require(
+    service.get("labels", {}).get("com.centurylinklabs.watchtower.enable") == "false",
+    "codex-lb must remain excluded from Watchtower",
+)
+ports = service.get("ports", [])
+require(len(ports) == 1, "codex-lb must expose exactly one port mapping")
+port = ports[0]
+require(
+    port.get("host_ip") == "127.0.0.1"
+    and port.get("target") == 2455
+    and str(port.get("published")) == "2455"
+    and port.get("protocol") == "tcp",
+    "codex-lb must publish port 2455 on loopback only",
+)
+postgres = compose["services"]["postgres"]
+require(
+    postgres.get("labels", {}).get("com.centurylinklabs.watchtower.enable") == "false",
+    "codex-lb Postgres must remain excluded from Watchtower",
+)
+
+with open(sys.argv[2], "rb") as handle:
+    codex = tomllib.load(handle)
+require(codex.get("model_provider") == "codex-lb", "Codex must select the codex-lb provider")
+provider = codex.get("model_providers", {}).get("codex-lb")
+require(provider == EXPECTED_PROVIDER, "Codex localhost WebSocket provider contract changed")
+features = codex.get("features", {})
+require(
+    not any(key.startswith("responses_websockets") for key in features),
+    "retired responses_websockets feature flag must stay absent",
+)
+PY
+
 if [ -e stacks/codex-lb/cloudflared/codex-lb.yml ]; then
   printf 'Retired path still present: stacks/codex-lb/cloudflared/codex-lb.yml\n' >&2
   exit 1
@@ -111,8 +178,6 @@ done
 docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
 cp -a stacks/codex-github-runners/. "$tmpdir/"
 mkdir -p "$tmpdir/state"
 printf 'placeholder\n' > "$tmpdir/state/github_pat"

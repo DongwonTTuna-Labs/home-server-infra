@@ -51,8 +51,9 @@ without reading the PAT.
 
 ## Codex Relay Auth
 
-codex-lb now runs the upstream `ghcr.io/soju06/codex-lb:latest` image, which has
-no OIDC federation: the `/v1/oidc/token` exchange endpoint no longer exists.
+codex-lb runs the operator-pinned upstream image declared in
+`stacks/codex-lb/compose.yaml`, which has no OIDC federation: the
+`/v1/oidc/token` exchange endpoint no longer exists.
 Codex review workflows therefore need an alternative relay credential (e.g. a
 static codex-lb API key issued from the dashboard) passed to
 `openai/codex-action` as `openai-api-key`, with
