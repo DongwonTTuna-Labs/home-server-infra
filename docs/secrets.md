@@ -19,6 +19,21 @@ external secret store.
   - User systemd update script for rebuilding the local MCP suite image
 - `stacks/codex-lb/.env`
   - `CODEX_LB_POSTGRES_PASSWORD` for the codex-lb Postgres service
+- `${HOME}/.config/environment.d/20-codex-lb.conf`
+  - `CODEX_LB_HOME_API_KEY` for the home-server Codex localhost provider
+  - Imported into the user systemd manager; restart existing Codex processes
+    after rotating or restoring it
+- `${HOME}/.bashrc`, `${HOME}/.bash_profile`, `${HOME}/.profile`,
+  `${HOME}/.zshrc`, and `${HOME}/.zprofile`
+  - Export the same `CODEX_LB_HOME_API_KEY` for interactive, login, and SSH
+    shells
+  - Keep every shell copy synchronized with `20-codex-lb.conf` during rotation;
+    never print the value while checking consistency
+- `${HOME}/.codex/ai-relay.env` on the remote Mac
+  - `CODEX_LB_LOCAL_API_KEY` for the direct
+    `relay-ai.dongwontuna.net` Codex provider
+  - Loaded into the GUI session by the dedicated environment LaunchAgent; it is
+    not an SSH tunnel configuration
 - `stacks/codex-github-runners/.env`
   - `CODEX_RELAY_API_KEY` for Codex relay API access
   - `CODEX_LOOP_PAT` for Codex loop push and continuation dispatch
