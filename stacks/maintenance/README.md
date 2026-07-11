@@ -12,9 +12,11 @@ unlabeled or explicitly set to `false`.
 
 Current intended update targets:
 
-- `codex-lb`
-- `codex-lb-local` when that optional stack is deployed
 - `cloudflared-apps`
+
+`codex-lb` is excluded because it is pinned to an operator-verified tag and OCI
+digest. Update it manually only after the backup and migration preflight in
+`stacks/codex-lb/README.md` succeeds.
 
 `mcp-suite` is excluded because it is a local build image; updates are handled by
 `mcp-suite-update.timer`.

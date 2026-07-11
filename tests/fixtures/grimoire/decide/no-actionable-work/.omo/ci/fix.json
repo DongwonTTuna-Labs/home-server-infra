@@ -1,0 +1,11 @@
+{
+  "changed_files": [],
+  "noop": true,
+  "schema_version": 1,
+  "scope_ok": true,
+  "should_commit": false,
+  "should_push": false,
+  "stage": "grimoire-fix",
+  "status": "clear-noop",
+  "violations": []
+}

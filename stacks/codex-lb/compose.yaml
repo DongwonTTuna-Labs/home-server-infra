@@ -2,25 +2,20 @@ name: codex-lb
 
 services:
   codex-lb:
-    # Pinned rollback: 1.20.x was too buggy. Hold at 1.19.0 until upstream is
-    # stable again. To resume auto-updates: restore `:latest`, set pull_policy
-    # back to always, and re-enable the watchtower label below.
-    image: ghcr.io/soju06/codex-lb:1.19.0
+    # Operator-verified pre-release, pinned by tag and OCI index digest.
+    # Keep this service out of Watchtower and follow README.md for upgrades.
+    image: ghcr.io/soju06/codex-lb:1.21.0-beta.2@sha256:fa931eee760f3a6e8875ef7347d24993c899fedbf261066783e162f633d659ab
     container_name: codex-lb
     pull_policy: missing
     restart: always
     labels:
-      # Disabled while pinned to 1.19.0 so watchtower can't re-bump to latest.
       com.centurylinklabs.watchtower.enable: "false"
     environment:
       CODEX_LB_CONNECT_ADDRESS: relay-ai.dongwontuna.net
       CODEX_LB_DATABASE_URL: postgresql+asyncpg://codex_lb:${CODEX_LB_POSTGRES_PASSWORD:?set in stacks/codex-lb/.env}@postgres:5432/codex_lb
-      # The DB schema was migrated forward by 1.20.x (head 20260611). To run
-      # 1.19.0 we kept that superset schema but set alembic_version back to
-      # 1.19.0's head (20260513_000000_add_accounts_alias) via a direct stamp,
-      # so this no-op'd `upgrade head` matches and the app boots. 1.19.0 ignores
-      # the extra 1.20.x columns/tables. Backup: backups/codex_lb_pre119_*.dump.
-      # Returning to 1.20.x: re-stamp alembic_version to 20260611 first.
+      # Startup migration is intentional. A historical 1.19 rollback reused
+      # revision 20260513 for two different physical schemas, so never stamp
+      # that state by revision alone; use the README.md preflight matrix.
       CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"
       CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT: "50"
       # Request-path pool (max 100 conns) + separate background pool (max 20) so

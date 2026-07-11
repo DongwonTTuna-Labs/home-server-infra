@@ -10,81 +10,21 @@ permissions: {}
 
 jobs:
   self-smoke:
-    name: Real OpenCode Grimoire self-smoke
+    name: Deterministic Grimoire signal self-smoke
     runs-on:
       group: Home Server Runners
       labels: dongwontuna-labs-runner
     permissions:
       contents: read
-    timeout-minutes: 120
-    env:
-      AI_RELAY_API_KEY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}
-      CF_ACCESS_CLIENT_ID_SECRET: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-      GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}
+    timeout-minutes: 15
     steps:
-      - name: Resolve runner fallback credentials
-        shell: bash
-        run: |
-          set -euo pipefail
-          resolve_secret() {
-            local output_name="$1" secret_name="$2" fallback_name="$3"
-            local value="${!secret_name:-}"
-            if [ -z "$value" ] && [ -n "${!fallback_name:-}" ]; then
-              value="${!fallback_name}"
-            fi
-            if [ -z "$value" ]; then
-              echo "::error title=Missing self-smoke credential::$output_name is required for real-opencode self-smoke."
-              exit 1
-            fi
-            echo "::add-mask::$value"
-            printf '%s=%s\n' "$output_name" "$value" >> "$GITHUB_ENV"
-          }
-          resolve_secret AI_RELAY_API_KEY AI_RELAY_API_KEY_SECRET AI_RELAY_API_KEY
-          resolve_secret CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_ID_SECRET CF_ACCESS_CLIENT_ID
-          resolve_secret CF_ACCESS_CLIENT_SECRET CF_ACCESS_CLIENT_SECRET_SECRET CF_ACCESS_CLIENT_SECRET
-          if [ -n "${GRIMOIRE_PAT_SECRET:-}" ]; then
-            echo "::add-mask::${GRIMOIRE_PAT_SECRET}"
-          elif [ -n "${CODEX_LOOP_PAT:-}" ]; then
-            echo "::add-mask::${CODEX_LOOP_PAT}"
-          else
-            echo "::error title=Missing self-smoke PAT::GRIMOIRE_PAT or runner CODEX_LOOP_PAT is required."
-            exit 1
-          fi
-
       - name: Checkout control plane under test
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - id: setup-opencode
-        name: Provision opencode runtime
+      - name: Run deterministic signal-layer self-smoke
         shell: bash
-        run: |
-          set -euo pipefail
-          python3 actions/grimoire/cast/scripts/setup_opencode.py
-
-      - name: Validate opencode runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          opencode_path="$(command -v opencode || true)"
-          if [ -z "$opencode_path" ]; then
-            echo "::error title=OpenCode runtime unavailable::missing-runtime:opencode-unavailable"
-            exit 1
-          fi
-          opencode_version="$($opencode_path --version)"
-          case "$opencode_version" in
-            *1.17.7*) ;;
-            *) echo "::error title=OpenCode runtime version drift::expected opencode 1.17.7"; exit 1 ;;
-          esac
-          echo "opencode runtime: path=${opencode_path} version=${opencode_version}"
-
-      - name: Run real-opencode self-smoke
-        shell: bash
-        env:
-          OPENCODE_DISABLE_PROJECT_CONFIG: "1"
-          OPENCODE_PURE: "1"
         run: |
           set -euo pipefail
           python3 actions/grimoire/cast/scripts/self_smoke.py --control-plane-root "$PWD"

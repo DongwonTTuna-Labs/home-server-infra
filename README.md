@@ -22,7 +22,6 @@ dotfiles/                     Curated non-secret client config
 scripts/                      Repository verification helpers
 stacks/agent-stack/           SSH tunnel container stack
 stacks/codex-lb/              codex-lb relay stack
-stacks/codex-lb-local/        Optional local codex-lb relay stack
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
@@ -44,7 +43,6 @@ Dify, Grimoire, or production data access.
 scripts/verify-layout.sh
 scripts/scan-secrets.sh
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
-CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb-local/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
 docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null

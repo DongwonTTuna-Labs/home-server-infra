@@ -1,0 +1,16 @@
+{
+  "approval_signal": "GRIMOIRE_REVIEW_APPROVED",
+  "findings": [],
+  "findings_count": 0,
+  "lenses": [
+    "security",
+    "correctness",
+    "maintainability",
+    "repo-policy"
+  ],
+  "mutation_allowed": false,
+  "read_only": true,
+  "schema_version": 1,
+  "stage": "grimoire-review",
+  "status": "approved"
+}

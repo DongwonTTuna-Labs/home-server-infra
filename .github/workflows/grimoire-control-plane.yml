@@ -28,10 +28,15 @@ on:
         required: false
         default: "1"
         type: string
-    secrets:
-      GRIMOIRE_PAT:
-        description: Preferred PAT for checkout, Issues, labels, and the single scoped bot push.
+      grimoire_app_client_id:
+        description: GitHub App client ID used to mint the Grimoire installation token.
         required: false
+        default: Iv23liFL1dDHmU06FLSF
+        type: string
+    secrets:
+      GRIMOIRE_APP_PRIVATE_KEY:
+        description: Private key for minting the Grimoire GitHub App installation token.
+        required: true
       AI_RELAY_API_KEY:
         description: Preferred relay key for model-capable stages; runner env may supply the same name.
         required: false
@@ -63,11 +68,18 @@ jobs:
             exit 1
           fi
 
+      - id: grimoire-app-token
+        name: Mint Grimoire GitHub App installation token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ inputs.grimoire_app_client_id }}
+          private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}
+          owner: DongwonTTuna-Labs
+
       - id: auth
-        name: Resolve PAT-only auth and relay credentials
+        name: Resolve relay credentials
         shell: bash
         env:
-          GRIMOIRE_PAT_SECRET: ${{ secrets.GRIMOIRE_PAT }}
           GRIMOIRE_RELAY_SECRET: ${{ secrets.AI_RELAY_API_KEY }}
           GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
@@ -86,7 +98,6 @@ jobs:
             echo "::add-mask::$value"
             { echo "$output_name<<${output_name}_EOF"; printf '%s\n' "$value"; echo "${output_name}_EOF"; } >> "$GITHUB_OUTPUT"
           }
-          resolve_required github_pat "Grimoire PAT unavailable" "${GRIMOIRE_PAT_SECRET:-}" GRIMOIRE_PAT CODEX_LOOP_PAT "checkout, Issues, labels, or push stages"
           resolve_required relay_key "Grimoire relay key unavailable" "${GRIMOIRE_RELAY_SECRET:-}" AI_RELAY_API_KEY AI_RELAY_API_KEY "model-capable stages"
           resolve_required cf_access_client_id "Grimoire CF Access client ID unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_ID_SECRET:-}" CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_ID "model-capable stages"
           resolve_required cf_access_client_secret "Grimoire CF Access client secret unavailable" "${GRIMOIRE_CF_ACCESS_CLIENT_SECRET_SECRET:-}" CF_ACCESS_CLIENT_SECRET CF_ACCESS_CLIENT_SECRET "model-capable stages"
@@ -96,7 +107,7 @@ jobs:
         with:
           repository: DongwonTTuna-Labs/home-server-infra
           ref: main
-          token: ${{ steps.auth.outputs.github_pat }}
+          token: ${{ steps.grimoire-app-token.outputs.token }}
           path: control-plane
           persist-credentials: false
 
@@ -112,7 +123,7 @@ jobs:
         with:
           repository: ${{ inputs.consumer_repository }}
           ref: ${{ inputs.head_sha }}
-          token: ${{ steps.auth.outputs.github_pat }}
+          token: ${{ steps.grimoire-app-token.outputs.token }}
           path: consumer
           fetch-depth: 0
           persist-credentials: false
@@ -161,7 +172,7 @@ jobs:
         name: Run cast driver
         uses: ./control-plane/actions/grimoire/cast
         env:
-          GRIMOIRE_GITHUB_PAT: ${{ steps.auth.outputs.github_pat }}
+          GRIMOIRE_GITHUB_PAT: ${{ steps.grimoire-app-token.outputs.token }}
           AI_RELAY_API_KEY: ${{ steps.auth.outputs.relay_key }}
           CF_ACCESS_CLIENT_ID: ${{ steps.auth.outputs.cf_access_client_id }}
           CF_ACCESS_CLIENT_SECRET: ${{ steps.auth.outputs.cf_access_client_secret }}

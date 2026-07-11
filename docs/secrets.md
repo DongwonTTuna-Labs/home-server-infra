@@ -9,18 +9,27 @@ external secret store.
   - `TUNNEL_TOKEN` for the dedicated `ssh.dongwontuna.net` tunnel
 - `${HOME}/.cloudflared/codex-lb.json`
   - Legacy Cloudflare tunnel credentials for the retired codex-lb tunnel runner
-- `${HOME}/.cloudflared/bbc484d5-7aa8-4caf-9ec5-15f64c6f5610.json`
-  - Legacy Cloudflare tunnel credentials for the retired codex-lb-local tunnel runner
 - `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`
   - Cloudflare tunnel credential for the relay/Paca `tunnel-apps` domain
 - `${HOME}/.config/mcp-suite/`
   - User systemd update script for rebuilding the local MCP suite image
-- `${HOME}/.codex/ai-relay.env`
-  - `CODEX_LB_LOCAL_API_KEY` for local codex-lb relay clients
 - `stacks/codex-lb/.env`
   - `CODEX_LB_POSTGRES_PASSWORD` for the codex-lb Postgres service
-- `stacks/codex-lb-local/.env`
-  - `CODEX_LB_POSTGRES_PASSWORD` for the optional local relay Postgres service
+- `${HOME}/.config/environment.d/20-codex-lb.conf`
+  - `CODEX_LB_HOME_API_KEY` for the home-server Codex localhost provider
+  - Imported into the user systemd manager; restart existing Codex processes
+    after rotating or restoring it
+- `${HOME}/.bashrc`, `${HOME}/.bash_profile`, `${HOME}/.profile`,
+  `${HOME}/.zshrc`, and `${HOME}/.zprofile`
+  - Export the same `CODEX_LB_HOME_API_KEY` for interactive, login, and SSH
+    shells
+  - Keep every shell copy synchronized with `20-codex-lb.conf` during rotation;
+    never print the value while checking consistency
+- `${HOME}/.codex/ai-relay.env` on the remote Mac
+  - `CODEX_LB_LOCAL_API_KEY` for the direct
+    `relay-ai.dongwontuna.net` Codex provider
+  - Loaded into the GUI session by the dedicated environment LaunchAgent; it is
+    not an SSH tunnel configuration
 - `stacks/codex-github-runners/.env`
   - `CODEX_RELAY_API_KEY` for Codex relay API access
   - `CODEX_LOOP_PAT` for Codex loop push and continuation dispatch
@@ -57,9 +66,6 @@ external secret store.
   key
 - `codex-lb_codex-lb-postgres-data` Docker volume, including relay database
   state
-- `codex-lb-local_codex-lb-local-data` and
-  `codex-lb-local_codex-lb-local-postgres-data` Docker volumes when the optional
-  local relay stack is deployed
 - Paca Docker volumes, including `paca_postgres_data`, `paca_valkey_data`,
   `paca_minio_data`, `paca_backend_plugins`, `paca_frontend_plugins`,
   `paca_mcp_plugins`, `paca_caddy_data`, and `paca_caddy_config`

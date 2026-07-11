@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
 from __future__ import annotations
 
 import argparse
@@ -29,6 +30,7 @@ STAGE_ORDER = [
 ]
 APPROVE_LENSES = ("f1_oracle", "f2_quality", "f3_real_qa", "f4_scope")
 OUT_OF_SCOPE_MARKER_PREFIX = "grimoire-out-of-scope"
+SPEC_GAP_COMMENT_MARKER = "<!-- grimoire-spec-gap -->"
 TOKEN_PATTERNS = (
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
@@ -38,6 +40,16 @@ TOKEN_PATTERNS = (
 )
 FORBIDDEN_INPUTS = ("mode", "dry_run", "dry-run", "allow_live", "allow-live", "simulate", "simulation")
 FORBIDDEN_EVENTS = ("pull_request_target", "workflow_dispatch", "push")
+APP_TOKEN_STEP_ID = "grimoire-app-token"
+APP_TOKEN_EXPR = "${{ steps.grimoire-app-token.outputs.token }}"
+APP_TOKEN_ACTION_RE = re.compile(r"actions/create-github-app-token@([0-9A-Fa-f]{40})")
+FORBIDDEN_PRIVILEGED_AUTH_MARKERS = (
+    "GRIMOIRE_PAT",
+    "CODEX_LOOP_PAT",
+    "GITHUB_TOKEN",
+    "github.token",
+    "steps.auth.outputs.github_pat",
+)
 GITHUB_API = "https://api.github.com"
 
 
@@ -285,6 +297,139 @@ def find_remote_issue(repository: str, fingerprint: str, token: str) -> str:
     return ""
 
 
+def validate_spec_gap_comment_state(decision: dict[str, Any], gap: dict[str, Any], body: str) -> None:
+    if decision.get("schema_version") != 1 or decision.get("stage") != STAGE:
+        raise ContractError("cast decision has the wrong schema or stage")
+    if decision.get("decision") != "spec-gap-halt" or decision.get("conclusion") != "neutral" or decision.get("exit_code") != 0:
+        raise ContractError("cast decision is not a neutral spec-gap advisory")
+    if decision.get("label_transition") != "spec-needed":
+        raise ContractError("cast decision did not request the spec-needed advisory transition")
+    if gap.get("schema_version") != 1 or gap.get("stage") != "grimoire-spec-gap":
+        raise ContractError("spec-gap status has the wrong schema or stage")
+    if gap.get("status") != "halt" or gap.get("should_halt") is not True:
+        raise ContractError("spec-gap status is not a halt advisory")
+    if gap.get("advisory") is not True or gap.get("should_comment") is not True:
+        raise ContractError("spec-gap status did not request an advisory comment")
+    if gap.get("no_code_or_push_action") is not True:
+        raise ContractError("spec-gap status must continue forbidding code or push action")
+    if not body.splitlines() or body.splitlines()[0] != SPEC_GAP_COMMENT_MARKER:
+        raise ContractError("spec-gap comment marker must be the first line")
+    if body.count(SPEC_GAP_COMMENT_MARKER) != 1:
+        raise ContractError("spec-gap comment must contain exactly one marker")
+
+
+def read_spec_gap_comment(path: pathlib.Path) -> str:
+    if not path.is_file():
+        raise ContractError(f"spec-gap comment file does not exist: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def find_spec_gap_comment(repository: str, pr_number: str, token: str) -> tuple[dict[str, Any] | None, int]:
+    pages_read = 0
+    for page in range(1, 101):
+        comments = github_request("GET", f"/repos/{repository}/issues/{pr_number}/comments?per_page=100&page={page}", token)
+        pages_read = page
+        if not isinstance(comments, list):
+            raise ContractError("GitHub issue comments API did not return a list")
+        if not comments:
+            break
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            if SPEC_GAP_COMMENT_MARKER in str(comment.get("body") or ""):
+                if comment.get("id") is None:
+                    raise ContractError("existing spec-gap comment is missing an id")
+                return comment, pages_read
+        if len(comments) < 100:
+            break
+    return None, pages_read
+
+
+def upsert_spec_gap_comment(repository: str, pr_number: str, token: str, body: str) -> dict[str, Any]:
+    existing, pages_read = find_spec_gap_comment(repository, pr_number, token)
+    if existing is not None:
+        comment_id = str(existing["id"])
+        response = github_request("PATCH", f"/repos/{repository}/issues/comments/{comment_id}", token, {"body": body})
+        operation = "patched"
+    else:
+        response = github_request("POST", f"/repos/{repository}/issues/{pr_number}/comments", token, {"body": body})
+        operation = "created"
+    if not isinstance(response, dict):
+        raise ContractError("GitHub issue comments API did not return a comment object")
+    return {
+        "operation": operation,
+        "comment_id": str(response.get("id") or (existing or {}).get("id") or ""),
+        "comment_url": str(response.get("html_url") or response.get("url") or ""),
+        "pages_read": pages_read,
+    }
+
+
+def run_upsert_spec_gap_comment(args: argparse.Namespace) -> int:
+    workspace = pathlib.Path(args.consumer_workspace).resolve()
+    output = resolve_path(args.output, workspace)
+    payload = base_payload("blocked")
+    exit_code = 1
+    try:
+        if not as_bool(args.github_mutation_allowed):
+            payload = base_payload("skipped")
+            payload.update(
+                {
+                    "comment_mutation_attempted": False,
+                    "operation": "skipped",
+                    "reason": "github mutation not allowed",
+                    "repository": args.repository,
+                    "pr_number": str(args.pr_number),
+                }
+            )
+            exit_code = 0
+        else:
+            if not is_remote_repository(args.repository) or str(args.pr_number) == "0":
+                raise ContractError("spec-gap comment upsert requires a remote repository and pull request number")
+            token = os.environ.get("GRIMOIRE_GITHUB_PAT", "")
+            if not token:
+                raise ContractError("spec-gap comment upsert requires resolved Grimoire App installation token auth")
+            decision = read_json(resolve_path(args.decision, workspace), "cast decision")
+            gap = read_json(resolve_path(args.spec_gap_status, workspace), "spec-gap status")
+            raw_comment_path = args.comment_path or str(gap.get("comment_path") or "")
+            if not raw_comment_path:
+                raise ContractError("spec-gap comment path is missing")
+            comment_path = resolve_path(raw_comment_path, workspace)
+            body = read_spec_gap_comment(comment_path)
+            validate_spec_gap_comment_state(decision, gap, body)
+            result = upsert_spec_gap_comment(args.repository, str(args.pr_number), token, body)
+            payload = base_payload("ok")
+            payload.update(
+                {
+                    "comment_mutation_attempted": True,
+                    "operation": result["operation"],
+                    "repository": args.repository,
+                    "pr_number": str(args.pr_number),
+                    "comment_marker": SPEC_GAP_COMMENT_MARKER,
+                    "comment_path": rel(comment_path, workspace),
+                    "comment_id": result["comment_id"],
+                    "comment_url": result["comment_url"],
+                    "pages_read": result["pages_read"],
+                }
+            )
+            exit_code = 0
+    except (ContractError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        payload = base_payload("blocked")
+        payload.update(
+            {
+                "comment_mutation_attempted": False,
+                "operation": "blocked",
+                "repository": args.repository,
+                "pr_number": str(args.pr_number),
+                "blocked_reason": str(exc),
+            }
+        )
+        exit_code = 1
+    write_json(output, payload)
+    write_outputs(args.github_output, {"status": payload["status"], "operation": payload.get("operation", ""), "comment_mutation_attempted": payload.get("comment_mutation_attempted", False), "output_path": str(output)})
+    print(f"{STAGE}: spec-gap-comment status={payload['status']} operation={payload.get('operation', '')} output={output}")
+    return exit_code
+
+
 def run_file_issues(args: argparse.Namespace) -> int:
     workspace = pathlib.Path(args.consumer_workspace).resolve()
     design_path = resolve_path(args.design_path, workspace)
@@ -302,7 +447,7 @@ def run_file_issues(args: argparse.Namespace) -> int:
         token = os.environ.get("GRIMOIRE_GITHUB_PAT", "")
         remote_enabled = bool(token and is_remote_repository(args.repository) and str(args.pr_number) != "0")
         if is_remote_repository(args.repository) and str(args.pr_number) != "0" and not token:
-            raise ContractError("out-of-scope Issue filing requires resolved PAT auth")
+            raise ContractError("out-of-scope Issue filing requires resolved Grimoire App installation token auth")
         records: list[dict[str, Any]] = []
         created = 0
         deduped = 0
@@ -429,6 +574,18 @@ def verdict_approved(payload: dict[str, Any]) -> bool:
     return all(payload.get(lens) == "APPROVE" for lens in APPROVE_LENSES) and payload.get("approved") is True
 
 
+def design_has_no_actionable_work(payload: dict[str, Any]) -> bool:
+    empty_work_fields = ("in_scope", "bindings", "target_paths", "allowed_write_paths")
+    return (
+        payload.get("schema_version") == 1
+        and payload.get("stage") == "grimoire-design"
+        and payload.get("status") == "sufficient"
+        and payload.get("spec_sufficient") is True
+        and payload.get("should_halt") is False
+        and all(isinstance(payload.get(field), list) and not payload.get(field) for field in empty_work_fields)
+    )
+
+
 def stage_blockers(args: argparse.Namespace, workspace: pathlib.Path) -> list[str]:
     blockers: list[str] = []
     preflight = read_json(resolve_path(args.preflight_status, workspace), "cast preflight")
@@ -456,6 +613,7 @@ def run_decide(args: argparse.Namespace) -> int:
     decision = "fizzled"
     terminal = False
     should_push = False
+    conclusion = "failure"
     reasons: list[str] = []
     try:
         blockers = stage_blockers(args, workspace)
@@ -466,9 +624,18 @@ def run_decide(args: argparse.Namespace) -> int:
             gap = read_json(resolve_path(args.spec_gap_status, workspace), "spec-gap status")
             if gap.get("should_halt") is True and gap.get("status") == "halt":
                 decision = "spec-gap-halt"
+                conclusion = "neutral"
+                label_transition = "spec-needed"
+                exit_code = 0
                 reasons.append("design requested spec-gap halt before code changes")
             else:
                 reasons.append("design requested halt but spec-gap artifact was not a halt")
+        if not reasons and design_has_no_actionable_work(design):
+            decision = "no-actionable-work"
+            conclusion = "neutral"
+            label_transition = "spec-needed"
+            exit_code = 0
+            reasons.append("design found no actionable in-scope work with sufficient spec")
         if not reasons:
             fix = read_json(resolve_path(args.fix_status, workspace), "fix status")
             if args.fix_outcome != "success" or fix.get("scope_ok") is not True or fix.get("status") not in {"clear-noop", "fixed"}:
@@ -483,11 +650,13 @@ def run_decide(args: argparse.Namespace) -> int:
                         reasons.append(f"verify rejected or malformed verdict: outcome={args.verify_outcome}")
                     elif fix.get("status") == "clear-noop":
                         decision = "clear-noop-terminal"
+                        conclusion = "success"
                         label_transition = "done"
                         terminal = True
                         exit_code = 0
                     elif fix.get("status") == "fixed":
                         decision = "scoped-push"
+                        conclusion = "success"
                         label_transition = "keep-running"
                         should_push = True
                         exit_code = 0
@@ -497,6 +666,7 @@ def run_decide(args: argparse.Namespace) -> int:
             {
                 "status": "ok" if exit_code == 0 else "fizzled",
                 "decision": decision,
+                "conclusion": conclusion,
                 "terminal": terminal,
                 "should_push": should_push,
                 "label_transition": label_transition,
@@ -504,11 +674,11 @@ def run_decide(args: argparse.Namespace) -> int:
                 "reasons": reasons,
                 "clear_noop_terminal_semantics": "clear-noop + all APPROVE -> Cast label, no commit, no push",
                 "fixed_push_semantics": "fixed + all APPROVE -> exactly one scoped bot commit and push, then pull_request.synchronize re-review",
-                "reject_or_halt_semantics": "REJECT, malformed, missing, protected, or halt states fail closed to Fizzled",
+                "reject_or_halt_semantics": "REJECT, malformed, missing, protected, or non-spec-gap halt states fail closed to Fizzled",
             }
         )
     except ContractError as exc:
-        payload.update({"decision": "fizzled", "terminal": False, "should_push": False, "label_transition": "fizzled", "exit_code": 1, "reasons": [str(exc)]})
+        payload.update({"decision": "fizzled", "conclusion": "failure", "terminal": False, "should_push": False, "label_transition": "fizzled", "exit_code": 1, "reasons": [str(exc)]})
     write_json(output, payload)
     write_outputs(args.github_output, {"status": payload["status"], "decision": payload["decision"], "terminal": payload["terminal"], "should_push": payload["should_push"], "label_transition": payload["label_transition"], "exit_code": payload["exit_code"], "output_path": str(output)})
     print(f"{STAGE}: decision={payload['decision']} status={payload['status']} output={output}")
@@ -560,7 +730,7 @@ def run_push(args: argparse.Namespace) -> int:
         else:
             token = os.environ.get("GRIMOIRE_GITHUB_PAT", "")
             if not token:
-                raise ContractError("scoped push requires resolved PAT auth")
+                raise ContractError("scoped push requires resolved Grimoire App installation token auth")
             paths = changed_paths(workspace)
             if not paths:
                 raise ContractError("scoped push refused empty commit")
@@ -604,33 +774,119 @@ def run_push(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def legacy_exit_code_is_zero(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == 0
+    if isinstance(value, str):
+        return value.strip() == "0"
+    return False
+
+
+def complete_decision_conclusion(decision: dict[str, Any]) -> tuple[str, list[str]]:
+    if "conclusion" not in decision:
+        if legacy_exit_code_is_zero(decision.get("exit_code")):
+            return "success", []
+        return "failure", ["decision conclusion is missing and legacy exit_code is not zero"]
+    conclusion = decision.get("conclusion")
+    if not isinstance(conclusion, str):
+        return "failure", ["decision conclusion must be a string"]
+    normalized = conclusion.strip().lower()
+    if normalized in {"success", "neutral", "failure"}:
+        return normalized, []
+    return "failure", [f"decision conclusion is unsupported: {sanitize(normalized, 80)}"]
+
+
+def first_reason(reasons: Any) -> str:
+    if isinstance(reasons, list):
+        for reason in reasons:
+            text = sanitize(reason, 160)
+            if text:
+                return text
+    return ""
+
+
 def run_complete(args: argparse.Namespace) -> int:
     workspace = pathlib.Path(args.consumer_workspace).resolve()
-    decision = read_json(resolve_path(args.decision, workspace), "cast decision")
     output = resolve_path(args.output, workspace)
-    final = base_payload("ok")
-    final.update({"decision": decision.get("decision"), "terminal": decision.get("terminal"), "should_push": decision.get("should_push")})
-    exit_code = int(decision.get("exit_code", 1))
-    if decision.get("decision") == "scoped-push":
-        push = read_json(resolve_path(args.push_status, workspace), "push status")
-        final["push_status"] = push.get("status")
-        final["push_count"] = push.get("push_count", 0)
-        if push.get("status") != "pushed" or push.get("push_count") != 1:
+    final = base_payload("fizzled")
+    final.update({"decision": None, "terminal": False, "should_push": False, "conclusion": "failure"})
+    exit_code = 1
+    try:
+        decision = read_json(resolve_path(args.decision, workspace), "cast decision")
+        final.update({"decision": decision.get("decision"), "terminal": decision.get("terminal"), "should_push": decision.get("should_push")})
+        conclusion, conclusion_reasons = complete_decision_conclusion(decision)
+        final["conclusion"] = conclusion
+        reasons = conclusion_reasons or decision.get("reasons", [])
+        if conclusion_reasons:
             final["status"] = "fizzled"
-            final["reasons"] = ["scoped push did not complete exactly once"]
+            final["conclusion"] = "failure"
+            final["reasons"] = conclusion_reasons
+            final["summary"] = f"cast failed closed: {first_reason(conclusion_reasons)}"
             exit_code = 1
-        else:
-            final["status"] = "awaiting-synchronize"
-            final["next_expected_event"] = "pull_request.synchronize"
+        elif conclusion == "failure":
+            final["status"] = "fizzled"
+            final["reasons"] = reasons if isinstance(reasons, list) else []
+            reason = first_reason(final["reasons"])
+            final["summary"] = f"cast failed closed: {reason}" if reason else "cast failed closed"
+            exit_code = 1
+        elif decision.get("decision") == "scoped-push":
+            if conclusion != "success":
+                final["status"] = "fizzled"
+                final["conclusion"] = "failure"
+                final["reasons"] = ["scoped-push decision conclusion must be success"]
+                final["summary"] = "cast failed closed: scoped-push decision conclusion must be success"
+                exit_code = 1
+            else:
+                push = read_json(resolve_path(args.push_status, workspace), "push status")
+                final["push_status"] = push.get("status")
+                final["push_count"] = push.get("push_count", 0)
+                if push.get("status") != "pushed" or push.get("push_count") != 1:
+                    final["status"] = "fizzled"
+                    final["conclusion"] = "failure"
+                    final["reasons"] = ["scoped push did not complete exactly once"]
+                    final["summary"] = "scoped push did not complete exactly once"
+                    exit_code = 1
+                else:
+                    final["status"] = "awaiting-synchronize"
+                    final["next_expected_event"] = "pull_request.synchronize"
+                    final["summary"] = "scoped push completed once; awaiting pull_request.synchronize"
+                    exit_code = 0
+        elif final.get("should_push") is True:
+            final["status"] = "fizzled"
+            final["conclusion"] = "failure"
+            final["reasons"] = ["non-scoped decision requested push"]
+            final["summary"] = "cast failed closed: non-scoped decision requested push"
+            exit_code = 1
+        elif conclusion == "neutral":
+            final["status"] = "advisory"
+            reason = first_reason(reasons)
+            final["summary"] = f"cast completed with advisory decision: {reason}" if reason else "cast completed with advisory decision"
             exit_code = 0
-    elif exit_code != 0:
+        else:
+            final["status"] = "terminal"
+            final["summary"] = "cast completed successfully without a push"
+            exit_code = 0
+    except ContractError as exc:
         final["status"] = "fizzled"
-        final["reasons"] = decision.get("reasons", [])
-    else:
-        final["status"] = "terminal"
+        final["conclusion"] = "failure"
+        final["reasons"] = [str(exc)]
+        final["summary"] = f"cast failed closed: {sanitize(exc, 160)}"
+        exit_code = 1
     write_json(output, final)
-    write_outputs(args.github_output, {"status": final["status"], "decision": final["decision"], "terminal": final.get("terminal", False), "output_path": str(output)})
-    print(f"{STAGE}: final status={final['status']} decision={final['decision']} output={output}")
+    write_outputs(
+        args.github_output,
+        {
+            "status": final["status"],
+            "decision": final["decision"],
+            "terminal": final.get("terminal", False),
+            "conclusion": final["conclusion"],
+            "summary": final["summary"],
+            "output_path": str(output),
+        },
+    )
+    print(f"{STAGE}: final status={final['status']} decision={final['decision']} conclusion={final['conclusion']} output={output}")
     return exit_code
 
 
@@ -662,6 +918,72 @@ def workflow_step_block(text: str, name: str) -> str:
             body.append(child)
         return "\n".join(body)
     return ""
+
+
+def workflow_step_id_block(text: str, step_id: str) -> str:
+    lines = text.splitlines()
+    id_pattern = re.compile(rf"^\s+(?:-\s*)?id\s*:\s*{re.escape(step_id)}\s*$")
+    for index, line in enumerate(lines):
+        if not id_pattern.match(line):
+            continue
+        start = index
+        while start > 0 and not re.match(r"^\s*-\s+", lines[start]):
+            start -= 1
+        base_indent = indent_of(lines[start])
+        body = [lines[start]]
+        for child in lines[start + 1 :]:
+            if re.match(rf"^ {{{base_indent}}}-\s+", child):
+                break
+            body.append(child)
+        return "\n".join(body)
+    return ""
+
+
+def github_app_token_errors(text: str) -> list[str]:
+    errors: list[str] = []
+    if not re.search(r"(?m)^\s{6}grimoire_app_client_id\s*:", text):
+        errors.append("workflow_call must declare grimoire_app_client_id input")
+    if not re.search(r"(?ms)^\s{6}GRIMOIRE_APP_PRIVATE_KEY\s*:\s*$.*?^\s{8}required\s*:\s*true\s*$", text):
+        errors.append("workflow_call must declare required GRIMOIRE_APP_PRIVATE_KEY secret")
+
+    token_refs = re.findall(r"actions/create-github-app-token@([^\s#]+)", text)
+    if len(token_refs) != 1:
+        errors.append("workflow must use actions/create-github-app-token exactly once")
+    elif not re.fullmatch(r"[0-9A-Fa-f]{40}", token_refs[0]):
+        errors.append("actions/create-github-app-token must be pinned to a 40-character commit SHA")
+
+    token_step = workflow_step_id_block(text, APP_TOKEN_STEP_ID)
+    if not token_step:
+        errors.append(f"workflow missing GitHub App token step id: {APP_TOKEN_STEP_ID}")
+    else:
+        if APP_TOKEN_ACTION_RE.search(token_step) is None:
+            errors.append("grimoire-app-token step must use actions/create-github-app-token pinned to a 40-character commit SHA")
+        for snippet in (
+            "client-id: ${{ inputs.grimoire_app_client_id }}",
+            "private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}",
+            "owner: DongwonTTuna-Labs",
+        ):
+            if snippet not in token_step:
+                errors.append(f"grimoire-app-token step missing required snippet: {snippet}")
+        if "app-id:" in token_step:
+            errors.append("grimoire-app-token step must use client-id, not app-id")
+
+    for step_name, label in (
+        ("Checkout trusted control plane", "control-plane checkout"),
+        ("Checkout consumer repository as data", "consumer checkout"),
+    ):
+        step = workflow_step_block(text, step_name)
+        if not step:
+            errors.append(f"workflow missing {label} step: {step_name}")
+        elif f"token: {APP_TOKEN_EXPR}" not in step:
+            errors.append(f"{label} must use {APP_TOKEN_EXPR}")
+
+    cast = workflow_step_block(text, "Run cast driver")
+    if not cast:
+        errors.append("workflow missing Run cast driver step")
+    elif f"GRIMOIRE_GITHUB_PAT: {APP_TOKEN_EXPR}" not in cast:
+        errors.append(f"Run cast driver must set GRIMOIRE_GITHUB_PAT from {APP_TOKEN_EXPR}")
+    return errors
 
 
 def opencode_runtime_setup_errors(text: str) -> list[str]:
@@ -729,8 +1051,10 @@ def run_validate_workflow(args: argparse.Namespace) -> int:
         errors.append("forbidden secrets: inherit")
     if re.search(r"\b(ubuntu|macos|windows)-latest\b", text):
         errors.append("forbidden GitHub-hosted runner fallback")
-    if "GITHUB_TOKEN" in text or "create-github-app-token" in text:
-        errors.append("forbidden GITHUB_TOKEN or GitHub App privileged auth")
+    for marker in FORBIDDEN_PRIVILEGED_AUTH_MARKERS:
+        if marker in text:
+            errors.append(f"forbidden privileged auth marker: {marker}")
+    errors.extend(github_app_token_errors(text))
     if "./actions/grimoire" in text:
         errors.append("bare ./actions/grimoire path is forbidden inside reusable workflow")
     input_section = re.search(r"(?ms)^\s{6}inputs\s*:\s*(.*?)(?:^\s{6}secrets\s*:|\Z)", text)
@@ -749,10 +1073,16 @@ def run_validate_workflow(args: argparse.Namespace) -> int:
         "head_sha:",
         "base_ref:",
         "grimoire_contract_version:",
-        "GRIMOIRE_PAT:",
+        "grimoire_app_client_id:",
+        "GRIMOIRE_APP_PRIVATE_KEY:",
         "AI_RELAY_API_KEY:",
         "CF_ACCESS_CLIENT_ID:",
         "CF_ACCESS_CLIENT_SECRET:",
+        "actions/create-github-app-token@",
+        "client-id: ${{ inputs.grimoire_app_client_id }}",
+        "private-key: ${{ secrets.GRIMOIRE_APP_PRIVATE_KEY }}",
+        "owner: DongwonTTuna-Labs",
+        f"GRIMOIRE_GITHUB_PAT: {APP_TOKEN_EXPR}",
         "group: Home Server Runners",
         "labels: dongwontuna-labs-runner",
         "repository: DongwonTTuna-Labs/home-server-infra",
@@ -809,6 +1139,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     issues.add_argument("--ledger", default=".omo/ci/out-of-scope-issues-ledger.json")
     issues.add_argument("--output", default=".omo/ci/out-of-scope-issues-status.json")
 
+    comment = sub.add_parser("upsert-spec-gap-comment")
+    add_common(comment)
+    comment.add_argument("--decision", default=".omo/ci/cast-decision.json")
+    comment.add_argument("--spec-gap-status", default=".omo/ci/spec-gap-status.json")
+    comment.add_argument("--comment-path", default="")
+    comment.add_argument("--repository", required=True)
+    comment.add_argument("--pr-number", required=True)
+    comment.add_argument("--github-mutation-allowed", default="false")
+    comment.add_argument("--output", default=".omo/ci/spec-gap-comment-upsert.json")
+
     boulder = sub.add_parser("boulder")
     add_common(boulder)
     boulder.add_argument("--fix-status", default=".omo/ci/fix-status.json")
@@ -855,6 +1195,8 @@ def main(argv: list[str]) -> int:
         return run_preflight(args)
     if args.command == "file-issues":
         return run_file_issues(args)
+    if args.command == "upsert-spec-gap-comment":
+        return run_upsert_spec_gap_comment(args)
     if args.command == "boulder":
         return run_boulder(args)
     if args.command == "decide":

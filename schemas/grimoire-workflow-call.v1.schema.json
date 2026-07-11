@@ -20,7 +20,8 @@
         "pull_request_number",
         "head_sha",
         "base_ref",
-        "grimoire_contract_version"
+        "grimoire_contract_version",
+        "grimoire_app_client_id"
       ],
       "properties": {
         "consumer_repository": { "const": "string", "description": "Required workflow_call string input." },
@@ -28,22 +29,27 @@
         "pull_request_number": { "const": "string", "description": "Required workflow_call string input." },
         "head_sha": { "const": "string", "description": "Required workflow_call string input." },
         "base_ref": { "const": "string", "description": "Required workflow_call string input." },
-        "grimoire_contract_version": { "const": "string", "description": "Optional workflow_call string input with default 1." }
+        "grimoire_contract_version": { "const": "string", "description": "Optional workflow_call string input with default 1." },
+        "grimoire_app_client_id": {
+          "const": "string",
+          "default": "Iv23liFL1dDHmU06FLSF",
+          "description": "Optional workflow_call string input with default Iv23liFL1dDHmU06FLSF."
+        }
       }
     },
     "secrets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["GRIMOIRE_PAT", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"],
+      "required": ["GRIMOIRE_APP_PRIVATE_KEY", "AI_RELAY_API_KEY", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"],
       "properties": {
-        "GRIMOIRE_PAT": {
+        "GRIMOIRE_APP_PRIVATE_KEY": {
           "type": "object",
           "additionalProperties": false,
           "required": ["required"],
           "properties": {
             "required": {
-              "const": false,
-              "description": "Optional so the self-hosted runner CODEX_LOOP_PAT fallback remains reachable; auth still fails closed when neither source exists."
+              "const": true,
+              "description": "Required GitHub App private key used to mint short-lived installation tokens for privileged operations."
             }
           }
         },

@@ -1,7 +1,17 @@
 model = "gpt-5.5"
+model_provider = "codex-lb"
 model_reasoning_effort = "xhigh"
 plan_mode_reasoning_effort = "xhigh"
 approvals_reviewer = "user"
+
+[model_providers.codex-lb]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_HOME_API_KEY"
+supports_websockets = true
+requires_openai_auth = true
+
 [projects."/home/dongwonttuna"]
 trust_level = "trusted"
 

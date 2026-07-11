@@ -7,8 +7,6 @@ not collapse stateful or replica-based services into one container.
 
 - `stacks/codex-lb`: relay application, Postgres, and update policy. Its
   Cloudflare sidecar is retired into `stacks/tunnel-apps`.
-- `stacks/codex-lb-local`: local relay application, Postgres, and update policy.
-  Its Cloudflare sidecar is retired into `stacks/tunnel-apps`.
 - `stacks/codex-github-runners`: runner pool. Replicas stay separate so jobs do
   not share mutable runner state.
 - `/opt/agent-apps`: agent app domain with n8n, OpenClaw, Hermes, and Postgres.
