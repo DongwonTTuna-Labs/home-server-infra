@@ -33,10 +33,6 @@ required=(
   stacks/coding/systemd/coding-tools.target
   stacks/coding/systemd/codex-cli-update.service
   stacks/coding/systemd/codex-cli-update.timer
-  stacks/coding/systemd/opencode.service
-  stacks/coding/systemd/opencode-update.service
-  stacks/coding/systemd/opencode-update.sh
-  stacks/coding/systemd/opencode-update.timer
   stacks/maintenance/README.md
   stacks/maintenance/compose.yaml
   stacks/codex-github-runners/compose.yaml
@@ -217,11 +213,11 @@ if ! grep -q 'PartOf=mcp-suite.target' stacks/mcp-suite/systemd/mcp-suite-update
   printf 'MCP update timer must be owned by mcp-suite.target\n' >&2
   exit 1
 fi
-if ! grep -q 'Wants=opencode.service opencode-update.timer codex-cli-update.timer' stacks/coding/systemd/coding-tools.target; then
-  printf 'coding-tools.target must group OpenCode and Codex updater units\n' >&2
+if ! grep -q 'Wants=codex-cli-update.timer' stacks/coding/systemd/coding-tools.target; then
+  printf 'coding-tools.target must group the Codex updater timer\n' >&2
   exit 1
 fi
-for unit in stacks/coding/systemd/opencode.service stacks/coding/systemd/opencode-update.timer stacks/coding/systemd/codex-cli-update.timer; do
+for unit in stacks/coding/systemd/codex-cli-update.timer; do
   if ! grep -q 'PartOf=coding-tools.target' "$unit"; then
     printf 'Coding tool unit must be owned by coding-tools.target: %s\n' "$unit" >&2
     exit 1
