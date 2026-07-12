@@ -148,6 +148,7 @@ The final `db check` must print both `migration_policy=ok` and
 ## Deploy
 
 ```sh
+docker network inspect paca_mcp_internal >/dev/null 2>&1 || docker network create paca_mcp_internal
 docker compose -f stacks/codex-lb/compose.yaml up -d
 ```
 

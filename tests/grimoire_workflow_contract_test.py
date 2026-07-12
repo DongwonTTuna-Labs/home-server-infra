@@ -51,7 +51,7 @@ FORBIDDEN_RUNTIME_INPUTS = {
     "simulate",
     "simulation",
 }
-TEMP_ROOT = Path("/var/folders/vz/hx33c759727ftq88cxbgp8r40000gn/T/opencode")
+TEMP_ROOT = Path(tempfile.gettempdir()) / "opencode"
 
 
 class ContractError(AssertionError):

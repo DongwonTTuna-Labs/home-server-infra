@@ -51,6 +51,15 @@ mirrors/
 !.omo/
 !.omo/plans/
 !.omo/plans/**
+.omo/evidence/
+.omo/evidence/**
+.omo/notepads/
+.omo/notepads/**
+.omo/boulder.json
+.omo/drafts/
+.omo/drafts/**
+.omo/start-work/
+.omo/start-work/**
 .omo/run-continuation/
 .playwright-mcp/
 

@@ -1,0 +1,249 @@
+name: paca
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-paca}
+      POSTGRES_USER: ${POSTGRES_USER:-paca}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-paca} -d ${POSTGRES_DB:-paca}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db-backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-paca}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-paca}?sslmode=disable}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_CRON: ${BACKUP_CRON:-0 2 * * *}
+      TZ: ${TZ:-UTC}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ "$$(echo "$$BACKUP_CRON" | wc -w)" -ne 5 ]; then
+          echo "Invalid BACKUP_CRON '$$BACKUP_CRON': expected 5 fields" >&2
+          exit 1
+        fi
+
+        cat > /etc/backup.env <<EOF
+        DATABASE_URL="$$DATABASE_URL"
+        BACKUP_RETENTION_DAYS="$$BACKUP_RETENTION_DAYS"
+        EOF
+
+        cat > /usr/local/bin/run-backup.sh <<'EOS'
+        #!/bin/sh
+        set -e -o pipefail
+        . /etc/backup.env
+        ts="$$(date +%Y%m%d-%H%M%S)"
+        tmp="/backups/.paca-$${ts}.sql.gz.tmp"
+        out="/backups/paca-$${ts}.sql.gz"
+        if pg_dump "$$DATABASE_URL" --clean --if-exists --no-owner | gzip > "$$tmp"; then
+          mv "$$tmp" "$$out"
+          echo "Backup written: $$out"
+          find /backups -maxdepth 1 -name 'paca-*.sql.gz' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
+        else
+          echo "Backup failed at $${ts}" >&2
+          rm -f "$$tmp"
+          exit 1
+        fi
+        EOS
+        chmod +x /usr/local/bin/run-backup.sh
+
+        mkdir -p /var/spool/cron/crontabs
+        echo "$$BACKUP_CRON /usr/local/bin/run-backup.sh >>/proc/1/fd/1 2>>/proc/1/fd/2" > /var/spool/cron/crontabs/root
+
+        echo "Database backup service started: $$BACKUP_CRON $$TZ, retention $$BACKUP_RETENTION_DAYS days."
+        exec crond -f -d 8
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: valkey-server --appendonly yes
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY_ID:?STORAGE_ACCESS_KEY_ID is required}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_ACCESS_KEY:?STORAGE_SECRET_ACCESS_KEY is required}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ${PACA_API_IMAGE:-pacaai/paca-api:latest}
+    restart: unless-stopped
+    environment:
+      ENV: ${ENVIRONMENT:-production}
+      PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-paca}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-paca}?sslmode=disable}
+      REDIS_URL: ${REDIS_URL:-redis://valkey:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+      JWT_REFRESH_SESSION_TTL: ${JWT_REFRESH_SESSION_TTL:-24h}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-minio:9000}
+      STORAGE_PUBLIC_URL: ${STORAGE_PUBLIC_URL:-https://paca.dongwontuna.net/storage}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-paca}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:?STORAGE_ACCESS_KEY_ID is required}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:?STORAGE_SECRET_ACCESS_KEY is required}
+      STORAGE_USE_SSL: ${STORAGE_USE_SSL:-false}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required; rotate only after decrypt/re-encrypt migration}
+      PUBLIC_URL: ${PUBLIC_URL:-https://paca.dongwontuna.net}
+      PLUGINS_WASM_DIR: /plugins
+      PLUGINS_FRONTEND_DIR: /plugins-frontend
+      PLUGINS_MCP_DIR: /plugins-mcp
+      AGENT_API_KEY: ${AGENT_API_KEY:?AGENT_API_KEY is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      valkey:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    volumes:
+      - backend_plugins:/plugins
+      - frontend_plugins:/plugins-frontend
+      - mcp_plugins:/plugins-mcp
+
+  web:
+    image: ${PACA_WEB_IMAGE:-pacaai/paca-web:latest}
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  realtime:
+    image: ${PACA_REALTIME_IMAGE:-pacaai/paca-realtime:latest}
+    restart: unless-stopped
+    environment:
+      PORT: 3001
+      NODE_ENV: ${ENVIRONMENT:-production}
+      API_URL: http://api:8080
+      REDIS_URL: ${REDIS_URL:-redis://valkey:6379/0}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://paca.dongwontuna.net}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3080:80"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - frontend_plugins:/var/www/plugins:ro
+      - mcp_plugins:/var/www/plugins-mcp:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+      web:
+        condition: service_started
+        required: false
+      realtime:
+        condition: service_started
+
+  ai-agent:
+    image: ${PACA_AI_AGENT_IMAGE:-pacaai/paca-ai-agent:latest}
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      VALKEY_URL: ${REDIS_URL:-redis://valkey:6379/0}
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-paca}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-paca}?sslmode=disable}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      API_BASE_URL: http://api:8080
+      GATEWAY_BASE_URL: http://gateway
+      PACA_API_KEY: ${AGENT_API_KEY:?AGENT_API_KEY is required}
+      DOCKER_SOCKET: /var/run/docker.sock
+      AGENT_SERVER_IMAGE: ${AGENT_SERVER_IMAGE:-ghcr.io/paca-ai/paca-agent-server:latest}
+      PORT_POOL_START: ${PORT_POOL_START:-10000}
+      PORT_POOL_SIZE: ${PORT_POOL_SIZE:-100}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required; rotate only after decrypt/re-encrypt migration}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./overrides/ai-agent/enforce_xhigh.py:/opt/paca/enforce_xhigh.py:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        python /opt/paca/enforce_xhigh.py
+        exec uvicorn src.main:app --host 0.0.0.0 --port 8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      valkey:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  valkey_data:
+  minio_data:
+  backend_plugins:
+  frontend_plugins:
+  mcp_plugins:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    external: true
+    name: paca_mcp_internal

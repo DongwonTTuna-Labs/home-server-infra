@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-TEMP_ROOT = Path("/var/folders/vz/hx33c759727ftq88cxbgp8r40000gn/T/opencode")
+TEMP_ROOT = Path(tempfile.gettempdir()) / "opencode"
 LENSES = ["security", "correctness", "maintainability", "repo-policy"]
 APPROVE_LENSES = ("f1_oracle", "f2_quality", "f3_real_qa", "f4_scope")
 SPEC_GAP_SECTIONS = ["Summary", "Intended Work", "Missing OpenSpec Evidence", "Suggested Spec Items", "How To Rerun"]

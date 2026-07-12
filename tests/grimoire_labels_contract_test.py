@@ -15,6 +15,9 @@ class ContractError(AssertionError):
     pass
 
 
+GITHUB_PAT_PREFIX = "github_" + "pat_"
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ContractError(message)

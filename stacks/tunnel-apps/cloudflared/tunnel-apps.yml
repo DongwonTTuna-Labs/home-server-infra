@@ -1,9 +1,9 @@
-tunnel: 7a1eb69a-992a-4d3d-9eca-bf0e3c4cb916
-credentials-file: /etc/cloudflared/opencode.json
+tunnel: 685aeec4-5771-459a-8909-7ccfbb086815
+credentials-file: /etc/cloudflared/tunnel-apps.json
 
 ingress:
-  - hostname: opencode.dongwontuna.net
-    service: http://localhost:4096
   - hostname: relay-ai.dongwontuna.net
     service: http://localhost:2455
+  - hostname: paca.dongwontuna.net
+    service: http://localhost:3080
   - service: http_status:404

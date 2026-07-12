@@ -21,11 +21,9 @@ not collapse stateful or replica-based services into one container.
 
 ## User Systemd Domain
 
-`stacks/coding/systemd/` groups native coding tools under
+`stacks/coding/systemd/` groups the preserved Codex updater under
 `coding-tools.target`:
 
-- `opencode.service`
-- `opencode-update.timer`
 - `codex-cli-update.timer`
 
 `agentmemory.service`, `web-ai-display.service`, session SSH/GPG agent units,
@@ -37,13 +35,11 @@ runtime scripts, and mask decisions.
 Install or refresh the coding domain units with:
 
 ```sh
-mkdir -p ~/.config/systemd/user ~/.config/opencode
+mkdir -p ~/.config/systemd/user
 cp stacks/coding/systemd/*.service ~/.config/systemd/user/
 cp stacks/coding/systemd/*.timer ~/.config/systemd/user/
 cp stacks/coding/systemd/*.target ~/.config/systemd/user/
-cp stacks/coding/systemd/opencode-update.sh ~/.config/opencode/
-chmod 0755 ~/.config/opencode/opencode-update.sh
 systemctl --user daemon-reload
-systemctl --user enable --now coding-tools.target opencode.service opencode-update.timer codex-cli-update.timer
+systemctl --user enable --now coding-tools.target codex-cli-update.timer
 systemctl --user list-dependencies --plain coding-tools.target
 ```

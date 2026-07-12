@@ -60,17 +60,13 @@ temporary placeholder `state/github_pat` outside the tracked tree before running
 User systemd units are grouped like Docker stacks with soft domain targets:
 
 - `mcp-suite.target`: `mcp-suite-update.timer`
-- `coding-tools.target`: `opencode.service`, `opencode-update.timer`,
-  `codex-cli-update.timer`
+- `coding-tools.target`: `codex-cli-update.timer`
 
 Install or refresh the domain units, then reload user systemd:
 
 ```sh
 cp stacks/mcp-suite/systemd/*.service stacks/mcp-suite/systemd/*.timer stacks/mcp-suite/systemd/*.target ~/.config/systemd/user/
 cp stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target ~/.config/systemd/user/
-mkdir -p ~/.config/opencode
-cp stacks/coding/systemd/opencode-update.sh ~/.config/opencode/
-chmod 0755 ~/.config/opencode/opencode-update.sh
 systemctl --user daemon-reload
 systemctl --user enable --now mcp-suite.target coding-tools.target
 ```
