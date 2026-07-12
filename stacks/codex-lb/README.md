@@ -66,6 +66,10 @@ docker run --rm --pull=missing \
   -v codex-lb-data:/source:ro \
   -v "$backup_dir:/backup" \
   alpine:3.22 tar -C /source -czf /backup/codex-lb-data.tgz .
+docker run --rm \
+  -v "$backup_dir:/backup" \
+  alpine:3.22 chown "$(id -u):$(id -g)" /backup/codex-lb-data.tgz
+chmod 600 "$backup_dir/codex-lb-data.tgz"
 
 test -s "$backup_dir/postgres.dump"
 test -s "$backup_dir/codex-lb-data.tgz"
