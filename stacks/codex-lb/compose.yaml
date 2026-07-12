@@ -4,7 +4,7 @@ services:
   codex-lb:
     # Operator-verified pre-release, pinned by tag and OCI index digest.
     # Keep this service out of Watchtower and follow README.md for upgrades.
-    image: ghcr.io/soju06/codex-lb:1.21.0-beta.2@sha256:fa931eee760f3a6e8875ef7347d24993c899fedbf261066783e162f633d659ab
+    image: ghcr.io/soju06/codex-lb:1.21.0-beta.3@sha256:1e729cf81eb389c182261db6f401958cac8abda8cd8c9137249714881c4a1c90
     container_name: codex-lb
     pull_policy: missing
     restart: always
