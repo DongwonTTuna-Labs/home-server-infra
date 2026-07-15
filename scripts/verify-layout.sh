@@ -87,8 +87,8 @@ import sys
 import tomllib
 
 EXPECTED_IMAGE = (
-    "ghcr.io/soju06/codex-lb:1.21.0-beta.2@"
-    "sha256:fa931eee760f3a6e8875ef7347d24993c899fedbf261066783e162f633d659ab"
+    "ghcr.io/soju06/codex-lb:1.21.0@"
+    "sha256:f8f24d08d7cb4b993e64a52ed87b8eb769788a60df8e921665e817523d0ab945"
 )
 EXPECTED_PROVIDER = {
     "name": "openai",
@@ -113,6 +113,15 @@ require(service.get("pull_policy") == "missing", "codex-lb pull policy must rema
 require(
     service.get("labels", {}).get("com.centurylinklabs.watchtower.enable") == "false",
     "codex-lb must remain excluded from Watchtower",
+)
+environment = service.get("environment", {})
+require(
+    str(environment.get("CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT")) == "0",
+    "single-user codex-lb must disable the local per-account response-create cap",
+)
+require(
+    str(environment.get("CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT")) == "0",
+    "single-user codex-lb must disable the local per-account stream cap",
 )
 ports = service.get("ports", [])
 require(len(ports) == 1, "codex-lb must expose exactly one port mapping")

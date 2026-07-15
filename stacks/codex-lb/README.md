@@ -3,10 +3,10 @@
 This stack owns the Codex relay application and database. Public routing for
 `relay-ai.dongwontuna.net` is owned by `stacks/tunnel-apps`.
 
-The application image is an operator-verified pre-release pinned by both tag and
-OCI index digest. Both the application and Postgres are excluded from
-Watchtower. Change the image only after the backup and migration preflight below
-succeeds; do not switch this stack to a mutable `latest` tag.
+The application image is an operator-verified stable release pinned by both tag
+and OCI index digest. Both the application and Postgres are excluded from
+Watchtower. Change the image only after the backup and migration preflight
+below succeeds; do not switch this stack to a mutable `latest` tag.
 
 ## Tracked
 
@@ -50,6 +50,15 @@ requires_openai_auth = true
 Codex derives the secure WebSocket endpoint from the HTTPS base URL. Keep the
 home-server and Mac API keys separate, and never commit either value.
 
+## Single-User Concurrency
+
+This relay is private to one operator, so the Compose stack sets both
+`CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` and
+`CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` to `0`. In codex-lb, zero disables these
+local per-account caps. Global admission limits and upstream/provider rate
+limits remain active, so this removes artificial `account_response_create_cap`
+and `account_stream_cap` failures without bypassing provider enforcement.
+
 ## Backup Before Migration
 
 Run this from the repository root while PostgreSQL is healthy:
@@ -86,18 +95,19 @@ smoke test. Do not commit or attach the backup files to a PR.
 
 ## Migration Preflight
 
-The target Alembic head for the pinned beta is
-`20260711_030000_add_limit_warmup_idle_threshold`. The prior beta.2 head is
-`20260709_000000_add_ttft_phase_observability`. A historical 1.19 rollback used
-`20260513_000000_add_accounts_alias` for both a true 1.19 schema and a 1.20.1
-superset schema. The revision string alone cannot distinguish them.
+The target Alembic head for the pinned stable release is
+`20260713_040000_add_account_refresh_claims`. The prior beta.3 head is
+`20260711_030000_add_limit_warmup_idle_threshold`. A historical 1.19 rollback
+used `20260513_000000_add_accounts_alias` for both a true 1.19 schema and a
+1.20.1 superset schema. The revision string alone cannot distinguish them.
 
 Start PostgreSQL, pull the pinned images, and define read-only schema checkers:
 
 ```bash
 set -euo pipefail
 COMPOSE=stacks/codex-lb/compose.yaml
-TARGET_HEAD=20260711_030000_add_limit_warmup_idle_threshold
+TARGET_HEAD=20260713_040000_add_account_refresh_claims
+BETA3_HEAD=20260711_030000_add_limit_warmup_idle_threshold
 BETA2_HEAD=20260709_000000_add_ttft_phase_observability
 STABLE_HEAD=20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads
 PRE_BETA_HEAD=20260701_000000_add_weekly_pace_smoothing_minutes
@@ -128,7 +138,7 @@ Use this fail-closed state matrix:
 | --- | --- |
 | `TARGET_HEAD` | Run `db check`. Do not stamp backward or re-run migration manually. |
 | `none` and the `public` schema has zero tables | Run `db upgrade head`, then `db current` and `db check`. |
-| `BETA2_HEAD`, `STABLE_HEAD`, or `PRE_BETA_HEAD` | These are known ancestors. Run `db upgrade head` without stamping, then require `TARGET_HEAD` from `db current` and run `db check`. |
+| `BETA3_HEAD`, `BETA2_HEAD`, `STABLE_HEAD`, or `PRE_BETA_HEAD` | These are known ancestors. Run `db upgrade head` without stamping, then require `TARGET_HEAD` from `db current` and run `db check`. |
 | `20260513...`, 1.19 check passes and 1.20.1 check fails | This is an honest 1.19 schema. Run `db upgrade head` without stamping, then `db current` and `db check`. |
 | `20260513...`, 1.19 check fails and 1.20.1 check passes | This is the rollback-stamped 1.20.1 superset. Run `db stamp "$STABLE_HEAD"`, confirm with `db current`, then run `db upgrade head`, `db current`, and `db check`. |
 | Both schema checks pass, both fail, or the revision is unexpected | Stop. Do not stamp or upgrade until the physical schema and backup evidence are reconciled. |
@@ -164,7 +174,7 @@ docker compose -f stacks/codex-lb/compose.yaml up -d
 curl -fsS http://127.0.0.1:2455/health/ready
 curl -fsS https://relay-ai.dongwontuna.net/health/ready
 curl -fsS -D - -o /dev/null http://127.0.0.1:2455/health/ready \
-  | grep -i '^x-app-version: 1.21.0-beta.3'
+  | grep -i '^x-app-version: 1.21.0'
 ```
 
 Health alone is not release evidence. Finish with one real Codex response and
