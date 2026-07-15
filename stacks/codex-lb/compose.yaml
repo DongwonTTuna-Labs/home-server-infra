@@ -2,9 +2,9 @@ name: codex-lb
 
 services:
   codex-lb:
-    # Operator-verified pre-release, pinned by tag and OCI index digest.
+    # Operator-verified stable release, pinned by tag and OCI index digest.
     # Keep this service out of Watchtower and follow README.md for upgrades.
-    image: ghcr.io/soju06/codex-lb:1.21.0-beta.3@sha256:1e729cf81eb389c182261db6f401958cac8abda8cd8c9137249714881c4a1c90
+    image: ghcr.io/soju06/codex-lb:1.21.0@sha256:f8f24d08d7cb4b993e64a52ed87b8eb769788a60df8e921665e817523d0ab945
     container_name: codex-lb
     pull_policy: missing
     restart: always
@@ -17,7 +17,10 @@ services:
       # revision 20260513 for two different physical schemas, so never stamp
       # that state by revision alone; use the README.md preflight matrix.
       CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"
-      CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT: "50"
+      # This is a single-user relay. Disable codex-lb's local per-account caps;
+      # global admission limits and upstream/provider limits still apply.
+      CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT: "0"
+      CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT: "0"
       # Request-path pool (max 100 conns) + separate background pool (max 20) so
       # background jobs can't starve request connections. Must stay under the PG
       # server's max_connections (set to 200 below).
