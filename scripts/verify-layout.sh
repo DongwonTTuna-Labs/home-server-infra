@@ -19,6 +19,14 @@ required=(
   stacks/mcp-suite/systemd/mcp-suite.target
   stacks/mcp-suite/systemd/mcp-suite-update.timer
   stacks/mcp-suite/systemd/mcp-suite-update.sh
+  stacks/nvidia-build-lb/README.md
+  stacks/nvidia-build-lb/compose.yaml
+  scripts/verify-nvidia-build-lb-stack.py
+  scripts/test-credential-scan.sh
+  scripts/quarantine-hermes-credentials.sh
+  scripts/test-quarantine-hermes-credentials.sh
+  scripts/agent-apps-delayed-update-locked.sh
+  stacks/nvidia-build-lb/systemd/agent-apps-delayed-update.service.d/nblb-cutover-lock.conf
   stacks/tunnel-apps/README.md
   stacks/tunnel-apps/compose.yaml
   stacks/tunnel-apps/cloudflared/tunnel-apps.yml
@@ -51,6 +59,23 @@ for path in "${required[@]}"; do
   fi
 done
 
+if ! git ls-files --error-unmatch scripts/test-credential-scan.sh >/dev/null 2>&1; then
+  printf 'Credential negative sensor must be tracked: scripts/test-credential-scan.sh\n' >&2
+  exit 1
+fi
+if ! git ls-files --error-unmatch scripts/quarantine-hermes-credentials.sh >/dev/null 2>&1; then
+  printf 'Hermes credential quarantine helper must be tracked\n' >&2
+  exit 1
+fi
+if ! git ls-files --error-unmatch scripts/test-quarantine-hermes-credentials.sh >/dev/null 2>&1; then
+  printf 'Hermes credential quarantine sensor must be tracked\n' >&2
+  exit 1
+fi
+if ! git ls-files --error-unmatch scripts/agent-apps-delayed-update-locked.sh >/dev/null 2>&1; then
+  printf 'Agent apps delayed update lock wrapper must be tracked\n' >&2
+  exit 1
+fi
+
 assert_no_mcp_tunnel_exposure() {
   local tunnel_config=$1
 
@@ -76,6 +101,9 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 scripts/scan-secrets.sh
+scripts/test-credential-scan.sh
+scripts/test-quarantine-hermes-credentials.sh
+scripts/verify-nvidia-build-lb-stack.py
 CODEX_LB_POSTGRES_PASSWORD=placeholder \
   docker compose -f stacks/codex-lb/compose.yaml config --format json \
   >"$tmpdir/codex-lb-compose.json"

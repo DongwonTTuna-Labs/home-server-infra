@@ -8,6 +8,7 @@ This repository stores reproducible configuration for:
 - domain-based MCP and tunnel suites
 - domain-based user systemd bundles
 - codex-lb relay
+- NVIDIA hosted API load balancer
 - GitHub Codex runner pool
 - Selected SSH and Codex dotfiles
 
@@ -26,6 +27,7 @@ stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
 stacks/mcp-suite/             Single local MCP runtime container
+stacks/nvidia-build-lb/       Independent NVIDIA hosted API gateway stack
 stacks/tunnel-apps/           Single non-SSH Cloudflare Tunnel stack
 services/robobotuna-company-os/ Mocked RoboboTuna Company OS first-slice service
 ```
@@ -43,6 +45,7 @@ Dify, Grimoire, or production data access.
 scripts/verify-layout.sh
 scripts/scan-secrets.sh
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
+docker compose -f stacks/nvidia-build-lb/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
 docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null

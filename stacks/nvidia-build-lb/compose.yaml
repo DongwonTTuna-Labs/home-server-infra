@@ -1,0 +1,149 @@
+name: nvidia-build-lb
+
+services:
+  db:
+    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:c16dc18dcbad2e4aa23d27a4db72eeee28aa5d95de7c7de4020416322e35c8e5
+    environment:
+      POSTGRES_DB: nvidia_build_lb
+      POSTGRES_USER: nvidia_build_lb
+      POSTGRES_PASSWORD_FILE: /run/canonical-secrets/db_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    labels:
+      nvidia-build-lb.component: database
+      nvidia-build-lb.backup-source: "true"
+      nvidia-build-lb.restore-isolated: "false"
+      com.centurylinklabs.watchtower.enable: "false"
+    secrets:
+      - source: db_password
+        target: /run/canonical-secrets/db_password
+        mode: 0400
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    tmpfs:
+      - /run/nvidia-build-lb/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=0,gid=0
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=0775,uid=70,gid=70
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - SETPCAP
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/bin/setpriv", "--reuid=70", "--regid=70", "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--no-new-privs", "/usr/local/bin/nblb-healthcheck", "70", "70", "postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    networks:
+      - data
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  migrate:
+    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:f457e1c3ace3e626c139a8d4c67f766fd109986a0eb497406a9de1dbd9269ee4
+    command: ["/usr/local/bin/nblb-migrate"]
+    environment:
+      NVIDIA_BUILD_LB_MODE: migrate
+      NBLB_DATABASE_URL: postgres://nvidia_build_lb@db/nvidia_build_lb
+    labels:
+      nvidia-build-lb.component: migration
+      com.centurylinklabs.watchtower.enable: "false"
+    secrets:
+      - source: db_password
+        target: /run/canonical-secrets/db_password
+        mode: 0400
+    tmpfs:
+      - /run/nvidia-build-lb/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=0,gid=0
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - SETPCAP
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - data
+    restart: "no"
+    stop_grace_period: 30s
+
+  app:
+    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:f457e1c3ace3e626c139a8d4c67f766fd109986a0eb497406a9de1dbd9269ee4
+    environment:
+      NBLB_DATABASE_URL: postgres://nvidia_build_lb@db/nvidia_build_lb
+      NBLB_VAULT_MASTER_KEY_FILE: /run/nvidia-build-lb/secrets/vault_master_key
+      NBLB_UPSTREAM_URL: https://integrate.api.nvidia.com/v1/chat/completions
+      NBLB_ADMIN_PUBLIC_HOST: ""
+      NBLB_REQUIRE_DOWNSTREAM_TOKEN: "1"
+      NVIDIA_BUILD_LB_PUBLIC_PORT: "2456"
+      NVIDIA_BUILD_LB_ADMIN_EVENT_MAX_ROWS: "100000"
+      NVIDIA_BUILD_LB_ADMIN_ATTEMPT_MAX_ROWS: "40000"
+      NVIDIA_BUILD_LB_ADMIN_LEDGER_PRUNE_BATCH_SIZE: "1000"
+    labels:
+      nvidia-build-lb.component: gateway
+      com.centurylinklabs.watchtower.enable: "false"
+    secrets:
+      - source: admin_token
+        target: /run/canonical-secrets/admin_token
+        mode: 0400
+      - source: vault_master_key
+        target: /run/canonical-secrets/vault_master_key
+        mode: 0400
+      - source: db_password
+        target: /run/canonical-secrets/db_password
+        mode: 0400
+    tmpfs:
+      - /run/nvidia-build-lb/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=0,gid=0
+      - /run/nvidia-build-lb/media-spool:rw,noexec,nosuid,nodev,size=256m,mode=0730,uid=0,gid=65532
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - vault-data:/var/lib/nvidia-build-lb
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - SETPCAP
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - 127.0.0.1:2456:2456
+    networks:
+      - data
+      - egress
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+secrets:
+  admin_token:
+    file: /opt/nvidia-build-lb/secrets/admin_token
+  vault_master_key:
+    file: /opt/nvidia-build-lb/secrets/vault_master_key
+  db_password:
+    file: /opt/nvidia-build-lb/secrets/db_password
+
+networks:
+  data:
+    internal: true
+  egress: {}
+
+volumes:
+  db-data:
+  vault-data:

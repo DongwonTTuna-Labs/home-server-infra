@@ -10,6 +10,7 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 | --- | --- |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
 | `paca.dongwontuna.net` | `http://localhost:3080` |
+| `nvidia-lb.dongwontuna.net` | `http://localhost:2456` (public API/health; admin UI remains loopback-only) |
 
 ## Run
 
@@ -34,6 +35,7 @@ Move DNS routes only after local origins pass smoke tests:
 ```sh
 cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns tunnel-apps paca.dongwontuna.net
+cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
 ```
 
 Verify both public routes after the DNS change:
@@ -42,6 +44,7 @@ Verify both public routes after the DNS change:
 curl -fsS https://relay-ai.dongwontuna.net/health
 curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
 curl -fsS https://paca.dongwontuna.net/api/healthz
+curl -fsS https://nvidia-lb.dongwontuna.net/health
 ```
 
 The previous shared tunnel was deleted and cannot be used as a rollback
