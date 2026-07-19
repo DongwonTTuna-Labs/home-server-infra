@@ -6,6 +6,7 @@ services:
     environment:
       POSTGRES_DB: nvidia_build_lb
       POSTGRES_USER: nvidia_build_lb
+      POSTGRES_PASSWORD_FILE: /run/canonical-secrets/db_password
       PGDATA: /var/lib/postgresql/data/pgdata
     labels:
       nvidia-build-lb.component: database

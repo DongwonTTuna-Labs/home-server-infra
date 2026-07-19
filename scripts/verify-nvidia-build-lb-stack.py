@@ -49,6 +49,7 @@ EXPECTED_ENVIRONMENTS = {
     "db": {
         "PGDATA": "/var/lib/postgresql/data/pgdata",
         "POSTGRES_DB": "nvidia_build_lb",
+        "POSTGRES_PASSWORD_FILE": "/run/canonical-secrets/db_password",
         "POSTGRES_USER": "nvidia_build_lb",
     },
     "migrate": {
