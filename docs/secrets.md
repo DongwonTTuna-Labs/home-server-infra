@@ -15,6 +15,33 @@ external secret store.
   - User systemd update script for rebuilding the local MCP suite image
 - `stacks/codex-lb/.env`
   - `CODEX_LB_POSTGRES_PASSWORD` for the codex-lb Postgres service
+- `/opt/nvidia-build-lb/secrets/admin_token`
+  - Local owner-administration bearer for the NVIDIA gateway. It uses the
+    `nblb_admin_` prefix and is never passed through Compose environment values.
+- `/opt/nvidia-build-lb/secrets/vault_master_key`
+  - Raw 32-byte encryption key for stored NVIDIA credentials. Back it up only
+    as the matching half of a verified database backup pair; never rotate it
+    independently of existing ciphertext.
+- `/opt/nvidia-build-lb/secrets/db_password`
+  - PostgreSQL password used only through the stack's file-secret boundary.
+- `/opt/agent-apps/data/hermes/.env`
+  - `NVIDIA_API_KEY` is the one-time `nvidia-build-lb` downstream bearer used
+    by Hermes after cutover, not an NVIDIA upstream credential. Its client has
+    only `models:read` and `chat:write`.
+- `/opt/nvidia-build-lb/hermes-cutover-backups/`
+  - Host-only, root-owned mode-`0700` rollback generations created by the
+    release-matched Hermes cutover helper. Files are mode `0600`; a manifest
+    records checksums and internal token IDs but never a bearer. This path is
+    outside every Hermes bind mount. A generation that contains a former direct
+    NVIDIA credential remains temporary custody only: revoke that provider key,
+    complete final reapply, then retire a current manifest-backed generation
+    with the app helper. Retire a named `manual-quarantine-*` legacy generation
+    only with `quarantine-hermes-credentials.sh retire ...
+    --provider-credential-revoked` after provider-side revocation.
+- `/opt/nvidia-build-lb/hermes-cutover-state/`
+  - Root-owned mode-`0700` lock and secret-free transaction journal. A
+    nonterminal journal is a fail-closed recovery condition, not permission to
+    overwrite either live Hermes file manually.
 - `${HOME}/.config/environment.d/20-codex-lb.conf`
   - `CODEX_LB_HOME_API_KEY` for the home-server Codex localhost provider
   - Imported into the user systemd manager; restart existing Codex processes
@@ -66,6 +93,8 @@ external secret store.
   key
 - `codex-lb_codex-lb-postgres-data` Docker volume, including relay database
   state
+- `nvidia-build-lb_db-data` Docker volume, including encrypted NVIDIA
+  credentials, routing state, downstream-token digests, and operator evidence
 - Paca Docker volumes, including `paca_postgres_data`, `paca_valkey_data`,
   `paca_minio_data`, `paca_backend_plugins`, `paca_frontend_plugins`,
   `paca_mcp_plugins`, `paca_caddy_data`, and `paca_caddy_config`
