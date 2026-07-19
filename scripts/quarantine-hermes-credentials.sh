@@ -53,6 +53,20 @@ for path in "$source_root" "$(dirname "$quarantine_root")"; do
     exit 1
   }
 done
+source_real=$(readlink -f -- "$source_root")
+sessions_root=$source_root/sessions
+[ -d "$sessions_root" ] && [ ! -L "$sessions_root" ] || {
+  printf '%s\n' 'Hermes sessions directory is missing or unsafe' >&2
+  exit 1
+}
+sessions_real=$(readlink -f -- "$sessions_root")
+case "$sessions_real/" in
+  "$source_real/"*) ;;
+  *)
+    printf '%s\n' 'Hermes sessions directory resolves outside the source root' >&2
+    exit 1
+    ;;
+esac
 for path in "$quarantine_root" "$state_root"; do
   if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
     printf '%s\n' 'Host-only cutover directory is unsafe' >&2
@@ -513,6 +527,10 @@ if [ "$command" = retire ]; then
     printf '%s\n' 'Legacy quarantine generation does not exist' >&2
     exit 1
   fi
+  [ "$receipt_status" != pending ] || {
+    printf '%s\n' 'Pending legacy retirement cannot delete an existing generation' >&2
+    exit 1
+  }
   [ -d "$target" ] && [ ! -L "$target" ] \
     || { printf '%s\n' 'Legacy quarantine generation is unsafe' >&2; exit 1; }
   validate_tree "$target"

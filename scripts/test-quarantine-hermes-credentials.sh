@@ -41,6 +41,22 @@ generation=$(printf '%s\n' "$output" | sed -n 's/^Legacy quarantine generation: 
 [ "$(stat -c '%u:%g:%a' "$root/hermes-cutover-backups/$generation")" \
   = "$(id -u):$(id -g):700" ]
 
+retire_dir=$root/hermes-cutover-state/legacy-retirements
+mkdir -p "$retire_dir"
+retire_receipt=$retire_dir/$generation.receipt
+printf '%s\n' \
+  'schema_version=1' \
+  "generation=$generation" \
+  'provider_revocation_confirmed=true' \
+  'status=pending' >"$retire_receipt"
+chmod 0600 "$retire_receipt"
+if run_fixture "$root" retire "$generation" --provider-credential-revoked >/dev/null 2>&1; then
+  printf '%s\n' 'Pending retirement deleted an existing generation' >&2
+  exit 1
+fi
+[ -d "$root/hermes-cutover-backups/$generation" ]
+rm -f -- "$retire_receipt"
+
 repeat_output=$(run_fixture "$root")
 printf '%s\n' "$repeat_output" | grep -Fxq \
   'Hermes legacy credential matches after quarantine: 0'
@@ -134,6 +150,16 @@ expect_preflight_rejection symlink symlink
 expect_preflight_rejection hardlink hardlink
 expect_preflight_rejection fifo fifo
 expect_preflight_rejection nested-mount nested-mount
+
+sessions_alias_root=$(new_fixture sessions-symlink)
+outside_sessions=$(mktemp -d)
+rm -rf -- "$sessions_alias_root/hermes/sessions"
+ln -s "$outside_sessions" "$sessions_alias_root/hermes/sessions"
+if run_fixture "$sessions_alias_root" >/dev/null 2>&1; then
+  printf '%s\n' 'Symlinked Hermes sessions directory was accepted' >&2
+  exit 1
+fi
+rm -rf -- "$outside_sessions"
 
 overlap_root=$(new_fixture mount-overlap)
 mkdir -p "$overlap_root/hermes-cutover-backups/mounted-child"
