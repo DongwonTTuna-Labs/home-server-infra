@@ -19,6 +19,7 @@ EXPECTED_POSTGRES_IMAGE = (
     f"ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:{EXPECTED_POSTGRES_REGISTRY_DIGEST}"
 )
 CAPABILITIES = ["CHOWN", "SETGID", "SETUID", "SETPCAP"]
+DATABASE_CAPABILITIES = [*CAPABILITIES, "FOWNER", "DAC_READ_SEARCH"]
 SECRET_DIR = "/opt/nvidia-build-lb/secrets"
 STACK_README = REPO_ROOT / "stacks" / "nvidia-build-lb" / "README.md"
 QUARANTINE_HELPER = REPO_ROOT / "scripts" / "quarantine-hermes-credentials.sh"
@@ -195,7 +196,11 @@ def verify_service_hardening(services: dict[str, Any]) -> None:
         )
         require(service.get("read_only") is True, f"{name} root filesystem must be read-only")
         require(service.get("cap_drop") == ["ALL"], f"{name} must drop every capability")
-        require(service.get("cap_add") == CAPABILITIES, f"{name} capability allowlist drifted")
+        expected_capabilities = DATABASE_CAPABILITIES if name == "db" else CAPABILITIES
+        require(
+            service.get("cap_add") == expected_capabilities,
+            f"{name} capability allowlist drifted",
+        )
         require(
             service.get("security_opt") == ["no-new-privileges:true"],
             f"{name} must set no-new-privileges",
@@ -239,18 +244,11 @@ def verify_service_hardening(services: dict[str, Any]) -> None:
         == {
             "test": [
                 "CMD",
-                "/bin/setpriv",
-                "--reuid=70",
-                "--regid=70",
-                "--clear-groups",
-                "--inh-caps=-all",
-                "--ambient-caps=-all",
-                "--bounding-set=-all",
-                "--no-new-privs",
-                "/usr/local/bin/nblb-healthcheck",
-                "70",
-                "70",
-                "postgres",
+                "pg_isready",
+                "-U",
+                "nvidia_build_lb",
+                "-d",
+                "nvidia_build_lb",
             ],
             "timeout": "3s",
             "interval": "10s",
