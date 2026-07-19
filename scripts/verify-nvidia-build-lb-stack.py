@@ -10,8 +10,8 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = REPO_ROOT / "stacks" / "nvidia-build-lb" / "compose.yaml"
-EXPECTED_APP_REGISTRY_DIGEST = "fafb1e6baf9bcf99e1b6490452e7e5c4d24b796673ec82f3514b77a51aabac56"
-EXPECTED_POSTGRES_REGISTRY_DIGEST = "abedd3db98a940a8f21b1371b4bffcc5261c2c411a67f7a7a6f86f900b21c810"
+EXPECTED_APP_REGISTRY_DIGEST = "f457e1c3ace3e626c139a8d4c67f766fd109986a0eb497406a9de1dbd9269ee4"
+EXPECTED_POSTGRES_REGISTRY_DIGEST = "c16dc18dcbad2e4aa23d27a4db72eeee28aa5d95de7c7de4020416322e35c8e5"
 EXPECTED_APP_IMAGE = (
     f"ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:{EXPECTED_APP_REGISTRY_DIGEST}"
 )

@@ -2,7 +2,7 @@ name: nvidia-build-lb
 
 services:
   db:
-    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:abedd3db98a940a8f21b1371b4bffcc5261c2c411a67f7a7a6f86f900b21c810
+    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:c16dc18dcbad2e4aa23d27a4db72eeee28aa5d95de7c7de4020416322e35c8e5
     environment:
       POSTGRES_DB: nvidia_build_lb
       POSTGRES_USER: nvidia_build_lb
@@ -44,7 +44,7 @@ services:
     stop_grace_period: 30s
 
   migrate:
-    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:fafb1e6baf9bcf99e1b6490452e7e5c4d24b796673ec82f3514b77a51aabac56
+    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:f457e1c3ace3e626c139a8d4c67f766fd109986a0eb497406a9de1dbd9269ee4
     command: ["/usr/local/bin/nblb-migrate"]
     environment:
       NVIDIA_BUILD_LB_MODE: migrate
@@ -78,7 +78,7 @@ services:
     stop_grace_period: 30s
 
   app:
-    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:fafb1e6baf9bcf99e1b6490452e7e5c4d24b796673ec82f3514b77a51aabac56
+    image: ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:f457e1c3ace3e626c139a8d4c67f766fd109986a0eb497406a9de1dbd9269ee4
     environment:
       NBLB_DATABASE_URL: postgres://nvidia_build_lb@db/nvidia_build_lb
       NBLB_VAULT_MASTER_KEY_FILE: /run/nvidia-build-lb/secrets/vault_master_key
