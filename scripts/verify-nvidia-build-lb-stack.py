@@ -245,6 +245,8 @@ def verify_service_hardening(services: dict[str, Any]) -> None:
             "test": [
                 "CMD",
                 "pg_isready",
+                "-h",
+                "127.0.0.1",
                 "-U",
                 "nvidia_build_lb",
                 "-d",
