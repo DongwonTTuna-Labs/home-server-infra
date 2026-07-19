@@ -34,6 +34,7 @@ Required only on the host:
 - `/opt/nvidia-build-lb/secrets/vault_master_key`
 - `/opt/nvidia-build-lb/secrets/db_password`
 - Docker volume `nvidia-build-lb_db-data`
+- Docker volume `nvidia-build-lb_vault-data`
 
 The vault key and PostgreSQL data are one recovery pair. Never rotate the vault
 key by itself and never treat a database-only dump as a complete backup.
@@ -289,6 +290,8 @@ while :; do
     || { printf '%s\n' 'delayed updater did not finish before timeout' >&2; exit 1; }
   sleep 1
 done
+sudo install -o root -g root -m 0755 \
+  -d /usr/local/libexec
 sudo install -o root -g root -m 0755 \
   scripts/agent-apps-delayed-update-locked.sh \
   /usr/local/libexec/nvidia-build-lb-agent-apps-delayed-update

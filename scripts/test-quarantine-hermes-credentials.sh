@@ -43,6 +43,7 @@ generation=$(printf '%s\n' "$output" | sed -n 's/^Legacy quarantine generation: 
 
 retire_dir=$root/hermes-cutover-state/legacy-retirements
 mkdir -p "$retire_dir"
+chmod 0700 "$retire_dir"
 retire_receipt=$retire_dir/$generation.receipt
 printf '%s\n' \
   'schema_version=1' \
@@ -160,6 +161,17 @@ if run_fixture "$sessions_alias_root" >/dev/null 2>&1; then
   exit 1
 fi
 rm -rf -- "$outside_sessions"
+
+live_alias_root=$(new_fixture live-credential-symlink)
+outside_env=$(mktemp)
+printf 'NVIDIA_API_KEY=nvapi-%s\n' "$(printf 'x%.0s' {1..40})" >"$outside_env"
+rm -f -- "$live_alias_root/hermes/.env"
+ln -s "$outside_env" "$live_alias_root/hermes/.env"
+if run_fixture "$live_alias_root" >/dev/null 2>&1; then
+  printf '%s\n' 'Symlinked Hermes live credential was accepted' >&2
+  exit 1
+fi
+rm -f -- "$outside_env"
 
 overlap_root=$(new_fixture mount-overlap)
 mkdir -p "$overlap_root/hermes-cutover-backups/mounted-child"

@@ -67,6 +67,11 @@ case "$sessions_real/" in
     exit 1
     ;;
 esac
+linked_source=$(find -P "$source_root" -type l -print -quit)
+[ -z "$linked_source" ] || {
+  printf '%s\n' 'Hermes source tree contains an unsafe symlink' >&2
+  exit 1
+}
 for path in "$quarantine_root" "$state_root"; do
   if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
     printf '%s\n' 'Host-only cutover directory is unsafe' >&2
