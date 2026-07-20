@@ -10,7 +10,7 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 | --- | --- |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
 | `paca.dongwontuna.net` | `http://localhost:3080` |
-| `nvidia-lb.dongwontuna.net` | `http://localhost:2456` (public API/health; admin UI remains loopback-only) |
+| `nvidia-lb.dongwontuna.net` | `http://localhost:2456` (public dashboard/API/health; admin UI remains loopback-only) |
 
 ## Run
 
@@ -44,6 +44,7 @@ Verify both public routes after the DNS change:
 curl -fsS https://relay-ai.dongwontuna.net/health
 curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
 curl -fsS https://paca.dongwontuna.net/api/healthz
+curl -fsS https://nvidia-lb.dongwontuna.net/
 curl -fsS https://nvidia-lb.dongwontuna.net/health
 ```
 
