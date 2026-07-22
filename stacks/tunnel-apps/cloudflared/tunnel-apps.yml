@@ -7,16 +7,40 @@ ingress:
   - hostname: paca.dongwontuna.net
     service: http://localhost:3080
   - hostname: nvidia-lb.dongwontuna.net
+    path: ^/admin(?:/.*)?$
+    service: http_status:404
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/internal(?:/.*)?$
+    service: http_status:404
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/metrics(?:/.*)?$
+    service: http_status:404
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/debug(?:/.*)?$
+    service: http_status:404
+  - hostname: nvidia-lb.dongwontuna.net
     path: ^/$
     service: http://localhost:2456
   - hostname: nvidia-lb.dongwontuna.net
     path: ^/_app/.*$
     service: http://localhost:2456
   - hostname: nvidia-lb.dongwontuna.net
-    path: ^/health$
+    path: ^/favicon[.]svg$
     service: http://localhost:2456
   - hostname: nvidia-lb.dongwontuna.net
-    path: ^/v1/.*$
+    path: ^/(?:status|models|docs|security)/?$
+    service: http://localhost:2456
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/incidents(?:/.*)?$
+    service: http://localhost:2456
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/api/public/v1(?:/.*)?$
+    service: http://localhost:2456
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/health(?:/.*)?$
+    service: http://localhost:2456
+  - hostname: nvidia-lb.dongwontuna.net
+    path: ^/v1(?:/.*)?$
     service: http://localhost:2456
   - hostname: nvidia-lb.dongwontuna.net
     service: http_status:404

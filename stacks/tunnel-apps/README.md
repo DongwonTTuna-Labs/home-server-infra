@@ -19,11 +19,19 @@ Host state required before starting the stack:
 - `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`, mounted
   read-only as the credentials file for tunnel `tunnel-apps`
 
-```sh
-cloudflared tunnel --config stacks/tunnel-apps/cloudflared/tunnel-apps.yml ingress validate
+```bash
+(
+set -Eeuo pipefail
+tunnel=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
+curl -fsS -o /dev/null http://127.0.0.1:2455/health
+curl -fsS -o /dev/null http://127.0.0.1:3080/healthz
+curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
+cloudflared tunnel --config "$tunnel" ingress validate
 docker compose -f stacks/tunnel-apps/compose.yaml config --quiet
-docker compose -f stacks/tunnel-apps/compose.yaml up -d --force-recreate cloudflared-apps
+docker compose -f stacks/tunnel-apps/compose.yaml \
+  up -d --force-recreate cloudflared-apps
 cloudflared tunnel info tunnel-apps
+)
 ```
 
 Do not move DNS until `tunnel info` reports active connections and the
@@ -32,20 +40,40 @@ connection failure.
 
 Move DNS routes only after local origins pass smoke tests:
 
-```sh
+```bash
+(
+set -Eeuo pipefail
+curl -fsS -o /dev/null http://127.0.0.1:2455/health
+curl -fsS -o /dev/null http://127.0.0.1:3080/healthz
+curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
 cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns tunnel-apps paca.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
+)
 ```
 
 Verify both public routes after the DNS change:
 
-```sh
+```bash
+(
+set -Eeuo pipefail
 curl -fsS https://relay-ai.dongwontuna.net/health
 curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
-curl -fsS https://paca.dongwontuna.net/api/healthz
+curl -fsS https://paca.dongwontuna.net/healthz
 curl -fsS https://nvidia-lb.dongwontuna.net/
-curl -fsS https://nvidia-lb.dongwontuna.net/health
+curl -fsS https://nvidia-lb.dongwontuna.net/favicon.svg
+curl -fsS https://nvidia-lb.dongwontuna.net/status
+curl -fsS https://nvidia-lb.dongwontuna.net/models
+curl -fsS https://nvidia-lb.dongwontuna.net/docs
+curl -fsS https://nvidia-lb.dongwontuna.net/incidents
+curl -fsS https://nvidia-lb.dongwontuna.net/security
+curl -fsS https://nvidia-lb.dongwontuna.net/api/public/v1/summary
+curl -fsS https://nvidia-lb.dongwontuna.net/health/live
+test "$(curl -sS -o /dev/null -w '%{http_code}' https://nvidia-lb.dongwontuna.net/v1/models)" = 401
+for path in admin admin/api/v2/overview internal metrics debug; do
+  test "$(curl -sS -o /dev/null -w '%{http_code}' "https://nvidia-lb.dongwontuna.net/$path")" = 404
+done
+)
 ```
 
 The previous shared tunnel was deleted and cannot be used as a rollback

@@ -1,0 +1,15 @@
+{
+  "schema_version": "nblb.infra-release.v1",
+  "app_commit": "5521a4cbe22c98250034433532a184ecc89ed554",
+  "schema_migration": 16,
+  "app_registry_digest": "dcdc6054e3dd0829cc231e66ea9e69c0a2e166ed18b9d37a860dbe135f445ad8",
+  "postgres_registry_digest": "9bbd97d33fec2168c04bd8bb61551512438a73bfef762699213192f4a50a79dd",
+  "hermes_helper_sha256": "46b4f2e993e3e4e012e2a97aeaa64d114d4f98ea0e581597c0ef3c753e7a4881",
+  "hermes_helper_run_id": 29921254572,
+  "rollback": {
+    "app_commit": "05e8a8b43fcd76b7f504da82174735e97146b2a6",
+    "schema_migration": 11,
+    "app_registry_digest": "a9f7a0c6a9c53b5e7c48ee6e08e9e2092c6c60bb1aade5699673624a8644c8f8",
+    "postgres_registry_digest": "040caa04a2452d7231620ea815c53464f436c35e2859bb3e7002584aa9c25366"
+  }
+}
