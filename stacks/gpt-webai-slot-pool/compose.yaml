@@ -1,0 +1,137 @@
+name: gpt-webai-slot-pool
+
+x-slot-env: &slot-env
+  CHROME_NO_SANDBOX: "1"
+  CHROME_BINARY_PATH: /usr/bin/chromium
+  DISPLAY: ":99"
+
+x-slot-common: &slot-common
+  build:
+    context: .
+  image: home-server/gpt-webai-slot:latest
+  restart: unless-stopped
+  user: "${GPT_WEBAI_SLOT_UID:?set GPT_WEBAI_SLOT_UID}:${GPT_WEBAI_SLOT_GID:?set GPT_WEBAI_SLOT_GID}"
+  shm_size: "1gb"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  environment:
+    <<: *slot-env
+  healthcheck:
+    test: ["CMD", "gpt-webai-slot-healthcheck"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 20s
+
+services:
+  gpt-webai-slot-01:
+    <<: *slot-common
+    container_name: gpt-webai-slot-01
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-01
+      CDP_PORT: "9223"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-01/state:/state/slot-01
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-01/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-02:
+    <<: *slot-common
+    container_name: gpt-webai-slot-02
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-02
+      CDP_PORT: "9224"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-02/state:/state/slot-02
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-02/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-03:
+    <<: *slot-common
+    container_name: gpt-webai-slot-03
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-03
+      CDP_PORT: "9225"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-03/state:/state/slot-03
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-03/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-04:
+    <<: *slot-common
+    container_name: gpt-webai-slot-04
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-04
+      CDP_PORT: "9226"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-04/state:/state/slot-04
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-04/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-05:
+    <<: *slot-common
+    container_name: gpt-webai-slot-05
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-05
+      CDP_PORT: "9227"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-05/state:/state/slot-05
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-05/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-06:
+    <<: *slot-common
+    container_name: gpt-webai-slot-06
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-06
+      CDP_PORT: "9228"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-06/state:/state/slot-06
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-06/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-07:
+    <<: *slot-common
+    container_name: gpt-webai-slot-07
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-07
+      CDP_PORT: "9229"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-07/state:/state/slot-07
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-07/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-08:
+    <<: *slot-common
+    container_name: gpt-webai-slot-08
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-08
+      CDP_PORT: "9230"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-08/state:/state/slot-08
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-08/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-09:
+    <<: *slot-common
+    container_name: gpt-webai-slot-09
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-09
+      CDP_PORT: "9231"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-09/state:/state/slot-09
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-09/attachments:/broker-attachments:ro
+
+  gpt-webai-slot-10:
+    <<: *slot-common
+    container_name: gpt-webai-slot-10
+    environment:
+      <<: *slot-env
+      BROWSER_AGENT_HOME: /state/slot-10
+      CDP_PORT: "9232"
+    volumes:
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-10/state:/state/slot-10
+      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-10/attachments:/broker-attachments:ro

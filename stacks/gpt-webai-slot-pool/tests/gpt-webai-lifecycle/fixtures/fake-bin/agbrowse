@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=("$@")
+log="${GPT_WEBAI_FAKE_AGBROWSE_LOG:-}"
+fake_root="${GPT_WEBAI_FAKE_AGBROWSE_ROOT:-${GPT_WEBAI_TEST_ROOT:-}/fake-agbrowse}"
+
+  if [[ -n "$log" ]]; then
+    mkdir -p "$(dirname "$log")"
+    printf 'agbrowse' >> "$log"
+  for arg in "${args[@]}"; do
+    printf ' %q' "$arg" >> "$log"
+  done
+  printf '\n' >> "$log"
+fi
+
+if [[ -n "${BROWSER_AGENT_HOME:-}" ]]; then
+  mkdir -p "$fake_root"
+  printf '%s BROWSER_AGENT_HOME=%s CDP_PORT=%s\n' "${args[*]}" "$BROWSER_AGENT_HOME" "${CDP_PORT:-}" >> "$fake_root/browser-agent-home-calls"
+fi
+
+next_status() {
+  local seq="$fake_root/status-sequence"
+  local tmp="$fake_root/status-sequence.next.$$"
+  local line="" current first=1
+
+  if [[ "${AGBROWSE_WEB_AI_AUTO_START:-}" != 0 ]]; then
+    printf 'AGBROWSE_WEB_AI_AUTO_START was not disabled for status\n' >&2
+    exit 72
+  fi
+
+  if [[ -f "$seq" ]]; then
+    mkdir -p "$fake_root"
+    : > "$tmp"
+    while IFS= read -r current || [[ -n "$current" ]]; do
+      if [[ "$first" -eq 1 ]]; then
+        line="$current"
+        first=0
+      else
+        printf '%s\n' "$current" >> "$tmp"
+      fi
+    done < "$seq"
+    mv -f "$tmp" "$seq"
+  fi
+
+  case "${line:-unreachable}" in
+    reachable|reachable-headed)
+      printf '{"fake":true,"cdp":"reachable","headed":true}\n'
+      ;;
+    web-ai-ready)
+      printf '{"ok":true,"vendor":"chatgpt","status":"ready","url":"https://chatgpt.com/","capabilities":[{"capabilityId":"chatgpt-active-tab-verification","state":"ok"},{"capabilityId":"chatgpt-composer-visible","state":"ok"}]}\n'
+      ;;
+    about-blank)
+      printf '{"ok":true,"vendor":"chatgpt","status":"ready","url":"about:blank","capabilities":[]}\n'
+      ;;
+    reachable-headless)
+      printf '{"fake":true,"cdp":"reachable","headed":false}\n'
+      ;;
+    unreachable)
+      printf '{"fake":true,"cdp":"unreachable","headed":false}\n'
+      ;;
+    misleading-success)
+      printf '{"fake":true,"ok":true}\n'
+      ;;
+    malformed)
+      printf 'not-json\n'
+      ;;
+    exit-hard)
+      printf 'fake status failed\n' >&2
+      exit 70
+      ;;
+    network-disconnected)
+      printf 'fake network disconnected: ERR_INTERNET_DISCONNECTED DNS lookup failed\n' >&2
+      exit 70
+      ;;
+    *)
+      printf '{"fake":true,"cdp":"%s","headed":false}\n' "$line"
+      ;;
+  esac
+}
+
+next_sequence() {
+  local name="$1" default_value="$2"
+  local seq="$fake_root/$name"
+  local tmp="$fake_root/$name.next.$$"
+  local line="" current first=1
+
+  if [[ -f "$seq" ]]; then
+    mkdir -p "$fake_root"
+    : > "$tmp"
+    while IFS= read -r current || [[ -n "$current" ]]; do
+      if [[ "$first" -eq 1 ]]; then
+        line="$current"
+        first=0
+      else
+        printf '%s\n' "$current" >> "$tmp"
+      fi
+    done < "$seq"
+    mv -f "$tmp" "$seq"
+  fi
+
+  printf '%s' "${line:-$default_value}"
+}
+
+arg_value() {
+  local name="$1" index
+  for ((index = 0; index < ${#args[@]}; index++)); do
+    if [[ "${args[$index]}" == "$name" ]]; then
+      printf '%s' "${args[$((index + 1))]:-}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_ledger_before_poll() {
+  local sid="$1"
+  local file
+  [[ -f "$fake_root/require-ledger-before-poll" ]] || return 0
+  shopt -s nullglob
+  for file in "${GPT_WEBAI_STATE_DIR:-}/sessions"/*.record; do
+    if grep -F -- "sessionId=$sid" "$file" >/dev/null 2>&1; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  printf 'poll before local ledger for %s\n' "$sid" >&2
+  exit 73
+}
+
+fake_send() {
+  local event sid
+  mkdir -p "$fake_root"
+  printf '%s\n' "${args[*]}" >> "$fake_root/send-calls"
+  event="$(next_sequence send-sequence 'sid:sid-auto')"
+  case "$event" in
+    sid:*)
+      sid="${event#sid:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    sid-no-target:*)
+      sid="${event#sid-no-target:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent"}\n' "$sid"
+      ;;
+    sid-crash:*)
+      sid="${event#sid-crash:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent"}\n' "$sid"
+      printf 'fake send crashed after session id\n' >&2
+      exit 70
+      ;;
+    crash-no-sid)
+      printf 'fake send crashed before session id\n' >&2
+      exit 70
+      ;;
+    malformed|malformed-hard)
+      printf '%s\n' "${GPT_WEBAI_FAKE_MALFORMED_OUTPUT:-not-json}"
+      ;;
+    provider-missing-fields|missing-session-fields)
+      printf '{"fake":true,"provider":{"conversationId":"conv-send","state":"created"}}\n'
+      ;;
+    auth-login-required)
+      printf '{"fake":true,"status":"login_required","provider":{"status":"auth_required","page":"login"}}\n'
+      ;;
+    hard)
+      printf 'fake send hard failure\n' >&2
+      exit 70
+      ;;
+    network-disconnected)
+      printf 'fake network disconnected before session id: ERR_INTERNET_DISCONNECTED\n' >&2
+      exit 70
+      ;;
+    fail-if-called)
+      printf 'send must not be called\n' >&2
+      exit 71
+      ;;
+    *)
+      printf '{"fake":true,"sessionId":"%s","status":"sent"}\n' "$event"
+      ;;
+  esac
+}
+
+fake_poll() {
+  local sid event
+  sid="$(arg_value --session || true)"
+  [[ -n "$sid" ]] || { printf 'missing --session for poll\n' >&2; exit 2; }
+  mkdir -p "$fake_root"
+  printf '%s\n' "${args[*]}" >> "$fake_root/poll-calls"
+  require_ledger_before_poll "$sid"
+  event="$(next_sequence poll-sequence done)"
+  case "$event" in
+    done)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"ok","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    done:*)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"%s","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "${event#done:}" "$sid" "$sid"
+      ;;
+    attachment-missing|done-attachment-missing)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"ATTACHMENT_MISSING","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-no-target:*)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"%s"}\n' "$sid" "${event#done-no-target:}"
+      ;;
+    timeout)
+      printf '{"fake":true,"sessionId":"%s","status":"timeout"}\n' "$sid"
+      exit 124
+      ;;
+    crash)
+      printf 'CDP connection failed for %s\n' "$sid" >&2
+      exit 70
+      ;;
+    malformed)
+      printf 'not-json\n'
+      ;;
+    provider-missing-fields)
+      printf '{"fake":true,"provider":{"conversationId":"%s","state":"complete","message":{"content":"ok"}}}\n' "$sid"
+      ;;
+    auth-login-required)
+      printf '{"fake":true,"sessionId":"%s","status":"login_required","provider":{"status":"auth_required","page":"login"}}\n' "$sid"
+      ;;
+    hard)
+      printf 'fake poll hard failure for %s\n' "$sid" >&2
+      exit 70
+      ;;
+    *)
+      printf '{"fake":true,"sessionId":"%s","status":"%s"}\n' "$sid" "$event"
+      ;;
+  esac
+}
+
+fake_sessions() {
+  local action="${args[2]:-}" sid event
+  mkdir -p "$fake_root"
+  case "$action" in
+    list)
+      printf '%s\n' "${args[*]}" >> "$fake_root/list-calls"
+      if [[ -f "$fake_root/sessions-list.json" ]]; then
+        cat "$fake_root/sessions-list.json"
+      else
+        printf '{"fake":true,"sessions":[]}\n'
+      fi
+      return 0
+      ;;
+    show)
+      sid="${args[3]:-}"
+      if [[ -z "$sid" || "$sid" == --* ]]; then
+        sid="$(arg_value --session || true)"
+      fi
+      [[ -n "$sid" ]] || { printf 'missing --session for sessions %s\n' "$action" >&2; exit 2; }
+      printf '%s\n' "${args[*]}" >> "$fake_root/show-calls"
+      event="$(next_sequence show-sequence shown)"
+      ;;
+    resume)
+      sid="${args[3]:-}"
+      if [[ -z "$sid" || "$sid" == --* ]]; then
+        sid="$(arg_value --session || true)"
+      fi
+      [[ -n "$sid" ]] || { printf 'missing --session for sessions %s\n' "$action" >&2; exit 2; }
+      printf '%s\n' "${args[*]}" >> "$fake_root/resume-calls"
+      event="$(next_sequence resume-sequence resumed)"
+      ;;
+    prune)
+      printf '%s\n' "${args[*]}" >> "$fake_root/prune-calls"
+      if [[ -f "$fake_root/prune-fail" ]]; then
+        printf 'fake sessions prune must not be called\n' >&2
+        exit 71
+      fi
+      printf '{"fake":true,"pruned":0}\n'
+      return 0
+      ;;
+    *)
+      printf 'unsupported fake sessions action: %s\n' "$action" >&2
+      exit 2
+      ;;
+  esac
+
+  case "$event" in
+    malformed)
+      printf 'not-json\n'
+      ;;
+    hard)
+      printf 'fake sessions %s hard failure for %s\n' "$action" "$sid" >&2
+      exit 70
+      ;;
+    target-metadata)
+      printf '{"fake":true,"status":"show","session":{"sessionId":"%s","targetId":"target-%s","tabId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}}\n' "$sid" "$sid" "$sid" "$sid"
+      ;;
+    *)
+      if [[ -f "$fake_root/sessions-success-stderr" ]]; then
+        printf '[poll] 0s - stabilizing...\n' >&2
+      fi
+      printf '{"fake":true,"sessionId":"%s","status":"%s"}\n' "$sid" "$event"
+      ;;
+  esac
+}
+
+fake_start() {
+  mkdir -p "$fake_root"
+  if [[ -f "$fake_root/start-fail" ]]; then
+    printf 'fake start failed\n' >&2
+    exit 70
+  fi
+  printf '%s\n' "${args[*]}" >> "$fake_root/start-calls"
+  printf '{"fake":true,"started":true}\n'
+}
+
+fake_tab_cleanup() {
+  mkdir -p "$fake_root"
+  printf '%s\n' "${args[*]}" >> "$fake_root/tab-cleanup-calls"
+  if [[ -f "$fake_root/tab-cleanup.json" ]]; then
+    cat "$fake_root/tab-cleanup.json"
+  else
+    printf '{"fake":true,"candidates":[],"untracked":[]}\n'
+  fi
+}
+
+case "${args[0]:-}" in
+  status)
+    printf '{"fake":true,"status":"ok"}\n'
+    ;;
+  web-ai)
+    case "${args[1]:-}" in
+      status)
+        next_status
+        ;;
+      send)
+        fake_send
+        ;;
+      poll)
+        fake_poll
+        ;;
+      sessions)
+        fake_sessions
+        ;;
+      stop)
+        mkdir -p "$fake_root"
+        printf '%s\n' "${args[*]}" >> "$fake_root/stop-calls"
+        printf 'fake web-ai stop must not be called\n' >&2
+        exit 71
+        ;;
+      doctor)
+        printf 'fake doctor must not be called\n' >&2
+        exit 71
+        ;;
+      *)
+        printf '{"fake":true,"ok":true}\n'
+        ;;
+    esac
+    ;;
+  start)
+    fake_start
+    ;;
+  tab-cleanup)
+    fake_tab_cleanup
+    ;;
+  *)
+    printf '{"fake":true,"ok":true}\n'
+    ;;
+esac
