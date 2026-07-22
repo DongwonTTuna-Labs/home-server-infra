@@ -30,14 +30,12 @@ external secret store.
     only `models:read` and `chat:write`.
 - `/opt/nvidia-build-lb/hermes-cutover-backups/`
   - Host-only, root-owned mode-`0700` rollback generations created by the
-    release-matched Hermes cutover helper. Files are mode `0600`; a manifest
-    records checksums and internal token IDs but never a bearer. This path is
-    outside every Hermes bind mount. A generation that contains a former direct
-    NVIDIA credential remains temporary custody only: revoke that provider key,
-    complete final reapply, then retire a current manifest-backed generation
-    with the app helper. Retire a named `manual-quarantine-*` legacy generation
-    only with `quarantine-hermes-credentials.sh retire ...
-    --provider-credential-revoked` after provider-side revocation.
+    release-matched Rust Hermes cutover helper. Files are mode `0600`; a manifest
+    records checksums and internal client IDs but never a bearer. This path is
+    outside every Hermes bind mount. A generation containing a former direct
+    NVIDIA credential remains temporary custody only until provider-side
+    revocation and the final downstream reapply are confirmed. Retired
+    shell/Python quarantine helpers are not rollback authorities.
 - `/opt/nvidia-build-lb/hermes-cutover-state/`
   - Root-owned mode-`0700` lock and secret-free transaction journal. A
     nonterminal journal is a fail-closed recovery condition, not permission to

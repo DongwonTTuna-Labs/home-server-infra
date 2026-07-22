@@ -21,10 +21,8 @@ required=(
   stacks/mcp-suite/systemd/mcp-suite-update.sh
   stacks/nvidia-build-lb/README.md
   stacks/nvidia-build-lb/compose.yaml
-  scripts/verify-nvidia-build-lb-stack.py
+  stacks/nvidia-build-lb/release.json
   scripts/test-credential-scan.sh
-  scripts/quarantine-hermes-credentials.sh
-  scripts/test-quarantine-hermes-credentials.sh
   scripts/agent-apps-delayed-update-locked.sh
   stacks/nvidia-build-lb/systemd/agent-apps-delayed-update.service.d/nblb-cutover-lock.conf
   stacks/tunnel-apps/README.md
@@ -63,14 +61,6 @@ if ! git ls-files --error-unmatch scripts/test-credential-scan.sh >/dev/null 2>&
   printf 'Credential negative sensor must be tracked: scripts/test-credential-scan.sh\n' >&2
   exit 1
 fi
-if ! git ls-files --error-unmatch scripts/quarantine-hermes-credentials.sh >/dev/null 2>&1; then
-  printf 'Hermes credential quarantine helper must be tracked\n' >&2
-  exit 1
-fi
-if ! git ls-files --error-unmatch scripts/test-quarantine-hermes-credentials.sh >/dev/null 2>&1; then
-  printf 'Hermes credential quarantine sensor must be tracked\n' >&2
-  exit 1
-fi
 if ! git ls-files --error-unmatch scripts/agent-apps-delayed-update-locked.sh >/dev/null 2>&1; then
   printf 'Agent apps delayed update lock wrapper must be tracked\n' >&2
   exit 1
@@ -102,12 +92,313 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 scripts/scan-secrets.sh
 scripts/test-credential-scan.sh
-scripts/test-quarantine-hermes-credentials.sh
-scripts/verify-nvidia-build-lb-stack.py
+for retired in \
+  scripts/quarantine-hermes-credentials.sh \
+  scripts/test-quarantine-hermes-credentials.sh \
+  scripts/verify-nvidia-build-lb-stack.py; do
+  if git ls-files --error-unmatch "$retired" >/dev/null 2>&1; then
+    printf 'Retired NVIDIA/Hermes helper is still tracked: %s\n' "$retired" >&2
+    exit 1
+  fi
+done
 CODEX_LB_POSTGRES_PASSWORD=placeholder \
   docker compose -f stacks/codex-lb/compose.yaml config --format json \
   >"$tmpdir/codex-lb-compose.json"
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
+docker compose -f stacks/nvidia-build-lb/compose.yaml config --format json \
+  >"$tmpdir/nvidia-build-lb-compose.json"
+jq -e '
+  .schema_version == "nblb.infra-release.v1" and
+  (.app_commit | test("^[0-9a-f]{40}$")) and
+  .schema_migration == 16 and
+  (.app_registry_digest | test("^[0-9a-f]{64}$")) and
+  (.postgres_registry_digest | test("^[0-9a-f]{64}$")) and
+  (.hermes_helper_sha256 | test("^[0-9a-f]{64}$")) and
+  (.hermes_helper_run_id | type == "number" and . > 0 and floor == .) and
+  (.rollback.app_commit | test("^[0-9a-f]{40}$")) and
+  .rollback.app_commit != .app_commit and
+  .rollback.schema_migration == 11 and
+  (.rollback.app_registry_digest | test("^[0-9a-f]{64}$")) and
+  (.rollback.postgres_registry_digest | test("^[0-9a-f]{64}$"))
+' stacks/nvidia-build-lb/release.json >/dev/null
+app_digest="$(jq -er .app_registry_digest stacks/nvidia-build-lb/release.json)"
+postgres_digest="$(jq -er .postgres_registry_digest stacks/nvidia-build-lb/release.json)"
+jq -e \
+  --arg app "ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:$app_digest" \
+  --arg postgres "ghcr.io/dongwonttuna-labs/nvidia-build-lb@sha256:$postgres_digest" \
+  '
+  .name == "nvidia-build-lb" and
+  (.services | keys | sort) == ["app", "db", "migrate"] and
+  (.services.app | keys | sort) == [
+    "cap_add", "cap_drop", "command", "depends_on", "entrypoint",
+    "environment", "image", "labels", "networks", "ports", "read_only",
+    "restart", "secrets", "security_opt", "stop_grace_period", "tmpfs",
+    "volumes"
+  ] and
+  (.services.db | keys | sort) == [
+    "cap_add", "cap_drop", "command", "entrypoint", "environment",
+    "healthcheck", "image", "labels", "networks", "read_only", "restart",
+    "secrets", "security_opt", "stop_grace_period", "tmpfs", "volumes"
+  ] and
+  (.services.migrate | keys | sort) == [
+    "cap_add", "cap_drop", "command", "depends_on", "entrypoint",
+    "environment", "image", "labels", "networks", "read_only", "restart",
+    "secrets", "security_opt", "stop_grace_period", "tmpfs"
+  ] and
+  .services.app.image == $app and
+  .services.migrate.image == $app and
+  .services.db.image == $postgres and
+  .services.app.command == null and
+  .services.db.command == null and
+  .services.migrate.command == ["/usr/local/bin/nblb-migrate"] and
+  all(.services[]; .entrypoint == null) and
+  .services.app.ports == [{
+    "mode": "ingress", "host_ip": "127.0.0.1", "target": 2456,
+    "published": "2456", "protocol": "tcp"
+  }] and
+  (.services.db | has("ports") | not) and
+  (.services.migrate | has("ports") | not) and
+  .services.app.networks == {"data": null, "egress": null} and
+  .services.db.networks == {"data": null} and
+  .services.migrate.networks == {"data": null} and
+  .networks.data.name == "nvidia-build-lb_data" and
+  .networks.data.internal == true and
+  .networks.egress.name == "nvidia-build-lb_egress" and
+  (.networks.egress.internal // false) == false and
+  (.volumes | keys | sort) == ["db-data", "vault-data"] and
+  .volumes["db-data"].name == "nvidia-build-lb_db-data" and
+  .volumes["vault-data"].name == "nvidia-build-lb_vault-data" and
+  .services.db.volumes == [{
+    "type": "volume", "source": "db-data",
+    "target": "/var/lib/postgresql/data", "volume": {}
+  }] and
+  .services.app.volumes == [{
+    "type": "volume", "source": "vault-data",
+    "target": "/var/lib/nvidia-build-lb", "volume": {}
+  }] and
+  (.services.migrate | has("volumes") | not) and
+  (.secrets | keys | sort) == ["admin_token", "db_password", "vault_master_key"] and
+  .secrets.admin_token.file == "/opt/nvidia-build-lb/secrets/admin_token" and
+  .secrets.db_password.file == "/opt/nvidia-build-lb/secrets/db_password" and
+  .secrets.vault_master_key.file == "/opt/nvidia-build-lb/secrets/vault_master_key" and
+  .services.db.secrets == [{
+    "source": "db_password", "target": "/run/canonical-secrets/db_password",
+    "mode": "0400"
+  }] and
+  .services.migrate.secrets == .services.db.secrets and
+  .services.app.secrets == [
+    {"source": "admin_token", "target": "/run/canonical-secrets/admin_token", "mode": "0400"},
+    {"source": "vault_master_key", "target": "/run/canonical-secrets/vault_master_key", "mode": "0400"},
+    {"source": "db_password", "target": "/run/canonical-secrets/db_password", "mode": "0400"}
+  ] and
+  all(.services[]; .read_only == true) and
+  .services.app.cap_drop == ["ALL"] and
+  .services.migrate.cap_drop == ["ALL"] and
+  .services.db.cap_drop == ["ALL"] and
+  .services.app.cap_add == ["CHOWN", "SETGID", "SETUID", "SETPCAP"] and
+  .services.migrate.cap_add == .services.app.cap_add and
+  .services.db.cap_add == [
+    "CHOWN", "SETGID", "SETUID", "SETPCAP", "FOWNER", "DAC_READ_SEARCH"
+  ] and
+  all(.services[]; .security_opt == ["no-new-privileges:true"]) and
+  all(.services[];
+    (has("pid") or has("ipc") or has("devices") or
+     has("device_cgroup_rules") or has("privileged") or
+     has("network_mode") or has("userns_mode") or has("uts") or
+     has("volumes_from")) | not
+  ) and
+  .services.app.restart == "unless-stopped" and
+  .services.db.restart == "unless-stopped" and
+  .services.migrate.restart == "no" and
+  all(.services[]; .stop_grace_period == "30s") and
+  .services.app.labels == {
+    "com.centurylinklabs.watchtower.enable": "false",
+    "nvidia-build-lb.component": "gateway"
+  } and
+  .services.db.labels == {
+    "com.centurylinklabs.watchtower.enable": "false",
+    "nvidia-build-lb.backup-source": "true",
+    "nvidia-build-lb.component": "database",
+    "nvidia-build-lb.restore-isolated": "false"
+  } and
+  .services.migrate.labels == {
+    "com.centurylinklabs.watchtower.enable": "false",
+    "nvidia-build-lb.component": "migration"
+  } and
+  .services.migrate.depends_on == {
+    "db": {"condition": "service_healthy", "required": true}
+  } and
+  .services.app.depends_on == {
+    "db": {"condition": "service_healthy", "required": true},
+    "migrate": {"condition": "service_completed_successfully", "required": true}
+  } and
+  .services.db.healthcheck == {
+    "test": ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "nvidia_build_lb", "-d", "nvidia_build_lb"],
+    "timeout": "3s", "interval": "10s", "retries": 12
+  } and
+  .services.app.environment == {
+    "NBLB_ADMIN_PUBLIC_HOST": "",
+    "NBLB_DATABASE_URL": "postgres://nvidia_build_lb@db/nvidia_build_lb",
+    "NBLB_REQUIRE_DOWNSTREAM_TOKEN": "1",
+    "NBLB_UPSTREAM_URL": "https://integrate.api.nvidia.com/v1/chat/completions",
+    "NBLB_VAULT_MASTER_KEY_FILE": "/run/nvidia-build-lb/secrets/vault_master_key",
+    "NVIDIA_BUILD_LB_ADMIN_ATTEMPT_MAX_ROWS": "40000",
+    "NVIDIA_BUILD_LB_ADMIN_EVENT_MAX_ROWS": "100000",
+    "NVIDIA_BUILD_LB_ADMIN_LEDGER_PRUNE_BATCH_SIZE": "1000",
+    "NVIDIA_BUILD_LB_PUBLIC_PORT": "2456"
+  } and
+  .services.db.environment == {
+    "PGDATA": "/var/lib/postgresql/data/pgdata",
+    "POSTGRES_DB": "nvidia_build_lb",
+    "POSTGRES_PASSWORD_FILE": "/run/canonical-secrets/db_password",
+    "POSTGRES_USER": "nvidia_build_lb"
+  } and
+  .services.migrate.environment == {
+    "NBLB_DATABASE_URL": "postgres://nvidia_build_lb@db/nvidia_build_lb",
+    "NVIDIA_BUILD_LB_MODE": "migrate"
+  } and
+  .services.app.tmpfs == [
+    "/run/nvidia-build-lb/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=0,gid=0",
+    "/run/nvidia-build-lb/media-spool:rw,noexec,nosuid,nodev,size=256m,mode=0730,uid=0,gid=65532",
+    "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777"
+  ] and
+  .services.migrate.tmpfs == [
+    "/run/nvidia-build-lb/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=0,gid=0",
+    "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777"
+  ] and
+  .services.db.tmpfs == [
+    "/run/nvidia-build-lb/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=0,gid=0",
+    "/var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=0775,uid=70,gid=70",
+    "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777"
+  ]
+  ' \
+  "$tmpdir/nvidia-build-lb-compose.json" >/dev/null
+
+readme=stacks/nvidia-build-lb/README.md
+for fragment in \
+  'docker --config "$registry_config" compose -f "$compose" pull' \
+  'docker image inspect "$app_ref" "$postgres_ref"' \
+  'gh run download "$run_id"' \
+  'readelf -lW "$helper"' \
+  'readelf -dW "$helper"' \
+  '/opt/nvidia-build-lb/releases/$commit' \
+  'interlock installation failed; delayed-update timer remains stopped' \
+  'retire-backup' \
+  'nblb.hermes-backup-retirement.v1' \
+  'NBLB_PAIRED_RECOVERY_SET_VERIFIED' \
+  'up -d --no-deps --pull never' \
+  'existing-traffic emergency mode only' \
+  'Do not create, rotate, enable, retire,' \
+  'and do not start QA while rolled back'; do
+  if ! grep -Fq -- "$fragment" "$readme"; then
+    printf 'NVIDIA operations contract missing from README: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+if grep -Fq 'statically linked' "$readme"; then
+  printf 'NVIDIA helper verification must use ELF metadata, not file wording\n' >&2
+  exit 1
+fi
+
+awk -v output="$tmpdir" '
+  /^```bash$/ {
+    inside = 1
+    count++
+    file = sprintf("%s/nblb-readme-%02d.bash", output, count)
+    next
+  }
+  /^```$/ && inside {
+    inside = 0
+    close(file)
+    next
+  }
+  inside { print > file }
+  END { print count > output "/nblb-readme-bash-count" }
+' "$readme"
+if [ "$(cat "$tmpdir/nblb-readme-bash-count")" -lt 8 ]; then
+  printf 'NVIDIA README lost an expected executable Bash block\n' >&2
+  exit 1
+fi
+for shell_block in "$tmpdir"/nblb-readme-*.bash; do
+  bash -n "$shell_block"
+done
+
+wrapper=scripts/agent-apps-delayed-update-locked.sh
+if [ ! -x "$wrapper" ]; then
+  printf 'Delayed-update lock wrapper must be executable\n' >&2
+  exit 1
+fi
+for fragment in \
+  'flock -x 9' \
+  '/opt/nvidia-build-lb/hermes-cutover-state' \
+  'exec /opt/agent-apps/bin/check-delayed-updates --apply'; do
+  if ! grep -Fq "$fragment" "$wrapper"; then
+    printf 'Delayed-update lock wrapper contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+if ! grep -Fq \
+  'ExecStart=/usr/local/libexec/nvidia-build-lb-agent-apps-delayed-update' \
+  stacks/nvidia-build-lb/systemd/agent-apps-delayed-update.service.d/nblb-cutover-lock.conf; then
+  printf 'Delayed-update systemd interlock drifted\n' >&2
+  exit 1
+fi
+
+tunnel_config=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
+awk '
+  function emit() {
+    if (service != "") print hostname "|" path "|" service
+    hostname = ""
+    path = ""
+    service = ""
+  }
+  /^[[:space:]]+- hostname:/ {
+    emit()
+    hostname = $0
+    sub(/^[[:space:]]+- hostname:[[:space:]]*/, "", hostname)
+    next
+  }
+  /^[[:space:]]+path:/ {
+    path = $0
+    sub(/^[[:space:]]+path:[[:space:]]*/, "", path)
+    next
+  }
+  /^[[:space:]]+- service:/ {
+    emit()
+    service = $0
+    sub(/^[[:space:]]+- service:[[:space:]]*/, "", service)
+    emit()
+    next
+  }
+  /^[[:space:]]+service:/ {
+    service = $0
+    sub(/^[[:space:]]+service:[[:space:]]*/, "", service)
+    emit()
+  }
+  END { emit() }
+' "$tunnel_config" >"$tmpdir/tunnel-rules.actual"
+cat >"$tmpdir/tunnel-rules.expected" <<'EOF'
+relay-ai.dongwontuna.net||http://localhost:2455
+paca.dongwontuna.net||http://localhost:3080
+nvidia-lb.dongwontuna.net|^/admin(?:/.*)?$|http_status:404
+nvidia-lb.dongwontuna.net|^/internal(?:/.*)?$|http_status:404
+nvidia-lb.dongwontuna.net|^/metrics(?:/.*)?$|http_status:404
+nvidia-lb.dongwontuna.net|^/debug(?:/.*)?$|http_status:404
+nvidia-lb.dongwontuna.net|^/$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/_app/.*$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/favicon[.]svg$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/(?:status|models|docs|security)/?$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/incidents(?:/.*)?$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/api/public/v1(?:/.*)?$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/health(?:/.*)?$|http://localhost:2456
+nvidia-lb.dongwontuna.net|^/v1(?:/.*)?$|http://localhost:2456
+nvidia-lb.dongwontuna.net||http_status:404
+||http_status:404
+EOF
+if ! diff -u "$tmpdir/tunnel-rules.expected" "$tmpdir/tunnel-rules.actual"; then
+  printf 'Shared tunnel rule order or NVIDIA allow/deny contract drifted\n' >&2
+  exit 1
+fi
 
 python3 - "$tmpdir/codex-lb-compose.json" dotfiles/codex/config.toml <<'PY'
 import json
