@@ -25,7 +25,7 @@ stacks/agent-stack/           SSH tunnel container stack
 stacks/codex-lb/              codex-lb relay stack
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
-stacks/maintenance/           Single host-wide Watchtower maintenance stack
+stacks/maintenance/           Host-wide Watchtower + Docker prune maintenance stack
 stacks/mcp-suite/             Single local MCP runtime container
 stacks/nvidia-build-lb/       Independent NVIDIA hosted API gateway stack
 stacks/tunnel-apps/           Single non-SSH Cloudflare Tunnel stack
@@ -64,12 +64,14 @@ User systemd units are grouped like Docker stacks with soft domain targets:
 
 - `mcp-suite.target`: `mcp-suite-update.timer`
 - `coding-tools.target`: `codex-cli-update.timer`
+- `maintenance`: `docker-prune.timer` (standalone; not grouped under a target)
 
 Install or refresh the domain units, then reload user systemd:
 
 ```sh
 cp stacks/mcp-suite/systemd/*.service stacks/mcp-suite/systemd/*.timer stacks/mcp-suite/systemd/*.target ~/.config/systemd/user/
 cp stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target ~/.config/systemd/user/
+cp stacks/maintenance/systemd/docker-prune.service stacks/maintenance/systemd/docker-prune.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now mcp-suite.target coding-tools.target
+systemctl --user enable --now mcp-suite.target coding-tools.target docker-prune.timer
 ```

@@ -1,0 +1,24 @@
+[Unit]
+Description=Prune unused Docker images, stale stopped containers, and build cache (disk-bloat recurrence guard)
+Documentation=https://docs.docker.com/config/pruning/
+After=docker.service
+# Watchtower CLEANUP only removes old images of the containers it updates
+# (label-enable scope). Local-build images (mcp-suite, gpt-webai-slot), the
+# GitHub runner pool's anonymous volumes, and manual pulls are never cleaned by
+# Watchtower and otherwise accumulate until the root disk fills. This job is the
+# host-wide sweep that covers everything Watchtower does not.
+#
+# Volumes are intentionally NOT pruned here: named data volumes (codex-lb,
+# relay-ai, paca, nvidia-build-lb postgres/vault) must never be auto-removed.
+# Anonymous runner-churn volumes are handled manually — see the stack README.
+
+[Service]
+Type=oneshot
+# Stopped containers older than 24h (protects recently-stopped ones an operator
+# may still restart).
+ExecStart=/usr/bin/docker container prune -f --filter until=24h
+# Images not referenced by any container. Running and stopped containers keep
+# their images, so active stacks are never affected.
+ExecStart=/usr/bin/docker image prune -af
+# BuildKit cache (mcp-suite rebuilds without cache every 6h generate this).
+ExecStart=/usr/bin/docker builder prune -af
