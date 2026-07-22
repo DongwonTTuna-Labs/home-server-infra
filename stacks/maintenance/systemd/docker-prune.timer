@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Docker prune (images/stale containers/build cache)
+
+[Timer]
+# Daily, shortly after the 09:00 Asia/Seoul Watchtower window so freshly
+# superseded images are swept the same day. 04:00 UTC = 13:00 Asia/Seoul.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

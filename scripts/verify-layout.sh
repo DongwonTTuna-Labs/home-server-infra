@@ -44,6 +44,8 @@ required=(
   stacks/coding/systemd/codex-cli-update.timer
   stacks/maintenance/README.md
   stacks/maintenance/compose.yaml
+  stacks/maintenance/systemd/docker-prune.service
+  stacks/maintenance/systemd/docker-prune.timer
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
   stacks/agent-stack/compose.yml
