@@ -5,7 +5,7 @@ Private operational configuration for DongwonTTuna's home server.
 This repository stores reproducible configuration for:
 
 - Cloudflare Tunnel entrypoint
-- domain-based MCP and tunnel suites
+- domain-based tunnel suites
 - domain-based user systemd bundles
 - codex-lb relay
 - NVIDIA hosted API load balancer
@@ -26,7 +26,6 @@ stacks/codex-lb/              codex-lb relay stack
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
-stacks/mcp-suite/             Single local MCP runtime container
 stacks/nvidia-build-lb/       Independent NVIDIA hosted API gateway stack
 stacks/tunnel-apps/           Single non-SSH Cloudflare Tunnel stack
 services/robobotuna-company-os/ Mocked RoboboTuna Company OS first-slice service
@@ -47,10 +46,8 @@ scripts/scan-secrets.sh
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
 docker compose -f stacks/nvidia-build-lb/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
-docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
 systemd-analyze --user verify \
-  stacks/mcp-suite/systemd/*.service stacks/mcp-suite/systemd/*.timer stacks/mcp-suite/systemd/*.target \
   stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target
 ```
 
@@ -62,14 +59,12 @@ temporary placeholder `state/github_pat` outside the tracked tree before running
 
 User systemd units are grouped like Docker stacks with soft domain targets:
 
-- `mcp-suite.target`: `mcp-suite-update.timer`
 - `coding-tools.target`: `codex-cli-update.timer`
 
 Install or refresh the domain units, then reload user systemd:
 
 ```sh
-cp stacks/mcp-suite/systemd/*.service stacks/mcp-suite/systemd/*.timer stacks/mcp-suite/systemd/*.target ~/.config/systemd/user/
 cp stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now mcp-suite.target coding-tools.target
+systemctl --user enable --now coding-tools.target
 ```

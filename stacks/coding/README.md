@@ -14,7 +14,6 @@ not collapse stateful or replica-based services into one container.
 
 ## Consolidated Elsewhere
 
-- MCP runtimes are consolidated in `stacks/mcp-suite`.
 - Non-SSH Cloudflare connectors are consolidated in `stacks/tunnel-apps`.
 - Watchtower is consolidated in `stacks/maintenance` and updates only containers
   explicitly labeled for automatic updates.

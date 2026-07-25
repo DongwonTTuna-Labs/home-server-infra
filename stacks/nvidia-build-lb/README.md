@@ -339,7 +339,7 @@ sudo test ! -e "/opt/nvidia-build-lb/hermes-cutover-backups/$generation"
 
 ## Public Cloudflare smoke
 
-Validate the shared tunnel config and preserve relay/Paca routes before
+Validate the shared tunnel config and preserve the existing relay route before
 recreating only `cloudflared-apps`.
 
 ```bash
@@ -347,14 +347,12 @@ recreating only `cloudflared-apps`.
 set -Eeuo pipefail
 tunnel=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
-curl -fsS -o /dev/null http://127.0.0.1:3080/healthz
 curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
 cloudflared tunnel --config "$tunnel" ingress validate
 docker compose -f stacks/tunnel-apps/compose.yaml config --quiet
 docker compose -f stacks/tunnel-apps/compose.yaml \
   up -d --force-recreate cloudflared-apps
 curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/health
-curl -fsS -o /dev/null https://paca.dongwontuna.net/healthz
 curl -fsS -o /dev/null https://nvidia-lb.dongwontuna.net/favicon.svg
 )
 ```
@@ -369,7 +367,7 @@ Expected public results:
 ```
 
 Collect exact HTTP codes from `https://nvidia-lb.dongwontuna.net` and confirm
-`relay-ai.dongwontuna.net` plus `paca.dongwontuna.net` remain healthy. Public
+`relay-ai.dongwontuna.net` remains healthy. Public
 `404` bodies and headers must not contain request IDs, auth hints, or internal
 route information.
 
