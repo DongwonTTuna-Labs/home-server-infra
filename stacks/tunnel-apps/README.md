@@ -9,7 +9,6 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 | Hostname | Origin |
 | --- | --- |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
-| `paca.dongwontuna.net` | `http://localhost:3080` |
 | `nvidia-lb.dongwontuna.net` | `http://localhost:2456` (public dashboard/API/health; admin UI remains loopback-only) |
 
 ## Run
@@ -24,7 +23,6 @@ Host state required before starting the stack:
 set -Eeuo pipefail
 tunnel=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
-curl -fsS -o /dev/null http://127.0.0.1:3080/healthz
 curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
 cloudflared tunnel --config "$tunnel" ingress validate
 docker compose -f stacks/tunnel-apps/compose.yaml config --quiet
@@ -44,10 +42,8 @@ Move DNS routes only after local origins pass smoke tests:
 (
 set -Eeuo pipefail
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
-curl -fsS -o /dev/null http://127.0.0.1:3080/healthz
 curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
 cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
-cloudflared tunnel route dns --overwrite-dns tunnel-apps paca.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
 )
 ```
@@ -59,7 +55,6 @@ Verify both public routes after the DNS change:
 set -Eeuo pipefail
 curl -fsS https://relay-ai.dongwontuna.net/health
 curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
-curl -fsS https://paca.dongwontuna.net/healthz
 curl -fsS https://nvidia-lb.dongwontuna.net/
 curl -fsS https://nvidia-lb.dongwontuna.net/favicon.svg
 curl -fsS https://nvidia-lb.dongwontuna.net/status

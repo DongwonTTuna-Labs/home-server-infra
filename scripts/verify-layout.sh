@@ -9,16 +9,6 @@ required=(
   docs/secrets.md
   stacks/codex-lb/README.md
   stacks/codex-lb/compose.yaml
-  stacks/mcp-suite/README.md
-  stacks/mcp-suite/Dockerfile
-  stacks/mcp-suite/compose.yaml
-  stacks/mcp-suite/scripts/start.sh
-  stacks/mcp-suite/scripts/healthcheck.sh
-  stacks/mcp-suite/scripts/smoke.sh
-  stacks/mcp-suite/systemd/mcp-suite-update.service
-  stacks/mcp-suite/systemd/mcp-suite.target
-  stacks/mcp-suite/systemd/mcp-suite-update.timer
-  stacks/mcp-suite/systemd/mcp-suite-update.sh
   stacks/nvidia-build-lb/README.md
   stacks/nvidia-build-lb/compose.yaml
   stacks/nvidia-build-lb/release.json
@@ -28,14 +18,6 @@ required=(
   stacks/tunnel-apps/README.md
   stacks/tunnel-apps/compose.yaml
   stacks/tunnel-apps/cloudflared/tunnel-apps.yml
-  stacks/paca/README.md
-  stacks/paca/compose.yaml
-  stacks/paca/docker-compose.override.yaml
-  stacks/paca/.env.example
-  stacks/paca/caddy/Caddyfile
-  stacks/paca/relay-ai-enforce.sql
-  stacks/paca/mcp-local-servers.sql
-  stacks/paca/overrides/ai-agent/enforce_xhigh.py
   stacks/coding/README.md
   stacks/coding/systemd/coding-tools.target
   stacks/coding/systemd/codex-cli-update.service
@@ -65,27 +47,6 @@ if ! git ls-files --error-unmatch scripts/agent-apps-delayed-update-locked.sh >/
   printf 'Agent apps delayed update lock wrapper must be tracked\n' >&2
   exit 1
 fi
-
-assert_no_mcp_tunnel_exposure() {
-  local tunnel_config=$1
-
-  if grep -Eq '8301|8302|8303|mcp-suite|/mcp' "$tunnel_config"; then
-    printf 'MCP endpoints must not be exposed through tunnel-apps: %s\n' "$tunnel_config" >&2
-    exit 1
-  fi
-}
-
-paca_watchtower_true_services() {
-  awk '
-    /^[[:space:]][[:space:]][[:alnum:]_-]+:$/ {
-      service = $1
-      sub(/:$/, "", service)
-    }
-    /com[.]centurylinklabs[.]watchtower[.]enable:[[:space:]]*"?true"?/ {
-      if (service != "") print service
-    }
-  ' stacks/paca/compose.yaml | sort
-}
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -379,7 +340,6 @@ awk '
 ' "$tunnel_config" >"$tmpdir/tunnel-rules.actual"
 cat >"$tmpdir/tunnel-rules.expected" <<'EOF'
 relay-ai.dongwontuna.net||http://localhost:2455
-paca.dongwontuna.net||http://localhost:3080
 nvidia-lb.dongwontuna.net|^/admin(?:/.*)?$|http_status:404
 nvidia-lb.dongwontuna.net|^/internal(?:/.*)?$|http_status:404
 nvidia-lb.dongwontuna.net|^/metrics(?:/.*)?$|http_status:404
@@ -488,174 +448,23 @@ if ! grep -q 'bind=127.0.0.1' stacks/agent-stack/compose.yml; then
   printf 'SSH forwarder must bind 2222 on loopback only\n' >&2
   exit 1
 fi
-if grep -q '/home/dongwonttuna:/home/dongwonttuna' stacks/mcp-suite/compose.yaml; then
-  printf 'mcp-suite must not mount the whole home directory\n' >&2
-  exit 1
-fi
-if grep -q '/tmp:/tmp' stacks/mcp-suite/compose.yaml stacks/mcp-suite/systemd/mcp-suite-update.sh; then
-  printf 'mcp-suite must not bind-mount host /tmp\n' >&2
-  exit 1
-fi
-if ! grep -q 'MCP_ALLOWED_WORKSPACE_ROOT' stacks/mcp-suite/compose.yaml; then
-  printf 'mcp-suite must configure MCP_ALLOWED_WORKSPACE_ROOT\n' >&2
-  exit 1
-fi
-if ! grep -q 'paca.dongwontuna.net' stacks/tunnel-apps/cloudflared/tunnel-apps.yml; then
-  printf 'tunnel-apps must route paca.dongwontuna.net\n' >&2
-  exit 1
-fi
-assert_no_mcp_tunnel_exposure stacks/tunnel-apps/cloudflared/tunnel-apps.yml
-if ! grep -q 'paca_mcp_internal' stacks/mcp-suite/compose.yaml; then
-  printf 'mcp-suite must join paca_mcp_internal\n' >&2
-  exit 1
-fi
-for port in 8301 8302 8303; do
-  if ! grep -q "127[.]0[.]0[.]1:${port}:${port}" stacks/mcp-suite/compose.yaml; then
-    printf 'mcp-suite port %s must publish on loopback only\n' "$port" >&2
+for retired_path in stacks/paca stacks/mcp-suite; do
+  if [ -e "$retired_path" ]; then
+    printf 'Retired stack path still present: %s\n' "$retired_path" >&2
     exit 1
   fi
 done
-if ! grep -q '^name: paca$' stacks/paca/compose.yaml; then
-  printf 'Paca compose project name must be paca\n' >&2
+if grep -Eq 'paca[.]dongwontuna[.]net|localhost:3080|127[.]0[.]0[.]1:3080|8301|8302|8303|mcp-suite' \
+  stacks/tunnel-apps/cloudflared/tunnel-apps.yml; then
+  printf 'Retired Paca or local MCP route remains in tunnel-apps\n' >&2
   exit 1
 fi
-if ! grep -Eq 'name:[[:space:]]+paca_mcp_internal' stacks/paca/compose.yaml; then
-  printf 'Paca compose default network must be paca_mcp_internal\n' >&2
+if grep -Rq 'paca_mcp_internal' stacks/codex-lb; then
+  printf 'Retired Paca network remains in codex-lb configuration\n' >&2
   exit 1
 fi
-if ! grep -q '127[.]0[.]0[.]1:3080:80' stacks/paca/compose.yaml; then
-  printf 'Paca gateway must bind 3080 on loopback only\n' >&2
-  exit 1
-fi
-if [ -e stacks/paca/overrides/ai-agent/builder.py ]; then
-  printf 'Paca must not freeze the complete auto-updated ai-agent builder\n' >&2
-  exit 1
-fi
-if grep -q 'builder.py:/app/src/agent/builder.py' stacks/paca/compose.yaml stacks/paca/docker-compose.override.yaml; then
-  printf 'Paca compose must not bind-mount a complete ai-agent builder override\n' >&2
-  exit 1
-fi
-paca_watchtower_true_services_actual="$(paca_watchtower_true_services)"
-for service in api web realtime gateway minio valkey db-backup; do
-  if printf '%s\n' "$paca_watchtower_true_services_actual" | grep -qx "$service"; then
-    printf 'Paca service must not be Watchtower-enabled: %s\n' "$service" >&2
-    exit 1
-  fi
-done
-paca_watchtower_true_services_expected="$(printf '%s\n' ai-agent postgres | sort)"
-if [ "$paca_watchtower_true_services_actual" != "$paca_watchtower_true_services_expected" ]; then
-  printf 'Paca Watchtower true labels must be exactly ai-agent and postgres; got: %s\n' "${paca_watchtower_true_services_actual:-none}" >&2
-  exit 1
-fi
-for port in 8301 8302 8303; do
-  if ! grep -q "http://mcp-suite:${port}/mcp" stacks/paca/mcp-local-servers.sql; then
-    printf 'Paca MCP seed must use mcp-suite URL for port %s\n' "$port" >&2
-    exit 1
-  fi
-done
-if grep -Eq '127[.]0[.]0[.]1:830[123]|localhost:830[123]' stacks/paca/mcp-local-servers.sql; then
-  printf 'Paca MCP seed must not use host loopback URLs\n' >&2
-  exit 1
-fi
-if ! grep -q "deleted_at IS NOT NULL" stacks/paca/relay-ai-enforce.sql; then
-  printf 'Paca relay constraint must tolerate retained soft-deleted rows\n' >&2
-  exit 1
-fi
-if ! grep -q "http://codex-lb:2455/v1" stacks/paca/relay-ai-enforce.sql; then
-  printf 'Paca relay policy must route agents through local codex-lb\n' >&2
-  exit 1
-fi
-for doc in stacks/paca/README.md docs/restore.md; do
-  if ! grep -q 'relay-ai-enforce.sql' "$doc"; then
-    printf 'Paca deployment docs must apply relay enforcement: %s\n' "$doc" >&2
-    exit 1
-  fi
-  if [ "$(grep -Fc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' "$doc")" -lt 2 ]; then
-    printf 'Paca SQL commands must expand database names inside the container: %s\n' "$doc" >&2
-    exit 1
-  fi
-done
-if ! grep -q 'external:[[:space:]]*true' stacks/paca/compose.yaml; then
-  printf 'Paca shared network must be independently managed\n' >&2
-  exit 1
-fi
-if ! grep -q 'enforce_xhigh.py' stacks/paca/compose.yaml; then
-  printf 'Paca ai-agent must install the fail-closed xhigh patch\n' >&2
-  exit 1
-fi
-if ! grep -q 'ghcr.io/paca-ai/paca-agent-server' stacks/paca/compose.yaml; then
-  printf 'Paca sandboxes must default to the Paca agent-server image\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'pg_dump "$$DATABASE_URL" --clean --if-exists --no-owner' stacks/paca/compose.yaml; then
-  printf 'Paca backups must support clean transactional restore\n' >&2
-  exit 1
-fi
-if ! grep -A8 'Backup failed' stacks/paca/compose.yaml | grep -q 'exit 1'; then
-  printf 'Paca backup failures must exit non-zero\n' >&2
-  exit 1
-fi
-if ! grep -q -- '--single-transaction' docs/restore.md; then
-  printf 'Paca restore must be transactional and fail closed\n' >&2
-  exit 1
-fi
-if ! grep -A3 '^  default:' stacks/paca/compose.yaml | grep -q 'external:[[:space:]]*true'; then
-  printf 'Paca default network must be independently managed\n' >&2
-  exit 1
-fi
-for compose in stacks/codex-lb/compose.yaml stacks/mcp-suite/compose.yaml; do
-  if ! grep -A3 '^  paca_mcp_internal:' "$compose" | grep -q 'external:[[:space:]]*true'; then
-    printf 'Shared Paca network must be external in %s\n' "$compose" >&2
-    exit 1
-  fi
-done
-for doc in docs/restore.md stacks/codex-lb/README.md stacks/mcp-suite/README.md stacks/paca/README.md; do
-  if ! grep -q 'docker network create paca_mcp_internal' "$doc"; then
-    printf 'Shared Paca network bootstrap missing from %s\n' "$doc" >&2
-    exit 1
-  fi
-done
-cat > "$tmpdir/paca.env" <<'EOF'
-ENVIRONMENT=production
-PUBLIC_URL=https://paca.dongwontuna.net
-COOKIE_SECURE=true
-CORS_ORIGINS=https://paca.dongwontuna.net
-SITE_ADDRESS=:80
-POSTGRES_DB=paca
-POSTGRES_USER=paca
-POSTGRES_PASSWORD=placeholder
-JWT_SECRET=placeholder
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=placeholder
-ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
-AGENT_API_KEY=placeholder
-INTERNAL_API_KEY=placeholder
-STORAGE_PROVIDER=minio
-STORAGE_ENDPOINT=minio:9000
-STORAGE_PUBLIC_URL=https://paca.dongwontuna.net/storage
-STORAGE_REGION=us-east-1
-STORAGE_BUCKET=paca
-STORAGE_ACCESS_KEY_ID=placeholder
-STORAGE_SECRET_ACCESS_KEY=placeholder
-STORAGE_USE_SSL=false
-BACKUP_DIR=./backups
-BACKUP_RETENTION_DAYS=7
-BACKUP_CRON=0 2 * * *
-TZ=UTC
-EOF
-docker compose --env-file "$tmpdir/paca.env" -f stacks/paca/compose.yaml -f stacks/paca/docker-compose.override.yaml config >/dev/null
-for target in stacks/mcp-suite/systemd/mcp-suite.target stacks/coding/systemd/coding-tools.target; do
-  if grep -Eq '^(Requires|BindsTo)=' "$target"; then
-    printf 'Domain target must use soft Wants only: %s\n' "$target" >&2
-    exit 1
-  fi
-done
-if ! grep -q 'Wants=mcp-suite-update.timer' stacks/mcp-suite/systemd/mcp-suite.target; then
-  printf 'mcp-suite.target must group MCP update timer\n' >&2
-  exit 1
-fi
-if ! grep -q 'PartOf=mcp-suite.target' stacks/mcp-suite/systemd/mcp-suite-update.timer; then
-  printf 'MCP update timer must be owned by mcp-suite.target\n' >&2
+if grep -Eq '^(Requires|BindsTo)=' stacks/coding/systemd/coding-tools.target; then
+  printf 'Domain target must use soft Wants only: stacks/coding/systemd/coding-tools.target\n' >&2
   exit 1
 fi
 if ! grep -q 'Wants=codex-cli-update.timer' stacks/coding/systemd/coding-tools.target; then
@@ -668,7 +477,6 @@ for unit in stacks/coding/systemd/codex-cli-update.timer; do
     exit 1
   fi
 done
-docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
 
 cp -a stacks/codex-github-runners/. "$tmpdir/"
