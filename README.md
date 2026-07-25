@@ -5,7 +5,7 @@ Private operational configuration for DongwonTTuna's home server.
 This repository stores reproducible configuration for:
 
 - Cloudflare Tunnel entrypoint
-- domain-based MCP and tunnel suites
+- domain-based tunnel suites
 - domain-based user systemd bundles
 - codex-lb relay
 - NVIDIA hosted API load balancer
@@ -27,7 +27,6 @@ stacks/codexpro-home/         ChatGPT CodexPro home workspace connector
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
-stacks/mcp-suite/             Single local MCP runtime container
 stacks/nvidia-build-lb/       Independent NVIDIA hosted API gateway stack
 stacks/tunnel-apps/           Single non-SSH Cloudflare Tunnel stack
 services/robobotuna-company-os/ Mocked RoboboTuna Company OS first-slice service
@@ -48,13 +47,11 @@ scripts/scan-secrets.sh
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
 docker compose -f stacks/nvidia-build-lb/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
-docker compose -f stacks/mcp-suite/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
 node --check stacks/codexpro-home/scripts/codexpro-home-url.mjs
 cloudflared tunnel --config stacks/codexpro-home/cloudflared/codexpro-home.yml ingress validate
 systemd-analyze --user verify \
   stacks/codexpro-home/systemd/*.service \
-  stacks/mcp-suite/systemd/*.service stacks/mcp-suite/systemd/*.timer stacks/mcp-suite/systemd/*.target \
   stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target
 ```
 
@@ -67,17 +64,15 @@ temporary placeholder `state/github_pat` outside the tracked tree before running
 User systemd units are grouped like Docker stacks. Update timers use soft
 domain targets, while CodexPro uses paired long-running services:
 
-- `mcp-suite.target`: `mcp-suite-update.timer`
 - `coding-tools.target`: `codex-cli-update.timer`
 - `codexpro-home.service`: `cloudflared-codexpro-home.service`
 
 Install or refresh the domain units, then reload user systemd:
 
 ```sh
-cp stacks/mcp-suite/systemd/*.service stacks/mcp-suite/systemd/*.timer stacks/mcp-suite/systemd/*.target ~/.config/systemd/user/
 cp stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now mcp-suite.target coding-tools.target
+systemctl --user enable --now coding-tools.target
 ```
 
 The CodexPro connector has a dedicated path-restricted Named Tunnel and an

@@ -10,7 +10,7 @@ external secret store.
 - `${HOME}/.cloudflared/codex-lb.json`
   - Legacy Cloudflare tunnel credentials for the retired codex-lb tunnel runner
 - `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`
-  - Cloudflare tunnel credential for the relay/Paca `tunnel-apps` domain
+  - Cloudflare tunnel credential for the relay/NVIDIA `tunnel-apps` domain
 - `${HOME}/.cloudflared/efdf4f6b-c5ee-4673-b682-eda9a0ef71ca.json`
   - Mode-`0400` Cloudflare tunnel credential for the dedicated
     `codexpro-home` Named Tunnel
@@ -23,8 +23,6 @@ external secret store.
   - Mode-`0700` runtime directory and mode-`0600` generated connector state
   - Treat the whole state as secret because the URL file includes the bearer;
     runtime files are regenerated when `codexpro-home.service` starts
-- `${HOME}/.config/mcp-suite/`
-  - User systemd update script for rebuilding the local MCP suite image
 - `stacks/codex-lb/.env`
   - `CODEX_LB_POSTGRES_PASSWORD` for the codex-lb Postgres service
 - `/opt/nvidia-build-lb/secrets/admin_token`
@@ -72,19 +70,6 @@ external secret store.
   - `CODEX_LOOP_PAT` for Codex loop push and continuation dispatch
 - `stacks/codex-github-runners/state/github_pat`
   - GitHub PAT used for runner registration
-- `stacks/paca/.env`
-  - Local-only Paca runtime secrets. This file is ignored and must be rebuilt
-    from `stacks/paca/.env.example`, never committed.
-  - Secret names: `POSTGRES_PASSWORD`, `JWT_SECRET`, `ADMIN_PASSWORD`,
-    `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`, `AGENT_API_KEY`,
-    `INTERNAL_API_KEY`, and `ENCRYPTION_KEY`.
-  - `ENCRYPTION_KEY` is separate from ordinary runtime secrets. It protects
-    encrypted agent LLM keys in Postgres, must be 64 hex chars, and can't be
-    changed blindly. Rotate it only with a verified decrypt and re-encrypt
-    migration, or stop and re-enter agent LLM keys manually.
-- `stacks/paca/backups/`
-  - Local Paca Postgres dump path when `BACKUP_DIR` points inside the stack
-    folder. Backup files are runtime data and ignored.
 - `.omo/evidence/`
   - Local-only task evidence. It is ignored and must not be committed.
 
@@ -105,9 +90,5 @@ external secret store.
   state
 - `nvidia-build-lb_db-data` Docker volume, including encrypted NVIDIA
   credentials, routing state, downstream-token digests, and operator evidence
-- Paca Docker volumes, including `paca_postgres_data`, `paca_valkey_data`,
-  `paca_minio_data`, `paca_backend_plugins`, `paca_frontend_plugins`,
-  `paca_mcp_plugins`, `paca_caddy_data`, and `paca_caddy_config`
-- Paca database rows that contain encrypted agent LLM keys
 - SSH private keys under `~/.ssh`
 - GitHub CLI `hosts.yml`

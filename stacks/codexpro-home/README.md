@@ -4,10 +4,9 @@
 single ChatGPT connector through CodexPro and a dedicated Cloudflare Named
 Tunnel. The public hostname is `codexpro.dongwontuna.net`.
 
-This stack intentionally remains separate from `stacks/mcp-suite` and
-`stacks/tunnel-apps`:
+This stack intentionally remains separate from `stacks/tunnel-apps`:
 
-- `mcp-suite` is local-only and must not be published through Cloudflare.
+- The retired local `mcp-suite` must not be restored or published.
 - `tunnel-apps` serves ordinary HTTP applications and rejects MCP ingress.
 - `codexpro-home` has its own tunnel credential and publishes exactly `/mcp`.
 
