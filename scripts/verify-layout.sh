@@ -9,6 +9,11 @@ required=(
   docs/secrets.md
   stacks/codex-lb/README.md
   stacks/codex-lb/compose.yaml
+  stacks/codexpro-home/README.md
+  stacks/codexpro-home/cloudflared/codexpro-home.yml
+  stacks/codexpro-home/scripts/codexpro-home-url.mjs
+  stacks/codexpro-home/systemd/codexpro-home.service
+  stacks/codexpro-home/systemd/cloudflared-codexpro-home.service
   stacks/mcp-suite/README.md
   stacks/mcp-suite/Dockerfile
   stacks/mcp-suite/compose.yaml
@@ -505,6 +510,91 @@ if ! grep -q 'paca.dongwontuna.net' stacks/tunnel-apps/cloudflared/tunnel-apps.y
   exit 1
 fi
 assert_no_mcp_tunnel_exposure stacks/tunnel-apps/cloudflared/tunnel-apps.yml
+
+codexpro_tunnel_config=stacks/codexpro-home/cloudflared/codexpro-home.yml
+awk '
+  function emit() {
+    if (service != "") print hostname "|" path "|" service
+    hostname = ""
+    path = ""
+    service = ""
+  }
+  /^[[:space:]]+- hostname:/ {
+    emit()
+    hostname = $0
+    sub(/^[[:space:]]+- hostname:[[:space:]]*/, "", hostname)
+    next
+  }
+  /^[[:space:]]+path:/ {
+    path = $0
+    sub(/^[[:space:]]+path:[[:space:]]*/, "", path)
+    next
+  }
+  /^[[:space:]]+- service:/ {
+    emit()
+    service = $0
+    sub(/^[[:space:]]+- service:[[:space:]]*/, "", service)
+    emit()
+    next
+  }
+  /^[[:space:]]+service:/ {
+    service = $0
+    sub(/^[[:space:]]+service:[[:space:]]*/, "", service)
+    emit()
+  }
+  END { emit() }
+' "$codexpro_tunnel_config" >"$tmpdir/codexpro-tunnel-rules.actual"
+cat >"$tmpdir/codexpro-tunnel-rules.expected" <<'EOF'
+codexpro.dongwontuna.net|^/mcp$|http://127.0.0.1:8788
+||http_status:404
+EOF
+if ! diff -u \
+  "$tmpdir/codexpro-tunnel-rules.expected" \
+  "$tmpdir/codexpro-tunnel-rules.actual"; then
+  printf '%s\n' 'CodexPro public ingress must expose exactly /mcp and then return 404' >&2
+  exit 1
+fi
+if ! grep -Fqx 'tunnel: efdf4f6b-c5ee-4673-b682-eda9a0ef71ca' "$codexpro_tunnel_config"; then
+  printf '%s\n' 'CodexPro tunnel ID drifted from the deployed named tunnel' >&2
+  exit 1
+fi
+if grep -Eq 'codexpro_token=|Authorization:[[:space:]]*Bearer' "$codexpro_tunnel_config"; then
+  printf '%s\n' 'CodexPro tunnel config must not contain connector credentials' >&2
+  exit 1
+fi
+
+codexpro_service=stacks/codexpro-home/systemd/codexpro-home.service
+cloudflared_codexpro_service=stacks/codexpro-home/systemd/cloudflared-codexpro-home.service
+for fragment in \
+  'ExecStart=%h/.local/bin/codexpro start --root %h --tunnel none' \
+  'ExecStartPost=%h/.local/bin/codexpro-home-url --wait 30000 --write' \
+  'StandardOutput=null' \
+  'CODEXPRO_BLOCKED_GLOBS='; do
+  if ! grep -Fq "$fragment" "$codexpro_service"; then
+    printf 'CodexPro service contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+for fragment in \
+  'Requires=codexpro-home.service' \
+  'PartOf=codexpro-home.service' \
+  'ExecStart=%h/.local/bin/cloudflared tunnel --config %h/.cloudflared/codexpro-home.yml run codexpro-home'; do
+  if ! grep -Fq "$fragment" "$cloudflared_codexpro_service"; then
+    printf 'CodexPro tunnel service contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+if [ ! -x stacks/codexpro-home/scripts/codexpro-home-url.mjs ]; then
+  printf '%s\n' 'CodexPro URL writer must be executable' >&2
+  exit 1
+fi
+if ! grep -Fq 'Pass exactly one of --write or --redacted.' \
+  stacks/codexpro-home/scripts/codexpro-home-url.mjs; then
+  printf '%s\n' 'CodexPro URL writer must fail closed instead of printing a bearer URL by default' >&2
+  exit 1
+fi
+node --check stacks/codexpro-home/scripts/codexpro-home-url.mjs
+
 if ! grep -q 'paca_mcp_internal' stacks/mcp-suite/compose.yaml; then
   printf 'mcp-suite must join paca_mcp_internal\n' >&2
   exit 1

@@ -1,0 +1,8 @@
+tunnel: efdf4f6b-c5ee-4673-b682-eda9a0ef71ca
+credentials-file: /home/dongwonttuna/.cloudflared/efdf4f6b-c5ee-4673-b682-eda9a0ef71ca.json
+
+ingress:
+  - hostname: codexpro.dongwontuna.net
+    path: ^/mcp$
+    service: http://127.0.0.1:8788
+  - service: http_status:404

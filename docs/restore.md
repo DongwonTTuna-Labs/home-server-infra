@@ -69,6 +69,35 @@ The retired `${HOME}/.cloudflared/codex-lb.json` credential is not required for
 restore unless you are intentionally rolling back the old per-stack tunnel
 runner.
 
+## CodexPro Home
+
+The authoritative install, verification, token-rotation, and rollback commands
+are in [`stacks/codexpro-home/README.md`](../stacks/codexpro-home/README.md).
+
+1. Install the documented CodexPro and Cloudflare dependencies, then restore
+   `${HOME}/.cloudflared/efdf4f6b-c5ee-4673-b682-eda9a0ef71ca.json` with mode
+   `0400`. If that Named Tunnel no longer exists, create a replacement and
+   update its ID, credential path, and DNS route together; never reuse the old
+   credential with a new tunnel ID.
+2. To preserve the existing ChatGPT connector URL, restore the matching
+   mode-`0600` file under `${HOME}/.codexpro/profiles/` before saving the
+   documented profile settings. Do not pass a replacement `--token`. If the
+   profile is unavailable or access should be revoked, let CodexPro create a
+   new token and replace the complete connector URL in ChatGPT.
+3. Do not restore stale files under `${HOME}/.codexpro/runtime/`.
+   `codexpro-home.service` recreates them, and its URL writer recreates
+   `${HOME}/.codexpro/current-server-url.txt` with mode `0600`.
+4. Install the tracked helper, tunnel config, and user units; validate them,
+   reload the user manager, and enable both services exactly as documented.
+   Confirm user linger remains enabled so the connector returns after reboot.
+5. Before updating ChatGPT, verify the public boundary: only exact `/mcp`
+   reaches CodexPro, all other paths return `404`, missing or invalid bearer
+   values return `401`, and an authenticated MCP `initialize` succeeds.
+
+Routine rollback disables the tunnel service first and preserves the Named
+Tunnel credential, profile token, and DNS route so the same connector URL can
+be restored without rotating credentials.
+
 ## Paca
 
 This restores the repo-managed Paca stack while preserving the `paca` Compose

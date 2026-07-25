@@ -1,0 +1,23 @@
+[Unit]
+Description=Cloudflare Named Tunnel for CodexPro home MCP
+Requires=codexpro-home.service
+After=network-online.target codexpro-home.service
+PartOf=codexpro-home.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cloudflared tunnel --config %h/.cloudflared/codexpro-home.yml run codexpro-home
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=45s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target
