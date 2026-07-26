@@ -11,6 +11,18 @@ external secret store.
   - Legacy Cloudflare tunnel credentials for the retired codex-lb tunnel runner
 - `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`
   - Cloudflare tunnel credential for the relay/NVIDIA `tunnel-apps` domain
+- `${HOME}/.cloudflared/efdf4f6b-c5ee-4673-b682-eda9a0ef71ca.json`
+  - Mode-`0400` Cloudflare tunnel credential for the dedicated
+    `codexpro-home` Named Tunnel
+- `${HOME}/.codexpro/profiles/`
+  - Mode-`0700` directory containing mode-`0600` CodexPro workspace profiles
+  - The profile for `/home/dongwonttuna` contains the connector bearer token;
+    restore it only when the existing ChatGPT connector URL must stay valid
+- `${HOME}/.codexpro/runtime/` and
+  `${HOME}/.codexpro/current-server-url.txt`
+  - Mode-`0700` runtime directory and mode-`0600` generated connector state
+  - Treat the whole state as secret because the URL file includes the bearer;
+    runtime files are regenerated when `codexpro-home.service` starts
 - `stacks/codex-lb/.env`
   - `CODEX_LB_POSTGRES_PASSWORD` for the codex-lb Postgres service
 - `/opt/nvidia-build-lb/secrets/admin_token`

@@ -1,0 +1,29 @@
+[Unit]
+Description=Expose the dongwonttuna home workspace to ChatGPT through CodexPro
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="CODEXPRO_BLOCKED_GLOBS=.codexpro/**,.cloudflared/**,.codex/**,.gnupg/**,.aws/**,.azure/**,.kube/**,.docker/config.json,.config/gcloud/**,.config/gh/**,.config/fj/**,.config/glab-cli/**,.config/rclone/**,.config/op/**,.local/share/keyrings/**,.password-store/**,.netrc,.npmrc,.pypirc,.git-credentials,**/.secrets/**,**/secrets/**,**/*.p12,**/*.pfx,**/*.jks,**/*.keystore"
+ExecStart=%h/.local/bin/codexpro start --root %h --tunnel none --no-copy-url --no-install-cloudflared
+ExecStartPost=%h/.local/bin/codexpro-home-url --wait 30000 --write
+Restart=on-failure
+RestartSec=5s
+SuccessExitStatus=143
+TimeoutStartSec=45s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=default.target

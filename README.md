@@ -23,6 +23,7 @@ dotfiles/                     Curated non-secret client config
 scripts/                      Repository verification helpers
 stacks/agent-stack/           SSH tunnel container stack
 stacks/codex-lb/              codex-lb relay stack
+stacks/codexpro-home/         ChatGPT CodexPro home workspace connector
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
@@ -47,7 +48,10 @@ CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose
 docker compose -f stacks/nvidia-build-lb/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
+node --check stacks/codexpro-home/scripts/codexpro-home-url.mjs
+cloudflared tunnel --config stacks/codexpro-home/cloudflared/codexpro-home.yml ingress validate
 systemd-analyze --user verify \
+  stacks/codexpro-home/systemd/*.service \
   stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/systemd/*.target
 ```
 
@@ -57,9 +61,11 @@ temporary placeholder `state/github_pat` outside the tracked tree before running
 
 ## User Systemd Domains
 
-User systemd units are grouped like Docker stacks with soft domain targets:
+User systemd units are grouped like Docker stacks. Update timers use soft
+domain targets, while CodexPro uses paired long-running services:
 
 - `coding-tools.target`: `codex-cli-update.timer`
+- `codexpro-home.service`: `cloudflared-codexpro-home.service`
 
 Install or refresh the domain units, then reload user systemd:
 
@@ -68,3 +74,8 @@ cp stacks/coding/systemd/*.service stacks/coding/systemd/*.timer stacks/coding/s
 systemctl --user daemon-reload
 systemctl --user enable --now coding-tools.target
 ```
+
+The CodexPro connector has a dedicated path-restricted Named Tunnel and an
+additional mode-`0600` URL writer. Install and verify that bundle using
+[`stacks/codexpro-home/README.md`](stacks/codexpro-home/README.md); do not add
+its `/mcp` route to `tunnel-apps`.
