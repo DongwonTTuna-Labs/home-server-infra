@@ -243,7 +243,7 @@ if [ "$activate" -eq 1 ]; then
         .managedWslCliReconciliation == "settled" and
         .pairing.available == true and
         .pairing.endpoint == "wss://orca.dongwontuna.net" and
-        .pairing.scope == "mobile"
+        .pairing.scope == "runtime"
       ' "$readiness" >/dev/null 2>&1; then
       ready=1
       break

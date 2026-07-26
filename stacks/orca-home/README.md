@@ -16,14 +16,19 @@ on `0.0.0.0:6768`, so the origin may also be reachable directly from the LAN
 when the host firewall permits it. Cloudflare is the supported remote entrypoint;
 do not forward port `6768` on the router.
 
-`--mobile-pairing --json` prints pairing authorization data. The service's
-small `orca-home-run` wrapper therefore creates the private state boundary and
+`--json` prints runtime pairing authorization data. The service's small
+`orca-home-run` wrapper therefore creates the private state boundary and
 redirects standard output to `~/.local/state/orca-home/serve-ready.json`; the
 systemd standard-output target itself is `/dev/null`, never the journal. The
 state directory is mode `0700`, the file is mode `0600`, and the file must be
 treated as a secret. Standard error remains available in the user journal for
 diagnostics. A healthy file is exactly Orca's versioned, single-line
-`orca_server_ready` JSON contract.
+`orca_server_ready` JSON contract with `pairing.scope` set to `runtime`.
+
+Do not add `--mobile-pairing` to this service. Upstream uses that switch to
+mint a `scope=mobile` offer with restricted RPC permissions; it cannot serve as
+the saved desktop remote environment named `home`. With the switch omitted,
+`orca serve` issues the required `scope=runtime` pairing offer.
 
 Orca's [official headless Linux guide](https://github.com/stablyai/orca/blob/v1.4.156/docs/reference/headless-linux-server.md)
 warns that `--appimage-extract-and-run` can print extracted paths before the
@@ -124,7 +129,7 @@ jq -e '
   .advertisedEndpoint == "wss://orca.dongwontuna.net" and
   .pairing.available == true and
   .pairing.endpoint == "wss://orca.dongwontuna.net" and
-  .pairing.scope == "mobile"
+  .pairing.scope == "runtime"
 ' "$readiness" >/dev/null
 ss -ltn 'sport = :6768' | grep -F ':6768'
 ```

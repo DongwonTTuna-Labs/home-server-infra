@@ -1,5 +1,5 @@
 [Unit]
-Description=Orca headless runtime for remote mobile pairing
+Description=Orca headless runtime for remote environment pairing
 Documentation=https://www.onorca.dev/
 Wants=network-online.target
 After=network-online.target
@@ -10,7 +10,7 @@ WorkingDirectory=%h
 Environment=LIBGL_ALWAYS_SOFTWARE=1
 Environment=APPDIR=%h/.local/orca/current/squashfs-root
 UnsetEnvironment=DISPLAY
-ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --mobile-pairing --json
+ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --json
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

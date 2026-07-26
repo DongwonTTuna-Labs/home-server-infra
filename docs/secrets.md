@@ -12,7 +12,7 @@ external secret store.
 - `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`
   - Cloudflare tunnel credential for the relay/NVIDIA/Orca `tunnel-apps` domain
 - `${HOME}/.local/state/orca-home/serve-ready.json`
-  - Mode-`0600` Orca readiness state containing mobile pairing authorization
+  - Mode-`0600` Orca readiness state containing remote runtime pairing authorization
   - Regenerated on service start; never commit, log, screenshot, or paste it
 - `${HOME}/.config/orca/` and `${HOME}/.config/Orca/`
   - Orca profiles containing device credentials, E2EE keys, cookies, and state

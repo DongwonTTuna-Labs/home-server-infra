@@ -28,7 +28,7 @@ stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
 stacks/nvidia-build-lb/       Independent NVIDIA hosted API gateway stack
-stacks/orca-home/             Orca headless runtime and mobile pairing service
+stacks/orca-home/             Orca headless remote runtime and pairing service
 stacks/tunnel-apps/           Single non-SSH Cloudflare Tunnel stack
 services/robobotuna-company-os/ Mocked RoboboTuna Company OS first-slice service
 ```

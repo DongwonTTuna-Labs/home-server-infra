@@ -100,6 +100,7 @@ for fragment in \
   'squashfs-root/AppRun' \
   'refusing a cross-version switch without an Orca profile rollback bundle' \
   '.type == "orca_server_ready"' \
+  '.pairing.scope == "runtime"' \
   'systemctl --user restart orca-serve.service'; do
   if ! grep -Fq -- "$fragment" "$orca_installer"; then
     printf 'Orca installer contract missing: %s\n' "$fragment" >&2
@@ -109,7 +110,7 @@ done
 
 orca_service=stacks/orca-home/systemd/orca-serve.service
 for fragment in \
-  'ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --mobile-pairing --json' \
+  'ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --json' \
   'Environment=LIBGL_ALWAYS_SOFTWARE=1' \
   'Environment=APPDIR=%h/.local/orca/current/squashfs-root' \
   'UnsetEnvironment=DISPLAY' \
@@ -129,6 +130,10 @@ for fragment in \
 done
 if [ "$(grep -Fo -- '--no-sandbox' "$orca_service" | wc -l)" -ne 1 ]; then
   printf '%s\n' 'Orca service must declare exactly one --no-sandbox fallback' >&2
+  exit 1
+fi
+if grep -Fq -- '--mobile-pairing' "$orca_service"; then
+  printf '%s\n' 'Orca home must issue a remote runtime pairing, not a mobile-only pairing' >&2
   exit 1
 fi
 if grep -Fq 'APPIMAGE_EXTRACT_AND_RUN' "$orca_service" \
