@@ -99,6 +99,9 @@ for fragment in \
   'sha256sum --check --status' \
   '--appimage-extract' \
   'squashfs-root/AppRun' \
+  'install_lock=$install_root/.install.lock' \
+  'flock --exclusive 9' \
+  'mv -T -- "$staging_dir" "$release_dir"' \
   'verify_extracted_tree "$release_dir"' \
   'verify_extracted_tree "$staging_dir"' \
   'refusing a cross-version switch without an Orca profile rollback bundle' \

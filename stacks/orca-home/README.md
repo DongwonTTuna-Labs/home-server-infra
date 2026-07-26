@@ -90,16 +90,22 @@ stacks/orca-home/scripts/install.sh \
 ```
 
 The installer also installs and enables `orca-serve.service`. `Xvfb`, `jq`,
-`file`, `git`, `node`, `tar`, and the normal Electron runtime libraries must
-already be present. After runtime readiness, the installer uses the pinned
-Orca CLI and the private runtime pairing only in-process to idempotently
-register `$HOME/Documents/Programming/home-server-infra` as the initial
-server-owned project. It then requires the matching runtime worktree before
-declaring activation successful. The pairing value is never passed as an
-argument or printed. The service sets `LIBGL_ALWAYS_SOFTWARE=1` plus the
-extracted `APPDIR`, clears any inherited `DISPLAY`, passes the required
-`--no-sandbox` before `serve`, and lets Orca start its documented private Xvfb
-instance. User linger must remain enabled so Orca returns after reboot:
+`file`, `flock`, `git`, `node`, `tar`, and the normal Electron runtime
+libraries must already be present. A mode-`0600` host-local install lock
+serializes release verification, extraction, unit installation, activation,
+and bootstrap. The staging-to-release move also uses `mv -T`, so an unexpected
+concurrent destination fails instead of nesting a second extracted tree under
+the pinned release.
+
+After runtime readiness, the installer uses the pinned Orca CLI and the private
+runtime pairing only in-process to idempotently register
+`$HOME/Documents/Programming/home-server-infra` as the initial server-owned
+project. It then requires the matching runtime worktree before declaring
+activation successful. The pairing value is never passed as an argument or
+printed. The service sets `LIBGL_ALWAYS_SOFTWARE=1` plus the extracted `APPDIR`,
+clears any inherited `DISPLAY`, passes the required `--no-sandbox` before
+`serve`, and lets Orca start its documented private Xvfb instance. User linger
+must remain enabled so Orca returns after reboot:
 
 ```bash
 loginctl show-user "$USER" -p Linger

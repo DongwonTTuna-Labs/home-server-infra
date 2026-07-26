@@ -40,7 +40,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for command_name in bash curl file git grep jq node sha256sum stat systemctl systemd-analyze tar; do
+for command_name in bash curl file flock git grep jq node sha256sum stat systemctl systemd-analyze tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'install.sh: required command is missing: %s\n' "$command_name" >&2
     exit 1
@@ -163,6 +163,16 @@ release_dir=$release_root/$tag
 current_link=$install_root/current
 unit_dir=$HOME/.config/systemd/user
 libexec_dir=$HOME/.local/libexec
+install -d -m 0755 -- "$install_root" "$release_root" "$unit_dir" "$libexec_dir"
+install_lock=$install_root/.install.lock
+original_umask=$(umask)
+umask 0077
+: >>"$install_lock"
+umask "$original_umask"
+chmod 0600 -- "$install_lock"
+exec 9<>"$install_lock"
+flock --exclusive 9
+
 if ! systemctl --user show-environment >/dev/null; then
   printf '%s\n' 'install.sh: cannot read the user manager environment' >&2
   exit 1
@@ -186,7 +196,6 @@ state_dir=$state_root/orca-home
 readiness=$state_dir/serve-ready.json
 default_project_path=$HOME/Documents/Programming/home-server-infra
 orca_cli=$release_dir/squashfs-root/resources/app.asar.unpacked/out/cli/index.js
-install -d -m 0755 -- "$install_root" "$release_root" "$unit_dir" "$libexec_dir"
 
 bootstrap_default_project() {
   local repo_add_json
@@ -313,7 +322,7 @@ if [ "$release_ready" -eq 0 ]; then
   fi
   verify_extracted_tree "$staging_dir"
   install -m 0644 -- "$release_json" "$staging_dir/release.json"
-  mv -- "$staging_dir" "$release_dir"
+  mv -T -- "$staging_dir" "$release_dir"
   staging_dir=
 fi
 
