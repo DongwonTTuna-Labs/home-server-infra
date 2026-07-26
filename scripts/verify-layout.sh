@@ -68,6 +68,7 @@ jq -e '
   .url == "https://github.com/stablyai/orca/releases/download/v1.4.156/orca-linux.AppImage" and
   .size == 201856738 and
   .sha256 == "f6c394fd20ccdacd61a583f45cbd2e328d4240b06f1bc42142be0f3f58d1ba9b" and
+  .extracted_tree_sha256 == "09d43fbbe1a08da9f2b3c7716af7e2a56ee8ff30688d9c6ec66e72954f30822a" and
   .source_commit == "e6b89208a69436bf856d572c4a17c98a4c1940d2"
 ' "$orca_release" >/dev/null
 
@@ -98,7 +99,12 @@ for fragment in \
   'sha256sum --check --status' \
   '--appimage-extract' \
   'squashfs-root/AppRun' \
+  'verify_extracted_tree "$release_dir"' \
+  'verify_extracted_tree "$staging_dir"' \
   'refusing a cross-version switch without an Orca profile rollback bundle' \
+  'systemctl --user show-environment' \
+  'state_root=${service_xdg_state_home:-$HOME/.local/state}' \
+  ': >"$readiness"' \
   '.type == "orca_server_ready"' \
   '.pairing.scope == "runtime"' \
   'systemctl --user restart orca-serve.service'; do

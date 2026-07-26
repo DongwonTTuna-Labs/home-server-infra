@@ -40,7 +40,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for command_name in bash curl file grep jq sha256sum stat systemctl systemd-analyze; do
+for command_name in bash curl file grep jq sha256sum stat systemctl systemd-analyze tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'install.sh: required command is missing: %s\n' "$command_name" >&2
     exit 1
@@ -66,6 +66,7 @@ if ! jq -e '
   (.url | type == "string") and
   (.size | type == "number" and . > 0 and floor == .) and
   (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  (.extracted_tree_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
   (.source_commit | type == "string" and test("^[0-9a-f]{40}$"))
 ' "$release_json" >/dev/null; then
   printf '%s\n' 'install.sh: release.json is invalid' >&2
@@ -78,6 +79,7 @@ asset=$(jq -er .asset "$release_json")
 url=$(jq -er .url "$release_json")
 expected_size=$(jq -er '.size | tostring' "$release_json")
 expected_sha256=$(jq -er .sha256 "$release_json")
+expected_extracted_tree_sha256=$(jq -er .extracted_tree_sha256 "$release_json")
 
 if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]] \
   || [ "$tag" != "v$version" ] \
@@ -114,6 +116,38 @@ verify_asset() {
   fi
 }
 
+verify_extracted_tree() {
+  local root=$1
+  local tree=$root/squashfs-root
+  local digest_output
+  local actual_sha256
+
+  if [ ! -d "$tree" ] || [ -L "$tree" ]; then
+    printf 'install.sh: extracted tree is not a non-symlink directory: %s\n' \
+      "$tree" >&2
+    return 1
+  fi
+  digest_output=$(
+    tar \
+      --sort=name \
+      --format=gnu \
+      --mtime=@0 \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --hard-dereference \
+      -C "$root" \
+      -cf - \
+      squashfs-root \
+      | sha256sum
+  )
+  actual_sha256=${digest_output%% *}
+  if [ "$actual_sha256" != "$expected_extracted_tree_sha256" ]; then
+    printf '%s\n' 'install.sh: extracted tree SHA-256 mismatch' >&2
+    return 1
+  fi
+}
+
 if [ -n "$source_path" ]; then
   if [ ! -f "$source_path" ]; then
     printf 'install.sh: source is not a regular file: %s\n' "$source_path" >&2
@@ -129,6 +163,27 @@ release_dir=$release_root/$tag
 current_link=$install_root/current
 unit_dir=$HOME/.config/systemd/user
 libexec_dir=$HOME/.local/libexec
+if ! systemctl --user show-environment >/dev/null; then
+  printf '%s\n' 'install.sh: cannot read the user manager environment' >&2
+  exit 1
+fi
+service_xdg_state_home=$(
+  while IFS= read -r environment_line; do
+    case "$environment_line" in
+      XDG_STATE_HOME=*)
+        printf '%s' "${environment_line#XDG_STATE_HOME=}"
+        break
+        ;;
+    esac
+  done < <(systemctl --user show-environment)
+)
+state_root=${service_xdg_state_home:-$HOME/.local/state}
+if [[ "$state_root" != /* ]]; then
+  printf '%s\n' 'install.sh: user manager state root must be absolute' >&2
+  exit 1
+fi
+state_dir=$state_root/orca-home
+readiness=$state_dir/serve-ready.json
 install -d -m 0755 -- "$install_root" "$release_root" "$unit_dir" "$libexec_dir"
 
 staging_dir=
@@ -158,9 +213,9 @@ if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
   if [ -d "$release_dir" ] \
     && [ ! -L "$release_dir" ] \
     && [ -x "$release_dir/squashfs-root/AppRun" ] \
-    && [ -f "$release_dir/release.json" ] \
-    && cmp -s -- "$release_json" "$release_dir/release.json" \
-    && verify_asset "$release_dir/$asset"; then
+    && verify_asset "$release_dir/$asset" \
+    && verify_extracted_tree "$release_dir"; then
+    install -m 0644 -- "$release_json" "$release_dir/release.json"
     release_ready=1
   else
     printf 'install.sh: existing release directory is incomplete: %s\n' \
@@ -197,6 +252,7 @@ if [ "$release_ready" -eq 0 ]; then
     printf '%s\n' 'install.sh: AppImage extraction did not produce AppRun' >&2
     exit 1
   fi
+  verify_extracted_tree "$staging_dir"
   install -m 0644 -- "$release_json" "$staging_dir/release.json"
   mv -- "$staging_dir" "$release_dir"
   staging_dir=
@@ -226,9 +282,12 @@ systemctl --user daemon-reload
 
 if [ "$activate" -eq 1 ]; then
   systemctl --user enable orca-serve.service
+  umask 0077
+  install -d -m 0700 -- "$state_dir"
+  : >"$readiness"
+  chmod 0600 -- "$readiness"
   systemctl --user restart orca-serve.service
 
-  readiness=$HOME/.local/state/orca-home/serve-ready.json
   ready=0
   for _ in $(seq 1 45); do
     if systemctl --user is-active --quiet orca-serve.service \
@@ -256,6 +315,10 @@ if [ "$activate" -eq 1 ]; then
   fi
   if [ "$(stat -c '%a' -- "$readiness")" != 600 ]; then
     printf '%s\n' 'install.sh: readiness state must have mode 0600' >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%a' -- "$state_dir")" != 700 ]; then
+    printf '%s\n' 'install.sh: readiness state directory must have mode 0700' >&2
     exit 1
   fi
 fi

@@ -18,12 +18,16 @@ do not forward port `6768` on the router.
 
 `--json` prints runtime pairing authorization data. The service's small
 `orca-home-run` wrapper therefore creates the private state boundary and
-redirects standard output to `~/.local/state/orca-home/serve-ready.json`; the
+redirects standard output to
+`${XDG_STATE_HOME:-$HOME/.local/state}/orca-home/serve-ready.json`; the
 systemd standard-output target itself is `/dev/null`, never the journal. The
 state directory is mode `0700`, the file is mode `0600`, and the file must be
 treated as a secret. Standard error remains available in the user journal for
 diagnostics. A healthy file is exactly Orca's versioned, single-line
 `orca_server_ready` JSON contract with `pairing.scope` set to `runtime`.
+The installer reads `XDG_STATE_HOME` from the user manager, matching the
+environment inherited by the service rather than assuming the invoking shell
+has the same value.
 
 Do not add `--mobile-pairing` to this service. Upstream uses that switch to
 mint a `scope=mobile` offer with restricted RPC permissions; it cannot serve as
@@ -55,9 +59,10 @@ setuid-sandbox deployment replaces this exception.
 ## Release pin
 
 [`release.json`](release.json) pins the official `stablyai/orca` Linux
-AppImage by version, byte size, and GitHub-published SHA-256. The installer
-also records the release source commit, verifies the x86-64 ELF asset, and
-installs the extracted release under
+AppImage by version, byte size, GitHub-published SHA-256, and a deterministic
+SHA-256 of the complete extracted tree. The installer verifies that tree both
+after extraction and before reusing an existing release, records the release
+source commit, verifies the x86-64 ELF asset, and installs the release under
 `~/.local/orca/releases/v1.4.156/`. The stable `~/.local/orca/current` symlink
 selects that release for systemd.
 
@@ -85,15 +90,37 @@ stacks/orca-home/scripts/install.sh \
 ```
 
 The installer also installs and enables `orca-serve.service`. `Xvfb`, `jq`,
-`file`, and the normal Electron runtime libraries must already be present. The
-service sets `LIBGL_ALWAYS_SOFTWARE=1` plus the extracted `APPDIR`, clears any
-inherited `DISPLAY`, passes the required `--no-sandbox` before `serve`, and lets
-Orca start its documented private Xvfb instance. User linger must remain enabled
-so Orca returns after reboot:
+`file`, `tar`, and the normal Electron runtime libraries must already be
+present. The service sets `LIBGL_ALWAYS_SOFTWARE=1` plus the extracted `APPDIR`,
+clears any inherited `DISPLAY`, passes the required `--no-sandbox` before
+`serve`, and lets Orca start its documented private Xvfb instance. User linger
+must remain enabled so Orca returns after reboot:
 
 ```bash
 loginctl show-user "$USER" -p Linger
 ```
+
+## Select `home` as the desktop Active Server
+
+Saving the pairing as `home` and clicking **Connect** proves reachability, but
+does not route new desktop work to the server. Orca v1.4.156 deliberately keeps
+connection state separate from its durable Active Server preference. On the
+desktop client, select:
+
+`Settings` → `Remote Orca Servers` → `Advanced` → `Active Server` → `home`
+
+Then create or open the workspace on `home`. An existing local-owned workspace
+continues to use the local daemon even after the server is connected. If that
+daemon receives a server-only path such as `/home/dongwonttuna`, it reports
+`DaemonProtocolError: Working directory ... does not exist` because it is
+validating the path on the desktop machine. That message does not mean the
+server home directory disappeared; select `home` and open a server-owned
+workspace instead. This client preference cannot be forced by the server-side
+systemd unit.
+
+For CLI calls, select the saved runtime explicitly with `--environment home`,
+or set `ORCA_ENVIRONMENT=home` for the CLI session. Pairing codes and URLs
+remain secret in either flow.
 
 ## Validate and publish
 
@@ -116,7 +143,13 @@ Check the private local state without printing its contents:
 ```bash
 set -euo pipefail
 
-readiness=$HOME/.local/state/orca-home/serve-ready.json
+service_xdg_state_home=$(
+  systemctl --user show-environment \
+    | sed -n 's/^XDG_STATE_HOME=//p'
+)
+state_root=${service_xdg_state_home:-$HOME/.local/state}
+test "${state_root#/}" != "$state_root"
+readiness=$state_root/orca-home/serve-ready.json
 systemctl --user is-enabled orca-serve.service
 systemctl --user is-active orca-serve.service
 systemctl --user show orca-serve.service -p ExecStart --value \

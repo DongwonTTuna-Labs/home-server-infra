@@ -7,5 +7,6 @@
   "url": "https://github.com/stablyai/orca/releases/download/v1.4.156/orca-linux.AppImage",
   "size": 201856738,
   "sha256": "f6c394fd20ccdacd61a583f45cbd2e328d4240b06f1bc42142be0f3f58d1ba9b",
+  "extracted_tree_sha256": "09d43fbbe1a08da9f2b3c7716af7e2a56ee8ff30688d9c6ec66e72954f30822a",
   "source_commit": "e6b89208a69436bf856d572c4a17c98a4c1940d2"
 }
