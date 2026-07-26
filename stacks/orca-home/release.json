@@ -1,0 +1,11 @@
+{
+  "schema_version": "orca-home.release.v1",
+  "version": "1.4.156",
+  "tag": "v1.4.156",
+  "asset": "orca-linux.AppImage",
+  "architecture": "x86_64",
+  "url": "https://github.com/stablyai/orca/releases/download/v1.4.156/orca-linux.AppImage",
+  "size": 201856738,
+  "sha256": "f6c394fd20ccdacd61a583f45cbd2e328d4240b06f1bc42142be0f3f58d1ba9b",
+  "source_commit": "e6b89208a69436bf856d572c4a17c98a4c1940d2"
+}

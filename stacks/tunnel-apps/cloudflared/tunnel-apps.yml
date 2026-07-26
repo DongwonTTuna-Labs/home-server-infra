@@ -4,6 +4,8 @@ credentials-file: /etc/cloudflared/tunnel-apps.json
 ingress:
   - hostname: relay-ai.dongwontuna.net
     service: http://localhost:2455
+  - hostname: orca.dongwontuna.net
+    service: http://localhost:6768
   - hostname: nvidia-lb.dongwontuna.net
     path: ^/admin(?:/.*)?$
     service: http_status:404

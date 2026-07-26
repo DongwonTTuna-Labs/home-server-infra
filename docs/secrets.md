@@ -10,7 +10,13 @@ external secret store.
 - `${HOME}/.cloudflared/codex-lb.json`
   - Legacy Cloudflare tunnel credentials for the retired codex-lb tunnel runner
 - `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`
-  - Cloudflare tunnel credential for the relay/NVIDIA `tunnel-apps` domain
+  - Cloudflare tunnel credential for the relay/NVIDIA/Orca `tunnel-apps` domain
+- `${HOME}/.local/state/orca-home/serve-ready.json`
+  - Mode-`0600` Orca readiness state containing mobile pairing authorization
+  - Regenerated on service start; never commit, log, screenshot, or paste it
+- `${HOME}/.config/orca/` and `${HOME}/.config/Orca/`
+  - Orca profiles containing device credentials, E2EE keys, cookies, and state
+  - Back up and restore only as the profile half of a matching release rollback
 - `${HOME}/.cloudflared/efdf4f6b-c5ee-4673-b682-eda9a0ef71ca.json`
   - Mode-`0400` Cloudflare tunnel credential for the dedicated
     `codexpro-home` Named Tunnel

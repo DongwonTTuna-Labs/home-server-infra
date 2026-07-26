@@ -7,7 +7,7 @@ This repository restores configuration, not live data.
 1. Restore `stacks/codex-lb/.env` with `CODEX_LB_POSTGRES_PASSWORD`.
 2. Restore `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`;
    `stacks/tunnel-apps` mounts it read-only as the credential for the
-   relay/NVIDIA tunnel. If that tunnel was revoked or deleted, create a new
+   relay/NVIDIA/Orca tunnel. If that tunnel was revoked or deleted, create a new
    named tunnel and update the tunnel ID and credential mount together. Do not
    restore OpenCode DNS or ingress.
 3. Restore Docker volumes `codex-lb-data` and
@@ -49,6 +49,7 @@ This repository restores configuration, not live data.
    ```sh
    cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
    cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
+   cloudflared tunnel route dns --overwrite-dns tunnel-apps orca.dongwontuna.net
    curl -fsS http://127.0.0.1:2455/health
    curl -fsS https://relay-ai.dongwontuna.net/health
    curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
@@ -61,6 +62,36 @@ This repository restores configuration, not live data.
 The retired `${HOME}/.cloudflared/codex-lb.json` credential is not required for
 restore unless you are intentionally rolling back the old per-stack tunnel
 runner.
+
+## Orca Home
+
+The authoritative install, publication, verification, and rollback commands
+are in [`stacks/orca-home/README.md`](../stacks/orca-home/README.md).
+
+1. Restore the shared `tunnel-apps` credential described above. Orca does not
+   have a separate Cloudflare credential and must not be moved to the SSH or
+   CodexPro tunnel.
+2. Run the release-pinned installer with `--activate`. It verifies and extracts
+   the AppImage once under `~/.local/orca/releases/`, selects it through
+   `~/.local/orca/current`, installs `orca-serve.service`, and verifies the
+   private readiness file. The tracked unit intentionally uses
+   `AppRun --no-sandbox serve` because this host's AppArmor policy blocks the
+   user-namespace sandbox probe; preserve that argument order on restore. Do not
+   restore an old pairing offer; Orca regenerates it when the service starts.
+3. Confirm user linger, service state, readiness-file mode `0600`, and the local
+   `6768` listener without printing the readiness contents.
+4. Validate `tunnel-apps`, recreate only `cloudflared-apps`, and wait for active
+   tunnel connections before routing `orca.dongwontuna.net`.
+5. Verify the public WebSocket `101` upgrade using the secret-free request in
+   the Orca README. Never paste the generated pairing link, QR payload, or
+   readiness JSON into logs, issues, or pull requests.
+
+The Orca CLI listens on `0.0.0.0:6768`; do not add a router port-forward. The
+supported remote path is the Cloudflare hostname.
+
+For a future version rollback, restore the matching Orca profile and release
+together. A binary-only rollback is unsafe after a newer profile schema has
+been written.
 
 ## CodexPro Home
 

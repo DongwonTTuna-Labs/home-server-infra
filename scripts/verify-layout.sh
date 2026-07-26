@@ -17,6 +17,11 @@ required=(
   stacks/nvidia-build-lb/README.md
   stacks/nvidia-build-lb/compose.yaml
   stacks/nvidia-build-lb/release.json
+  stacks/orca-home/README.md
+  stacks/orca-home/release.json
+  stacks/orca-home/scripts/install.sh
+  stacks/orca-home/scripts/run.sh
+  stacks/orca-home/systemd/orca-serve.service
   scripts/test-credential-scan.sh
   scripts/agent-apps-delayed-update-locked.sh
   stacks/nvidia-build-lb/systemd/agent-apps-delayed-update.service.d/nblb-cutover-lock.conf
@@ -50,6 +55,89 @@ if ! git ls-files --error-unmatch scripts/test-credential-scan.sh >/dev/null 2>&
 fi
 if ! git ls-files --error-unmatch scripts/agent-apps-delayed-update-locked.sh >/dev/null 2>&1; then
   printf 'Agent apps delayed update lock wrapper must be tracked\n' >&2
+  exit 1
+fi
+
+orca_release=stacks/orca-home/release.json
+jq -e '
+  .schema_version == "orca-home.release.v1" and
+  .version == "1.4.156" and
+  .tag == "v1.4.156" and
+  .asset == "orca-linux.AppImage" and
+  .architecture == "x86_64" and
+  .url == "https://github.com/stablyai/orca/releases/download/v1.4.156/orca-linux.AppImage" and
+  .size == 201856738 and
+  .sha256 == "f6c394fd20ccdacd61a583f45cbd2e328d4240b06f1bc42142be0f3f58d1ba9b" and
+  .source_commit == "e6b89208a69436bf856d572c4a17c98a4c1940d2"
+' "$orca_release" >/dev/null
+
+orca_installer=stacks/orca-home/scripts/install.sh
+if [ ! -x "$orca_installer" ]; then
+  printf '%s\n' 'Orca installer must be executable' >&2
+  exit 1
+fi
+bash -n "$orca_installer"
+orca_runner=stacks/orca-home/scripts/run.sh
+if [ ! -x "$orca_runner" ]; then
+  printf '%s\n' 'Orca private-output runner must be executable' >&2
+  exit 1
+fi
+bash -n "$orca_runner"
+for fragment in \
+  'umask 0077' \
+  '/usr/bin/install -d -m 0700' \
+  '/usr/bin/chmod 0600' \
+  'exec "$@" >"$readiness"'; do
+  if ! grep -Fq -- "$fragment" "$orca_runner"; then
+    printf 'Orca private-output runner contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+for fragment in \
+  '--proto-redir' \
+  'sha256sum --check --status' \
+  '--appimage-extract' \
+  'squashfs-root/AppRun' \
+  'refusing a cross-version switch without an Orca profile rollback bundle' \
+  '.type == "orca_server_ready"' \
+  'systemctl --user restart orca-serve.service'; do
+  if ! grep -Fq -- "$fragment" "$orca_installer"; then
+    printf 'Orca installer contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+
+orca_service=stacks/orca-home/systemd/orca-serve.service
+for fragment in \
+  'ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --mobile-pairing --json' \
+  'Environment=LIBGL_ALWAYS_SOFTWARE=1' \
+  'Environment=APPDIR=%h/.local/orca/current/squashfs-root' \
+  'UnsetEnvironment=DISPLAY' \
+  'StateDirectory=orca-home' \
+  'StateDirectoryMode=0700' \
+  'UMask=0077' \
+  'NoNewPrivileges=true' \
+  'PrivateTmp=true' \
+  'ProtectSystem=full' \
+  'ReadOnlyPaths=%h/.local/orca/releases' \
+  'StandardOutput=null' \
+  'StandardError=journal'; do
+  if ! grep -Fq -- "$fragment" "$orca_service"; then
+    printf 'Orca service contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+if [ "$(grep -Fo -- '--no-sandbox' "$orca_service" | wc -l)" -ne 1 ]; then
+  printf '%s\n' 'Orca service must declare exactly one --no-sandbox fallback' >&2
+  exit 1
+fi
+if grep -Fq 'APPIMAGE_EXTRACT_AND_RUN' "$orca_service" \
+  || grep -Fq -- '--appimage-extract-and-run' "$orca_installer"; then
+  printf '%s\n' 'Orca service must use the one-time extracted AppRun path' >&2
+  exit 1
+fi
+if grep -Eq '^StandardOutput=(journal|journal-or-kmsg|inherit|file:)' "$orca_service"; then
+  printf '%s\n' 'Orca pairing output must never enter the journal' >&2
   exit 1
 fi
 
@@ -345,6 +433,7 @@ awk '
 ' "$tunnel_config" >"$tmpdir/tunnel-rules.actual"
 cat >"$tmpdir/tunnel-rules.expected" <<'EOF'
 relay-ai.dongwontuna.net||http://localhost:2455
+orca.dongwontuna.net||http://localhost:6768
 nvidia-lb.dongwontuna.net|^/admin(?:/.*)?$|http_status:404
 nvidia-lb.dongwontuna.net|^/internal(?:/.*)?$|http_status:404
 nvidia-lb.dongwontuna.net|^/metrics(?:/.*)?$|http_status:404
