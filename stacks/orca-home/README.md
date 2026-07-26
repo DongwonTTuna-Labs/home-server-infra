@@ -90,11 +90,16 @@ stacks/orca-home/scripts/install.sh \
 ```
 
 The installer also installs and enables `orca-serve.service`. `Xvfb`, `jq`,
-`file`, `tar`, and the normal Electron runtime libraries must already be
-present. The service sets `LIBGL_ALWAYS_SOFTWARE=1` plus the extracted `APPDIR`,
-clears any inherited `DISPLAY`, passes the required `--no-sandbox` before
-`serve`, and lets Orca start its documented private Xvfb instance. User linger
-must remain enabled so Orca returns after reboot:
+`file`, `git`, `node`, `tar`, and the normal Electron runtime libraries must
+already be present. After runtime readiness, the installer uses the pinned
+Orca CLI and the private runtime pairing only in-process to idempotently
+register `$HOME/Documents/Programming/home-server-infra` as the initial
+server-owned project. It then requires the matching runtime worktree before
+declaring activation successful. The pairing value is never passed as an
+argument or printed. The service sets `LIBGL_ALWAYS_SOFTWARE=1` plus the
+extracted `APPDIR`, clears any inherited `DISPLAY`, passes the required
+`--no-sandbox` before `serve`, and lets Orca start its documented private Xvfb
+instance. User linger must remain enabled so Orca returns after reboot:
 
 ```bash
 loginctl show-user "$USER" -p Linger
@@ -103,20 +108,25 @@ loginctl show-user "$USER" -p Linger
 ## Select `home` as the desktop Active Server
 
 Saving the pairing as `home` and clicking **Connect** proves reachability, but
-does not route new desktop work to the server. Orca v1.4.156 deliberately keeps
-connection state separate from its durable Active Server preference. On the
-desktop client, select:
+does not re-home an existing local-owned workspace. Orca v1.4.156 deliberately
+keeps connection state separate from its durable Active Server preference. On
+the desktop client, select:
 
 `Settings` → `Remote Orca Servers` → `Advanced` → `Active Server` → `home`
 
-Then create or open the workspace on `home`. An existing local-owned workspace
-continues to use the local daemon even after the server is connected. If that
-daemon receives a server-only path such as `/home/dongwonttuna`, it reports
-`DaemonProtocolError: Working directory ... does not exist` because it is
-validating the path on the desktop machine. That message does not mean the
-server home directory disappeared; select `home` and open a server-owned
-workspace instead. This client preference cannot be forced by the server-side
-systemd unit.
+Then open the `home-server-infra` project published by `home`. The installer
+registers that project on the runtime because an empty server catalog contains
+no server-owned workspace for the desktop to select. If the project list was
+already open during bootstrap, reconnect `home` once to refresh it.
+
+An existing local-owned workspace continues to use the local daemon even after
+the server is connected. If that daemon receives a server-only path such as
+`/home/dongwonttuna`, it reports `DaemonProtocolError: Working directory ...
+does not exist` because it is validating the path on the desktop machine. That
+message does not mean the server home directory disappeared. Do not reopen the
+stale local workspace; open the `home`-owned `home-server-infra` entry instead.
+The server can publish and own the project, but it cannot rewrite a local
+workspace record already saved on the desktop.
 
 For CLI calls, select the saved runtime explicitly with `--environment home`,
 or set `ORCA_ENVIRONMENT=home` for the CLI session. Pairing codes and URLs
@@ -165,6 +175,17 @@ jq -e '
   .pairing.scope == "runtime"
 ' "$readiness" >/dev/null
 ss -ltn 'sport = :6768' | grep -F ':6768'
+
+(
+  export ORCA_PAIRING_CODE
+  ORCA_PAIRING_CODE=$(jq -er '.pairing.url' "$readiness")
+  orca_cli=$HOME/.local/orca/current/squashfs-root/resources/app.asar.unpacked/out/cli/index.js
+  node "$orca_cli" repo list --json \
+    | jq -e --arg path "$HOME/Documents/Programming/home-server-infra" '
+        .ok == true and
+        any(.result.repos[]; .path == $path and .kind == "git")
+      ' >/dev/null
+)
 ```
 
 Recreate only the shared application-tunnel connector, then confirm its active

@@ -40,7 +40,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for command_name in bash curl file grep jq sha256sum stat systemctl systemd-analyze tar; do
+for command_name in bash curl file git grep jq node sha256sum stat systemctl systemd-analyze tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'install.sh: required command is missing: %s\n' "$command_name" >&2
     exit 1
@@ -184,7 +184,66 @@ if [[ "$state_root" != /* ]]; then
 fi
 state_dir=$state_root/orca-home
 readiness=$state_dir/serve-ready.json
+default_project_path=$HOME/Documents/Programming/home-server-infra
+orca_cli=$release_dir/squashfs-root/resources/app.asar.unpacked/out/cli/index.js
 install -d -m 0755 -- "$install_root" "$release_root" "$unit_dir" "$libexec_dir"
+
+bootstrap_default_project() {
+  local repo_add_json
+  local repo_id
+  local worktree_list_json
+
+  if [ ! -f "$orca_cli" ] || [ -L "$orca_cli" ]; then
+    printf '%s\n' 'install.sh: pinned Orca CLI is missing from the extracted release' >&2
+    return 1
+  fi
+  if [ ! -d "$default_project_path" ] \
+    || [ -L "$default_project_path" ] \
+    || [ "$(git -C "$default_project_path" rev-parse --show-toplevel 2>/dev/null)" != "$default_project_path" ]; then
+    printf 'install.sh: default Orca project is not a Git repository root: %s\n' \
+      "$default_project_path" >&2
+    return 1
+  fi
+
+  (
+    export ORCA_PAIRING_CODE
+    ORCA_PAIRING_CODE=$(jq -er '
+      .pairing.url
+      | select(type == "string" and startswith("orca://pair?"))
+    ' "$readiness")
+
+    if ! repo_add_json=$(node "$orca_cli" repo add --path "$default_project_path" --json); then
+      printf '%s\n' 'install.sh: failed to register the default project with Orca' >&2
+      return 1
+    fi
+    if ! jq -e --arg path "$default_project_path" '
+      .ok == true and
+      .result.repo.path == $path and
+      .result.repo.kind == "git" and
+      (.result.repo.id | type == "string" and length > 0)
+    ' <<<"$repo_add_json" >/dev/null; then
+      printf '%s\n' 'install.sh: Orca returned an invalid default-project registration' >&2
+      return 1
+    fi
+    repo_id=$(jq -er '.result.repo.id' <<<"$repo_add_json")
+
+    if ! worktree_list_json=$(
+      node "$orca_cli" worktree list --repo "id:$repo_id" --json
+    ); then
+      printf '%s\n' 'install.sh: failed to verify the default Orca project worktree' >&2
+      return 1
+    fi
+    if ! jq -e --arg path "$default_project_path" --arg repo_id "$repo_id" '
+      .ok == true and
+      any(.result.worktrees[]; .path == $path and .repoId == $repo_id)
+    ' <<<"$worktree_list_json" >/dev/null; then
+      printf '%s\n' 'install.sh: default Orca project has no matching runtime worktree' >&2
+      return 1
+    fi
+  )
+
+  printf 'Registered Orca default project: %s\n' "$default_project_path"
+}
 
 staging_dir=
 link_staging=$install_root/.current.$$
@@ -321,6 +380,7 @@ if [ "$activate" -eq 1 ]; then
     printf '%s\n' 'install.sh: readiness state directory must have mode 0700' >&2
     exit 1
   fi
+  bootstrap_default_project
 fi
 
 printf 'Installed Orca %s AppRun at %s\n' \

@@ -104,6 +104,11 @@ for fragment in \
   'refusing a cross-version switch without an Orca profile rollback bundle' \
   'systemctl --user show-environment' \
   'state_root=${service_xdg_state_home:-$HOME/.local/state}' \
+  'default_project_path=$HOME/Documents/Programming/home-server-infra' \
+  'bootstrap_default_project' \
+  'ORCA_PAIRING_CODE=$(jq -er' \
+  'repo add --path "$default_project_path" --json' \
+  'worktree list --repo "id:$repo_id" --json' \
   ': >"$readiness"' \
   '.type == "orca_server_ready"' \
   '.pairing.scope == "runtime"' \
