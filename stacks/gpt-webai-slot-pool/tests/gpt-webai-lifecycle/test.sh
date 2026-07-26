@@ -1,1123 +1,1205 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../../../.." && pwd)"
-supervisor="${GPT_WEBAI_SUPERVISOR:-$repo_root/stacks/gpt-webai-slot-pool/bin/gpt-webai-lifecycle}"
-gptpro_wrapper="${GPT_WEBAI_GPTPRO_WRAPPER:-/home/dongwonttuna/.local/bin/gptpro}"
-gptxhigh_wrapper="${GPT_WEBAI_GPTXHIGH_WRAPPER:-/home/dongwonttuna/.local/bin/gptxhigh}"
-fixture_dir="$script_dir/fixtures"
-evidence_root="$(realpath -m -- "$repo_root/.omo/evidence")"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+stack_root="$(cd -- "$script_dir/../.." && pwd -P)"
+repo_root="$(cd -- "$stack_root/../.." && pwd -P)"
+
+usage() {
+  printf 'usage: %s <static|fake|full|smoke|all>\n' "$0" >&2
+}
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
 }
 
-assert_file() {
-  [[ -f "$1" ]] || fail "missing file: $1"
+usage_error() {
+  usage
+  exit 2
 }
 
-assert_dir() {
-  [[ -d "$1" ]] || fail "missing dir: $1"
+require_file() {
+  local path="$1"
+  [[ -f "$stack_root/$path" && ! -L "$stack_root/$path" ]] ||
+    fail "required file is missing or not a regular non-symlink: $path"
 }
 
-assert_eq() {
-  [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"
+require_executable() {
+  local path="$1"
+  require_file "$path"
+  [[ -x "$stack_root/$path" ]] || fail "required file is not executable: $path"
 }
 
-assert_contains() {
-  local needle="$1"
-  local file="$2"
-  grep -F -- "$needle" "$file" >/dev/null || fail "missing [$needle] in $file"
+require_nonempty_directory() {
+  local path="$1"
+  [[ -d "$stack_root/$path" && ! -L "$stack_root/$path" ]] ||
+    fail "required directory is missing or is a symlink: $path"
+  find "$stack_root/$path" -type f -print -quit | grep -q . ||
+    fail "required directory is empty: $path"
 }
 
-assert_not_contains() {
-  local needle="$1"
-  local file="$2"
-  if grep -F -- "$needle" "$file" >/dev/null 2>&1; then
-    fail "unexpected [$needle] in $file"
-  fi
-}
-
-assert_absent_path_fragment() {
-  local forbidden="$1"
-  local root="$2"
-  if grep -R -- "$forbidden" "$root" >/dev/null 2>&1; then
-    fail "forbidden path fragment [$forbidden] found under $root"
-  fi
-}
-
-safe_rm_rf() {
-  local target="${1:-}" resolved
-  [[ -n "$target" ]] || { printf 'refusing unsafe rm -rf target: empty\n' >&2; return 1; }
-  if ! resolved="$(realpath -m -- "$target" 2>/dev/null)"; then
-    printf 'refusing unsafe rm -rf target: cannot resolve %s\n' "$target" >&2
-    return 1
-  fi
-  case "$resolved" in
-    "$evidence_root"/*) ;;
-    *)
-      printf 'refusing unsafe rm -rf target outside evidence: %s -> %s\n' "$target" "$resolved" >&2
-      return 1
-      ;;
-  esac
-  chmod -R u+w -- "$target" 2>/dev/null || true
-  rm -rf -- "$target"
-}
-
-run_supervisor() {
-  PATH="$fixture_dir/fake-bin:$PATH" \
-    GPT_WEBAI_STATE_DIR="$state_dir" \
-    GPT_WEBAI_BOOT_ID_FILE="$boot_file" \
-    GPT_WEBAI_FAKE_AGBROWSE_LOG="$agbrowse_log" \
-    GPT_WEBAI_FAKE_AGBROWSE_ROOT="${fake_agbrowse_root:-$test_root/fake-agbrowse}" \
-    GPT_WEBAI_FAKE_MALFORMED_OUTPUT="${fake_malformed_output-}" \
-    GPT_WEBAI_AGBROWSE_BIN="$fixture_dir/fake-bin/agbrowse" \
-    GPT_WEBAI_SLOT_MODE="${slot_mode-}" \
-    GPT_WEBAI_SLOT_COUNT="${slot_count-}" \
-    GPT_WEBAI_SLOT_FAKE_LOCAL="${slot_fake_local-}" \
-    GPT_WEBAI_FAKE_AUTH_STATE="${fake_auth_state-}" \
-    GPT_WEBAI_BROWSER_READY_ATTEMPTS="${ready_attempts:-5}" \
-    GPT_WEBAI_BROWSER_READY_DELAY="${ready_delay:-0}" \
-    GPT_WEBAI_SEND_SESSION_RETRY_DELAYS="${send_session_retry_delays:-1 3 5 10 15}" \
-    GPTPRO_TIMEOUT="${GPTPRO_TIMEOUT-}" \
-    GPTXHIGH_TIMEOUT="${GPTXHIGH_TIMEOUT-}" \
-    CHROME_BINARY_PATH="${chrome_binary:-$test_root/fake-chrome}" \
-    DISPLAY="${display_value-:99}" \
-    "$supervisor" "$@"
-}
-
-require_supervisor() {
-  [[ -x "$supervisor" ]] || fail "missing executable supervisor: $supervisor"
-}
-
-write_boot() {
-  printf '%s\n' "$1" > "$boot_file"
-}
-
-state_core() {
-  : "${GPT_WEBAI_TEST_ROOT:?set GPT_WEBAI_TEST_ROOT}"
-  test_root="$GPT_WEBAI_TEST_ROOT"
-  state_dir="$test_root/state"
-  boot_file="$test_root/fake-boot-id"
-  agbrowse_log="$test_root/fake-agbrowse.log"
-
-  safe_rm_rf "$test_root"
-  mkdir -p "$test_root"
-  write_boot boot-a
-  require_supervisor
-
-  status_out="$test_root/status.out"
-  run_supervisor status > "$status_out"
-  assert_contains 'state_dir=' "$status_out"
-  assert_contains "tmpdir=$state_dir/tmp" "$status_out"
-  assert_contains 'boot_id=boot-a' "$status_out"
-  assert_dir "$state_dir"
-  assert_dir "$state_dir/tmp"
-  assert_dir "$state_dir/holders"
-  assert_dir "$state_dir/locks"
-  assert_dir "$state_dir/slots/slot-01/state"
-  assert_dir "$state_dir/slots/slot-01/attachments"
-  assert_dir "$state_dir/slots/slot-10/state"
-  assert_dir "$state_dir/slots/slot-10/attachments"
-  assert_eq "$(stat -c '%a' "$state_dir/slots/slot-01/state")" 700
-  assert_eq "$(stat -c '%a' "$state_dir/slots/slot-01/attachments")" 700
-  assert_file "$state_dir/boot-id"
-  assert_eq "$(<"$state_dir/boot-id")" boot-a
-
-  constants_out="$test_root/constants.out"
-  run_supervisor constants > "$constants_out"
-  assert_contains 'EX_OK=0' "$constants_out"
-  assert_contains 'EX_USAGE=2' "$constants_out"
-  assert_contains 'EX_LOCK=75' "$constants_out"
-
-  retry_delays_out="$test_root/send-retry-delays.out"
-  run_supervisor __test send-retry-delays > "$retry_delays_out"
-  assert_eq "$(paste -sd, "$retry_delays_out")" "1,3,5,10,15"
-
-  run_supervisor __test atomic-write records/session.json '{"sessionId":"sid-ok"}'
-  assert_file "$state_dir/records/session.json"
-  assert_eq "$(<"$state_dir/records/session.json")" '{"sessionId":"sid-ok"}'
-
-  lock_subshell_out="$test_root/lock-substitution.out"
-  run_supervisor __test lock-substitution > "$lock_subshell_out"
-  assert_contains 'lock_survived=1' "$lock_subshell_out"
-  assert_contains 'lock_released=1' "$lock_subshell_out"
-
-  if GPT_WEBAI_TEST_INTERRUPT_AFTER_TEMP=1 run_supervisor __test atomic-write records/session.json '{bad-json'; then
-    fail 'interrupted atomic write unexpectedly succeeded'
-  fi
-  assert_eq "$(<"$state_dir/records/session.json")" '{"sessionId":"sid-ok"}'
-  [[ -n "$(find "$state_dir/tmp" -type f -name '.atomic-*' -print -quit)" ]] || fail 'interrupted write left no state-dir temp file'
-  find "$state_dir/tmp" -type f -name '.atomic-*' -delete
-
-  removed_out="$test_root/removed-lease.out"
-  run_supervisor lease create --id live-a --pid "$$" --profile default --session sid-a >"$removed_out" 2>&1
-  assert_contains '"reason":"input.usage"' "$removed_out"
-  assert_contains 'unknown command: lease' "$removed_out"
-
-  removed_out="$test_root/removed-lock.out"
-  run_supervisor lock profile acquire default holder-one >"$removed_out" 2>&1
-  assert_contains '"reason":"input.usage"' "$removed_out"
-  assert_contains 'unknown command: lock' "$removed_out"
-
-  printf 'id=live-a\npid=%s\nboot_id=boot-a\n' "$$" > "$state_dir/holders/live-a.lease"
-  printf 'id=live-b\npid=%s\nboot_id=boot-a\n' "$$" > "$state_dir/holders/live-b.lease"
-  assert_file "$state_dir/holders/live-a.lease"
-  assert_file "$state_dir/holders/live-b.lease"
-
-  write_boot boot-b
-  reboot_prune_out="$test_root/reboot-prune.out"
-  run_supervisor status > "$reboot_prune_out"
-  assert_contains 'boot_id=boot-b' "$reboot_prune_out"
-  [[ ! -e "$state_dir/holders/live-a.lease" ]] || fail 'previous-boot holder survived boot change'
-  [[ ! -e "$state_dir/holders/live-b.lease" ]] || fail 'previous-boot holder survived boot change'
-
-  assert_absent_path_fragment "$(printf '/tmp')/gpt-webai" "$state_dir"
-  assert_absent_path_fragment "TMPDIR=$(printf '/tmp')" "$script_dir"
-  [[ ! -s "$agbrowse_log" ]] || fail 'state-core unexpectedly called fake agbrowse'
-
-  remaining_tmp="$(find "$state_dir/tmp" -mindepth 1 -print -quit)"
-  [[ -z "$remaining_tmp" ]] || fail "unexpected temp artifact remains: $remaining_tmp"
-  printf 'PASS state-core\n'
-  printf 'cleanup: removed interrupted temp files; retained %s as intentional state evidence\n' "$state_dir"
-}
-
-write_status_sequence() {
-  : > "$fake_agbrowse_root/status-sequence"
-  local item
-  for item in "$@"; do
-    printf '%s\n' "$item" >> "$fake_agbrowse_root/status-sequence"
+assert_focused_acceptance_paths() {
+  local target
+  local rust_targets=(
+    contracts_r13 journal_r13 projection_r13 claims_r13 allocator_r13
+    runtime_ownership_r13 model_selection_r13 upload_recovery_r13
+    send_reconcile_r13 session_rebind_r13 session_ops_r13 artifact_claims_r13
+    release_r13 cli_contract_r13 provider_normalization_r12 qa_counters_r13
+  )
+  local node_targets=(
+    contracts-r13 root-selector-r13 model-selection-r13 upload-only-r13
+    send-reconcile-r13 session-rebind-r13 poll-r13 artifact-download-r13
+    privacy-evidence-r13 provider-normalization-r12
+  )
+  for target in "${rust_targets[@]}"; do
+    require_file "crates/gpt-webai-lifecycle/tests/${target}.rs"
+  done
+  for target in "${node_targets[@]}"; do
+    require_file "provider/chatgpt-playwright/test/${target}.test.mjs"
   done
 }
 
-reset_session_case() {
-  local name="$1"
-
-  case_root="$test_root/$name"
-  state_dir="$case_root/state"
-  boot_file="$case_root/fake-boot-id"
-  agbrowse_log="$case_root/fake-agbrowse.log"
-  fake_agbrowse_root="$case_root/fake-agbrowse"
-  chrome_binary="$case_root/fake-chrome"
-  display_value=":99"
-  ready_attempts=5
-  ready_delay=0
-  send_session_retry_delays="0 0 0 0 0"
-  fake_auth_state=authenticated
-
-  safe_rm_rf "$case_root"
-  mkdir -p "$fake_agbrowse_root"
-  write_boot boot-a
-  printf '#!/usr/bin/env sh\nexit 0\n' > "$chrome_binary"
-  chmod +x "$chrome_binary"
-  write_status_sequence reachable reachable reachable reachable reachable
-}
-
-write_fake_sequence() {
-  local name="$1"
-  shift
-  : > "$fake_agbrowse_root/$name"
-  local item
-  for item in "$@"; do
-    printf '%s\n' "$item" >> "$fake_agbrowse_root/$name"
+assert_static_paths() {
+  local path
+  assert_focused_acceptance_paths
+  for path in \
+    Cargo.toml \
+    crates/gpt-webai-lifecycle/Cargo.toml \
+    provider/chatgpt-playwright/package.json \
+    provider/chatgpt-playwright/package-lock.json \
+    contracts/provider-r12/provider-outcome-current.tsv \
+    contracts/provider-r12/provider-outcome-normalized.tsv \
+    contracts/provider-r12/r12-to-r13-crosswalk.tsv \
+    contracts/ui-labels-r14/model-effort-labels.tsv \
+    contracts/ui-labels-r14/chip-removal-labels.tsv \
+    scripts/check-provider-normalization-r12.mjs \
+    scripts/generate-r12-to-r13-crosswalk.mjs \
+    scripts/qa-live-matrix-cases.r13.tsv \
+    scripts/qa-live-matrix-r13.sh \
+    tests/fixtures/provider-r12/legal-catalog.jsonl \
+    tests/fixtures/provider-r12/negative-catalog.jsonl \
+    tests/fixtures/provider-r12/semantic-replay.jsonl; do
+    require_file "$path"
   done
 }
 
-command_count() {
-  local needle="$1"
-  local count=0
-  if [[ -f "$agbrowse_log" ]]; then
-    count="$({ grep -F -- "$needle" "$agbrowse_log" || true; } | wc -l | tr -d ' ')"
-  fi
-  printf '%s' "$count"
+assert_fake_paths() {
+  local path
+  assert_static_paths
+  for path in \
+    target/debug/gpt-webai-lifecycle \
+    scripts/check-cli-fixtures-r13.py \
+    tests/fixtures/cli-r13/accepted.jsonl \
+    tests/fixtures/cli-r13/rejected.jsonl; do
+    require_file "$path"
+  done
+  require_executable tests/gpt-webai-lifecycle/fixtures/fake-bin/gpt-webai-provider
+  require_nonempty_directory tests/fixtures/lifecycle-r13
 }
 
-assert_command_count() {
-  local needle="$1" expected="$2"
-  assert_eq "$(command_count "$needle")" "$expected"
+assert_full_paths() {
+  assert_fake_paths
+  require_file compose.yaml
+  require_file compose.fake.yaml
+  require_file Dockerfile
+  require_executable scripts/slot-entrypoint.sh
+  require_executable scripts/slot-healthcheck.sh
 }
 
-assert_session_record() {
-  local sid="$1"
-  local found=""
-  found="$(grep -R -l -- "sessionId=$sid" "$state_dir/sessions" 2>/dev/null | head -n 1 || true)"
-  [[ -n "$found" ]] || fail "missing local session record for $sid"
-}
-
-assert_no_session_records() {
-  if [[ -d "$state_dir/sessions" ]] && grep -R -q -- 'sessionId=' "$state_dir/sessions" 2>/dev/null; then
-    fail "unexpected local session record under $state_dir/sessions"
-  fi
-}
-
-assert_no_web_ai_stop() {
-  assert_command_count 'web-ai stop' 0
-}
-
-assert_no_web_ai_send() {
-  assert_command_count 'web-ai send' 0
-}
-
-assert_log_session_arg() {
-  local command="$1" sid="$2"
-  assert_contains "web-ai $command" "$agbrowse_log"
-  case "$command" in
-    sessions\ show|sessions\ resume)
-      assert_contains "web-ai $command $sid" "$agbrowse_log"
-      ;;
-    *)
-      assert_contains "--session $sid" "$agbrowse_log"
-      ;;
-  esac
-}
-
-poll_timeout_count() {
-  local sid="$1" timeout="$2" count=0
-  if [[ -f "$agbrowse_log" ]]; then
-    count="$({ grep -F -- "web-ai poll --vendor chatgpt --session $sid --timeout $timeout --json" "$agbrowse_log" || true; } | wc -l | tr -d ' ')"
-  fi
-  printf '%s' "$count"
-}
-
-assert_poll_timeout_count() {
-  local sid="$1" timeout="$2" expected="$3" actual
-  actual="$(poll_timeout_count "$sid" "$timeout")"
-  [[ "$actual" == "$expected" ]] || fail "expected $expected poll call(s) for $sid with --timeout $timeout, got $actual"
-}
-
-json_success_envelope() {
-  local file="$1" usage_error="${2:-0}"
-  python3 - "$file" "$usage_error" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-expect_usage_error = sys.argv[2] == "1"
-try:
-    with open(path, encoding="utf-8") as handle:
-        data = json.load(handle)
-except Exception as exc:
-    print(f"invalid JSON: {exc}")
-    sys.exit(1)
-
-allowed_status = {"done", "running", "recovering", "needs_user_action", "queued"}
-errors = []
-if data.get("ok") is not True:
-    errors.append("ok is not true")
-if data.get("hardFailure") is not False:
-    errors.append("hardFailure is not false")
-if data.get("networkDisconnected") is not False:
-    errors.append("networkDisconnected is not false")
-if data.get("status") not in allowed_status:
-    errors.append("status is not a recovery/success state")
-if expect_usage_error and data.get("usageError") is not True:
-    errors.append("usageError is not true")
-if errors:
-    print("; ".join(errors))
-    sys.exit(1)
-PY
-}
-
-json_hard_network_envelope() {
-  local file="$1"
-  python3 - "$file" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-try:
-    with open(path, encoding="utf-8") as handle:
-        data = json.load(handle)
-except Exception as exc:
-    print(f"invalid JSON: {exc}")
-    sys.exit(1)
-
-errors = []
-if data.get("ok") is not True:
-    errors.append("ok is not true")
-if data.get("hardFailure") is not False:
-    errors.append("hardFailure is not false")
-if data.get("networkDisconnected") is not True:
-    errors.append("networkDisconnected is not true")
-if data.get("reason") != "network.disconnected":
-    errors.append("reason is not network.disconnected")
-if data.get("status") != "recovering":
-    errors.append("status is not recovering")
-if not data.get("message"):
-    errors.append("message is empty")
-if not data.get("nextCommand"):
-    errors.append("nextCommand is empty")
-if errors:
-    print("; ".join(errors))
-    sys.exit(1)
-PY
-}
-
-json_string_field_equals() {
-  local file="$1" field="$2" expected="$3"
-  python3 - "$file" "$field" "$expected" <<'PY'
-import json
-import sys
-
-path, field, expected = sys.argv[1:]
-with open(path, encoding="utf-8") as handle:
-    data = json.load(handle)
-actual = data.get(field)
-if actual != expected:
-    print(f"{field}: expected {expected!r}, got {actual!r}")
-    sys.exit(1)
-PY
-}
-
-json_field_absent() {
-  local file="$1" field="$2"
-  python3 - "$file" "$field" <<'PY'
-import json
-import sys
-
-path, field = sys.argv[1:]
-with open(path, encoding="utf-8") as handle:
-    data = json.load(handle)
-if field in data:
-    print(f"{field}: expected absent, got {data[field]!r}")
-    sys.exit(1)
-PY
-}
-
-assert_success_envelope_fields() {
-  local file="$1" reason="$2" status="$3"
-  json_success_envelope "$file" 0
-  json_string_field_equals "$file" reason "$reason"
-  json_string_field_equals "$file" status "$status"
-}
-
-assert_resume_command() {
-  local file="$1" kind="$2" sid="$3"
-  json_string_field_equals "$file" resumeCommand "gpt-webai-lifecycle resume --kind $kind --session $sid"
-}
-
-request_fingerprint_fixture() {
-  local kind="$1" model="$2" effort="$3" prompt="$4"
-  python3 - "$kind" "$model" "$effort" "$prompt" <<'PY'
-import hashlib
-import json
-import sys
-
-kind, model, effort, prompt = sys.argv[1:]
-payload = {
-    "effort": effort,
-    "kind": kind,
-    "model": model,
-    "promptSha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-}
-encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-print(hashlib.sha256(encoded).hexdigest())
-PY
-}
-
-assert_session_record_contains() {
-  local sid="$1" needle="$2" found=""
-  found="$(grep -R -l -- "sessionId=$sid" "$state_dir/sessions" 2>/dev/null | head -n 1 || true)"
-  [[ -n "$found" ]] || fail "missing local session record for $sid"
-  assert_contains "$needle" "$found"
-}
-
-event_log_file() {
-  printf '%s/events/lifecycle.jsonl' "$state_dir"
-}
-
-assert_event_path_safe() {
+run_bash_syntax_checks() {
   local file
-  file="$(event_log_file)"
-  case "$file" in
-    "$state_dir"/events/lifecycle.jsonl) ;;
-    *) fail "event log outside state dir: $file" ;;
-  esac
-  case "$file" in
-    /tmp/*) fail "event log under /tmp: $file" ;;
-  esac
+  while IFS= read -r file; do
+    bash -n "$file"
+  done < <(
+    find "$stack_root/bin" "$stack_root/scripts" "$stack_root/tests/gpt-webai-lifecycle" \
+      -type f \( -name '*.sh' -o -name 'gpt-webai-lifecycle' -o -name 'gpt-webai-lifecycle-rust' \) \
+      | LC_ALL=C sort
+  )
 }
 
-assert_event_reason() {
-  local reason="$1" file
-  file="$(event_log_file)"
-  assert_event_path_safe
-  assert_file "$file"
-  python3 - "$file" "$reason" <<'PY'
-import json
-import sys
-
-path, expected = sys.argv[1:]
-found = False
-with open(path, encoding="utf-8") as handle:
-    for line_number, line in enumerate(handle, 1):
-        data = json.loads(line)
-        for key in ("timestamp", "event", "reason", "status"):
-            if not data.get(key):
-                print(f"event line {line_number} missing {key}")
-                sys.exit(1)
-        for unsafe_key in ("message", "prompt", "output", "raw", "env", "cookie"):
-            if unsafe_key in data:
-                print(f"event line {line_number} logged unsafe key {unsafe_key}")
-                sys.exit(1)
-        if data.get("reason") == expected:
-            found = True
-if not found:
-    print(f"missing event reason {expected!r} in {path}")
-    sys.exit(1)
-PY
-}
-
-assert_event_session_reason() {
-  local reason="$1" sid="$2" file
-  file="$(event_log_file)"
-  assert_file "$file"
-  python3 - "$file" "$reason" "$sid" <<'PY'
-import json
-import sys
-
-path, expected_reason, expected_sid = sys.argv[1:]
-with open(path, encoding="utf-8") as handle:
-    for line in handle:
-        data = json.loads(line)
-        if data.get("reason") == expected_reason and data.get("sessionId") == expected_sid:
-            sys.exit(0)
-print(f"missing event reason/session {expected_reason!r}/{expected_sid!r} in {path}")
-sys.exit(1)
-PY
-}
-
-assert_events_absent() {
-  local needle="$1" root="$2"
-  [[ -n "$needle" ]] || return 0
-  if find "$root" -path '*/events/*' -type f -exec grep -F -l -- "$needle" {} + 2>/dev/null | grep -q .; then
-    fail "event files leaked [$needle] under $root"
+run_source_contract_checks() {
+  if grep -RIn --exclude-dir=node_modules --exclude-dir=target 'playwright-core@latest' \
+      "$stack_root/Dockerfile" "$stack_root/provider" >/dev/null; then
+    fail 'production source must not install playwright-core@latest'
+  fi
+  if grep -RInE --exclude-dir=target --exclude-dir=node_modules \
+      --exclude=qa-file-disposition.r13.tsv --exclude=qa-pr72-final-r13.py \
+      '(^|[^[:alnum:]_-])agbrowse([^[:alnum:]_-]|$)' \
+      "$stack_root/bin" "$stack_root/scripts" \
+      "$stack_root/crates/gpt-webai-lifecycle/src" "$stack_root/provider" \
+      "$stack_root/Dockerfile" "$stack_root/compose.yaml" >/dev/null; then
+    fail 'production source must not invoke raw agbrowse'
+  fi
+  if git -C "$repo_root" ls-files -- \
+      ':(glob)stacks/gpt-webai-slot-pool/**/node_modules/**' \
+      ':(glob)stacks/gpt-webai-slot-pool/**/target/**' \
+      ':(glob)stacks/gpt-webai-slot-pool/**/.omo/evidence/**' \
+      ':(glob)stacks/gpt-webai-slot-pool/**/.config/chromium/**' \
+      ':(glob)stacks/gpt-webai-slot-pool/**/profile/**' | grep -q .; then
+    fail 'tracked source includes excluded transient/runtime state'
   fi
 }
 
-assert_observability_static_scan() {
-  python3 - "$supervisor" "$script_dir/test.sh" "$fixture_dir/fake-bin/agbrowse" <<'PY'
+run_r12_fixture_identity_checks() {
+  [[ "$(wc -c < tests/fixtures/provider-r12/legal-catalog.jsonl)" -eq 1478069 ]]
+  [[ "$(wc -c < tests/fixtures/provider-r12/negative-catalog.jsonl)" -eq 715667 ]]
+  [[ "$(wc -c < tests/fixtures/provider-r12/semantic-replay.jsonl)" -eq 134094 ]]
+  [[ "$(wc -c < contracts/provider-r12/r12-to-r13-crosswalk.tsv)" -eq 41367 ]]
+  printf '%s  %s\n' \
+    fd00c608fe8816fa5fc2086d82c646a1e06b15f96f0b0abf664940309e251ee2 tests/fixtures/provider-r12/legal-catalog.jsonl \
+    b21095b36d765f76030f37fe72f87f29d0526550b2c08f685b1a7423e312fee0 tests/fixtures/provider-r12/negative-catalog.jsonl \
+    18845a5ff2181a19e5ea0ad23b4fbb7ec3845b84afa20ea69e11930d85722e03 tests/fixtures/provider-r12/semantic-replay.jsonl \
+    3c28a1816d5e21fd3bbb6a9afae5e2f9510596dc85a0161ba048b0f3343226fd contracts/provider-r12/r12-to-r13-crosswalk.tsv \
+    5fb47aaaf04834d7730088449401ee6c06020576173fb7bf1d45b836673af2d0 contracts/ui-labels-r14/model-effort-labels.tsv \
+    5f72d20331679072012c7bfecf7e71dccd6df346c68a4fed3e3e9180782c4b03 contracts/ui-labels-r14/chip-removal-labels.tsv \
+    | sha256sum -c -
+}
+
+run_r12_crosswalk_regeneration_check() {
+  local generated
+  generated="$(mktemp)"
+  node scripts/generate-r12-to-r13-crosswalk.mjs --output "$generated"
+  if ! cmp -s contracts/provider-r12/r12-to-r13-crosswalk.tsv "$generated"; then
+    diff -u contracts/provider-r12/r12-to-r13-crosswalk.tsv "$generated" || true
+    rm -f -- "$generated"
+    fail 'generated R12-to-R13 crosswalk differs from the committed bytes'
+  fi
+  rm -f -- "$generated"
+}
+
+run_live_matrix_catalog_checks() {
+  bash -n scripts/qa-live-matrix-r13.sh
+  python3 - "$stack_root" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+stack_root = pathlib.Path(sys.argv[1])
+catalog_path = stack_root / "scripts/qa-live-matrix-cases.r13.tsv"
+fixture_root = stack_root / "tests/fixtures/lifecycle-r13"
+contract_path = stack_root / "crates/gpt-webai-lifecycle/src/contracts/cli.rs"
+
+
+def fail(message):
+    raise SystemExit(f"FAIL live-matrix catalog: {message}")
+
+
+raw = catalog_path.read_bytes()
+if raw.startswith(b"\xef\xbb\xbf") or b"\r" in raw or not raw.endswith(b"\n"):
+    fail("catalog must be UTF-8 without BOM, LF-only, and final-LF terminated")
+try:
+    text = raw.decode("utf-8", "strict")
+except UnicodeDecodeError as error:
+    fail(f"catalog is not UTF-8: {error}")
+lines = text.splitlines()
+if any(line.endswith((" ", "\t")) for line in lines):
+    fail("catalog has trailing whitespace")
+header = [
+    "caseId",
+    "command",
+    "argvTemplate",
+    "promptId",
+    "files",
+    "failpoint",
+    "expectedResultKinds",
+    "repeat10",
+    "liveOnly",
+]
+if not lines or lines[0].split("\t") != header:
+    fail("catalog header is not the exact nine-column schema")
+rows = [line.split("\t") for line in lines[1:]]
+if len(rows) != 31 or any(len(row) != len(header) for row in rows):
+    fail("catalog must contain exactly 31 nine-column rows")
+case_ids = [row[0] for row in rows]
+expected_ids = [f"L{index:02d}" for index in range(1, 22)] + [
+    f"R{index:02d}" for index in range(1, 11)
+]
+if case_ids != sorted(case_ids) or case_ids != expected_ids:
+    fail("caseId rows must be unique LC_ALL=C L01-L21 then R01-R10")
+
+source = contract_path.read_text(encoding="utf-8")
+matches = re.findall(r'const [A-Z_]+_RESULTS: &str = "(.*?)";', source, re.S)
+registry = set()
+for value in matches:
+    registry.update(value.replace("\\\n", " ").split())
+if len(registry) != 98:
+    fail(f"closed result registry size is {len(registry)}, expected 98")
+
+allowed_commands = {
+    "status",
+    "preflight",
+    "run",
+    "show",
+    "resume",
+    "download",
+    "release",
+    "cleanup",
+    "state-rebuild",
+    "allocate",
+}
+failpoints = {
+    "after-immutable-temp-write",
+    "after-immutable-promote-before-directory-fsync",
+    "after-event-append-before-head",
+    "after-head-before-projection-publish",
+    "after-uploadcleared",
+    "after-sendclickarmed",
+    "after-physical-send-click-before-provider-stdout",
+    "after-turnstartconfirmed",
+    "after-session-claim-lease-owner-renewal",
+    "after-answerterminal",
+    "after-artifact-listener-arm",
+    "after-artifact-click",
+    "after-playwright-host-save-before-receipt",
+    "after-receipt-before-event",
+    "after-terminalpersisted",
+    "after-evidence-preservation",
+    "after-runtime-stop-before-resource-release",
+    "after-each-exactly-once-release-event",
+}
+
+fake_coverage = set()
+for path in sorted(fixture_root.glob("*/case.json")):
+    try:
+        fixture = json.loads(path.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"invalid lifecycle fixture {path}: {error}")
+    kind = fixture.get("expected", {}).get("resultKind")
+    if not isinstance(kind, str) or kind not in registry:
+        fail(f"fixture has invalid expected.resultKind: {path}")
+    fake_coverage.add(kind)
+
+live_union = set()
+for row in rows:
+    record = dict(zip(header, row, strict=True))
+    if record["command"] not in allowed_commands:
+        fail(f"{record['caseId']} has an unknown command")
+    if record["failpoint"] != "-" and record["failpoint"] not in failpoints:
+        fail(f"{record['caseId']} has an unknown failpoint")
+    expected = record["expectedResultKinds"].split(",")
+    if any(kind not in registry for kind in expected) or len(expected) != len(set(expected)):
+        fail(f"{record['caseId']} has invalid or duplicate expected result kinds")
+    derived = [kind for kind in expected if kind not in fake_coverage]
+    serialized = "-" if not derived else ",".join(derived)
+    if record["liveOnly"] != serialized:
+        fail(
+            f"{record['caseId']} liveOnly={record['liveOnly']} derived={serialized}"
+        )
+    live_union.update(derived)
+    repeat = "true" if record["caseId"].startswith("R") else "false"
+    if record["repeat10"] != repeat:
+        fail(f"{record['caseId']} repeat10 must be {repeat}")
+
+missing = sorted(registry - fake_coverage - live_union)
+if missing:
+    fail("result kinds lack fake or live coverage: " + ",".join(missing))
+print(
+    f"PASS live-matrix catalog rows={len(rows)} registry={len(registry)} "
+    f"fakeKinds={len(fake_coverage)} liveKinds={len(live_union)}"
+)
+PY
+}
+
+run_authority_approval_checks() {
+  python3 - "$stack_root" <<'PY'
+import hashlib
+import importlib.util
+import pathlib
+import tempfile
+import sys
+
+stack_root = pathlib.Path(sys.argv[1]).resolve()
+source = stack_root / "scripts/qa-pr72-final-r13.py"
+spec = importlib.util.spec_from_file_location("qa_pr72_final_r13_test", source)
+if spec is None or spec.loader is None:
+    raise SystemExit("FAIL authority approval: cannot load final QA verifier")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory(prefix="pr72-authority-approval-") as temporary:
+    root = pathlib.Path(temporary)
+    authority = root / "authority.txt"
+    authority.write_bytes(b"approved authority bytes\n")
+    baseline = hashlib.sha256(b"step zero authority bytes\n").hexdigest()
+    current = hashlib.sha256(authority.read_bytes()).hexdigest()
+    identities = {str(authority): baseline}
+    approval = {
+        "approvedBy": "fixture",
+        "approvedSha256": f"sha256:{current}",
+        "baselineSha256": f"sha256:{baseline}",
+        "changedAtMs": 1,
+        "path": str(authority),
+        "reason": "positive authority approval control",
+    }
+    resolved = []
+    observed = module.verify_baseline_identity_map(
+        root,
+        identities,
+        label="authority",
+        approved_changes=[approval],
+        resolved_changes=resolved,
+    )
+    if observed != {str(authority): current} or resolved != [approval]:
+        raise SystemExit("FAIL authority approval: exact approval did not resolve")
+
+    tampered = dict(approval)
+    tampered["approvedSha256"] = "sha256:" + "0" * 64
+    try:
+        module.verify_baseline_identity_map(
+            root,
+            identities,
+            label="authority",
+            approved_changes=[tampered],
+        )
+    except module.FinalQaError:
+        pass
+    else:
+        raise SystemExit("FAIL authority approval: tampered approvedSha256 was accepted")
+
+print("PASS authority approval exact-match and tampered-hash rejection")
+PY
+}
+
+run_static_gate() {
+  assert_static_paths
+  (
+    cd "$stack_root"
+    export CARGO_NET_OFFLINE=true
+    export npm_config_audit=false
+    export npm_config_offline=true
+    run_source_contract_checks
+    cargo fmt --all -- --check
+    cargo check --workspace --all-targets --all-features
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo build --workspace
+    cargo test --workspace --all-targets --all-features -- --test-threads=1
+    npm --prefix provider/chatgpt-playwright ci
+    npm --prefix provider/chatgpt-playwright test
+    run_r12_fixture_identity_checks
+    run_r12_crosswalk_regeneration_check
+    run_live_matrix_catalog_checks
+    run_authority_approval_checks
+    node scripts/check-provider-normalization-r12.mjs \
+      --inventory contracts/provider-r12/provider-outcome-current.tsv \
+      --catalog contracts/provider-r12/provider-outcome-normalized.tsv \
+      --legal-catalog tests/fixtures/provider-r12/legal-catalog.jsonl \
+      --negative-catalog tests/fixtures/provider-r12/negative-catalog.jsonl \
+      --semantic-replay tests/fixtures/provider-r12/semantic-replay.jsonl
+    run_bash_syntax_checks
+  )
+  git -C "$repo_root" diff --check -- stacks/gpt-webai-slot-pool
+}
+
+run_lifecycle_fixture_replay() {
+  python3 - "$stack_root" <<'PY'
+import base64
+import binascii
+import json
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+stack_root = pathlib.Path(sys.argv[1]).resolve()
+fixture_root = stack_root / "tests/fixtures/lifecycle-r13"
+binary = stack_root / "target/debug/gpt-webai-lifecycle"
+fake_provider_rel = pathlib.Path(
+    "tests/gpt-webai-lifecycle/fixtures/fake-bin/gpt-webai-provider"
+)
+fake_provider = (stack_root / fake_provider_rel).resolve()
+required_cases = {
+    "allocate-dry-run",
+    "allocate-lock-contended",
+    "cleanup-lock-contended",
+    "download-completed",
+    "download-ambiguous-controls",
+    "download-claim-conflict",
+    "download-content-unavailable",
+    "download-controls-absent-required",
+    "download-lock-contended",
+    "download-optional-zero",
+    "download-event-timeout",
+    "download-integrity-failed",
+    "download-pinned-slot-unavailable",
+    "download-provider-blocked",
+    "download-url-rejected",
+    "preflight-lock-contended",
+    "preflight-state-invalid",
+    "release-lock-contended",
+    "release-stop-skipped-owner-alive",
+    "release-explicit-fenced",
+    "release-already-released",
+    "release-fencing-mismatch",
+    "release-tokenless-takeover",
+    "resume-lock-contended",
+    "resume-artifact-required-failed",
+    "resume-claim-conflict",
+    "resume-content-unavailable",
+    "resume-pinned-slot-unavailable",
+    "resume-provider-blocked",
+    "resume-poll-failed",
+    "resume-running",
+    "resume-terminal-success",
+    "resume-terminal-optional-zero",
+    "resume-url-rejected",
+    "run-lock-contended",
+    "run-artifact-required-failed",
+    "run-model-failed-drift",
+    "run-pool-busy",
+    "run-poll-failed",
+    "run-running",
+    "run-send-failed",
+    "run-send-uncertain-reconcile",
+    "run-send-uncertain",
+    "run-slot-readiness-failed",
+    "run-terminal-optional-zero",
+    "run-terminal-success",
+    "run-upload-stale-clear-retry",
+    "run-upload-failed",
+    "show-idle",
+    "show-content-unavailable",
+    "show-claim-conflict",
+    "show-lock-contended",
+    "show-running",
+    "show-provider-blocked",
+    "show-pinned-slot-unavailable",
+    "show-terminal",
+    "show-url-rejected",
+    "state-rebuild-check-only",
+    "state-rebuild-lock-contended",
+    "state-rebuild-match",
+    "status-degraded-unknown",
+    "status-lock-contended",
+}
+top_fields = {
+    "caseId",
+    "env",
+    "expected",
+    "files",
+    "providerScript",
+    "schemaVersion",
+}
+sequence_fields = {"envSequence", "exitSequence"}
+expected_fields = {
+    "eventTypes",
+    "exit",
+    "mutates",
+    "ok",
+    "reason",
+    "receiptOps",
+    "resultKind",
+    "terminal",
+}
+entry_fields = {"expectOperation", "frame", "malformedBytesB64"}
+file_fields = {"contentB64", "relPath"}
+identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def fail(message):
+    raise SystemExit(f"FAIL lifecycle-r13: {message}")
+
+
+def canonical_bytes(value):
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+
+
+def read_canonical_json(path):
+    if path.is_symlink() or not path.is_file():
+        fail(f"not a regular non-symlink: {path}")
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"invalid JSON {path}: {error}")
+    if raw != canonical_bytes(value):
+        fail(f"non-canonical JSON: {path}")
+    return value
+
+
+def safe_relative(value, label):
+    if not isinstance(value, str) or not value or "\\" in value:
+        fail(f"invalid {label}")
+    path = pathlib.PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        fail(f"unsafe {label}: {value}")
+    return path
+
+
+def materialize_files(work, records):
+    if not isinstance(records, list) or len(records) > 8:
+        fail("files must contain 0..8 entries")
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict) or set(record) != file_fields:
+            fail("files entry has an invalid closed field set")
+        relative = safe_relative(record["relPath"], "files[].relPath")
+        if str(relative) in seen:
+            fail(f"duplicate staged file: {relative}")
+        seen.add(str(relative))
+        try:
+            content = base64.b64decode(record["contentB64"], validate=True)
+        except (TypeError, binascii.Error):
+            fail(f"invalid contentB64 for {relative}")
+        target = work.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(target.parent, 0o700)
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+
+
+def resolve_provider_script(case_dir, records, resolved_path):
+    if not isinstance(records, list) or len(records) > 32:
+        fail("providerScript must contain 0..32 entries")
+    resolved = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict) or set(record) != entry_fields:
+            fail(f"providerScript[{index}] has an invalid closed field set")
+        operation = record["expectOperation"]
+        if not isinstance(operation, str) or not operation:
+            fail(f"providerScript[{index}].expectOperation is invalid")
+        frame = record["frame"]
+        malformed = record["malformedBytesB64"]
+        if (frame is None) == (malformed is None):
+            if frame is not None or malformed is not None:
+                fail(f"providerScript[{index}] selects two outputs")
+        if malformed is not None:
+            if not isinstance(malformed, str):
+                fail(f"providerScript[{index}].malformedBytesB64 is invalid")
+            try:
+                base64.b64decode(malformed, validate=True)
+            except binascii.Error:
+                fail(f"providerScript[{index}].malformedBytesB64 is invalid")
+            resolved_frame = None
+        elif frame is None:
+            resolved_frame = None
+        else:
+            relative = safe_relative(frame, "providerScript[].frame")
+            if relative.parts[0] != "provider-frames":
+                fail(f"provider frame is outside provider-frames: {frame}")
+            frame_path = case_dir.joinpath(*relative.parts)
+            read_canonical_json(frame_path)
+            resolved_frame = str(frame_path.resolve())
+        resolved.append(
+            {
+                "expectOperation": operation,
+                "frame": resolved_frame,
+                "malformedBytesB64": malformed,
+            }
+        )
+    resolved_path.write_bytes(canonical_bytes(resolved))
+    os.chmod(resolved_path, 0o600)
+    return len(resolved)
+
+
+def validate_argv(value, label):
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 32
+        or any(not isinstance(item, str) or "\0" in item for item in value)
+    ):
+        fail(f"{label} must contain 1..32 strings")
+    return list(value)
+
+
+def validate_env_map(value, label, *, allow_failpoint):
+    if not isinstance(value, dict) or list(value) != sorted(value):
+        fail(f"{label} must be a sorted object")
+    protected = {"GPT_WEBAI_FAKE_SCRIPT", "GPT_WEBAI_STATE_ROOT", "PATH"}
+    for name, item in value.items():
+        if (
+            not identifier.fullmatch(name)
+            or not isinstance(item, str)
+            or "\0" in item
+            or name in protected
+            or name == "GPT_WEBAI_FAILPOINT" and not allow_failpoint
+        ):
+            fail(f"invalid or protected {label} entry {name}")
+    return dict(value)
+
+
+def read_head_event_id(state_root):
+    path = state_root / "journal/HEAD.json"
+    if not path.exists():
+        return None
+    head = read_canonical_json(path)
+    event_id = head.get("lastEventId")
+    if event_id is not None and not isinstance(event_id, str):
+        fail("HEAD lastEventId is invalid")
+    return event_id
+
+
+def ordered_head_segment(state_root, before, after):
+    if before == after:
+        return []
+    events = {}
+    for path in (state_root / "journal/events").glob("*.json"):
+        event = read_canonical_json(path)
+        event_id = event.get("eventId")
+        if not isinstance(event_id, str) or event_id in events:
+            fail(f"duplicate or invalid journal event: {path}")
+        events[event_id] = event
+    if after not in events or before is not None and before not in events:
+        fail("HEAD segment endpoint is absent from the journal")
+
+    indegree = {}
+    children = {event_id: [] for event_id in events}
+    for event_id, event in events.items():
+        dependencies = set(event.get("sourceEventIds", []))
+        predecessor = event.get("predecessorEventId")
+        if predecessor is not None:
+            dependencies.add(predecessor)
+        if any(dependency not in events for dependency in dependencies):
+            fail(f"journal event has a missing dependency: {event_id}")
+        indegree[event_id] = len(dependencies)
+        for dependency in dependencies:
+            children[dependency].append(event_id)
+
+    ready = sorted(
+        (events[event_id]["createdAtMs"], event_id)
+        for event_id, degree in indegree.items()
+        if degree == 0
+    )
+    ordered = []
+    while ready:
+        _, event_id = ready.pop(0)
+        ordered.append(event_id)
+        for child in children[event_id]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append((events[child]["createdAtMs"], child))
+                ready.sort()
+    if len(ordered) != len(events):
+        fail("journal event dependency cycle")
+    start = 0 if before is None else ordered.index(before) + 1
+    end = ordered.index(after) + 1
+    if end < start:
+        fail("HEAD moved backwards across a failpoint step")
+    return ordered[start:end]
+
+
+def command_argv(argv):
+    output = list(argv)
+    for index, value in enumerate(output[:-1]):
+        if value == "--provider-bin" and output[index + 1] == str(fake_provider_rel):
+            output[index + 1] = str(fake_provider)
+    return output
+
+
+def receipt_index(state_root):
+    index = {}
+    for path in state_root.rglob("*.json"):
+        if path.is_symlink() or not path.is_file():
+            fail(f"unsafe JSON evidence path: {path}")
+        try:
+            value = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("receiptId"), str):
+            continue
+        receipt_id = value["receiptId"]
+        operation = value.get("operation")
+        if not isinstance(operation, str) or not operation:
+            fail(f"receipt without operation: {path}")
+        if receipt_id in index:
+            fail(f"duplicate receiptId {receipt_id}")
+        index[receipt_id] = operation
+    return index
+
+
+def run_case(case_path):
+    case_dir = case_path.parent
+    case = read_canonical_json(case_path)
+    if not isinstance(case, dict):
+        fail(f"case root is not an object: {case_path}")
+    argv_keys = {name for name in ("argv", "argvSequence") if name in case}
+    present_sequence_fields = sequence_fields & set(case)
+    if (
+        len(argv_keys) != 1
+        or "argv" in argv_keys and present_sequence_fields
+        or set(case) != top_fields | argv_keys | present_sequence_fields
+    ):
+        fail(f"invalid closed case field set: {case_path}")
+    case_id = case["caseId"]
+    if (
+        not isinstance(case_id, str)
+        or not identifier.fullmatch(case_id)
+        or case_id != case_dir.name
+    ):
+        fail(f"caseId does not match its directory: {case_path}")
+    if case["schemaVersion"] != "pr72.lifecycle-fixture.r13.v1":
+        fail(f"wrong schemaVersion: {case_id}")
+    case_env = validate_env_map(case["env"], f"env for {case_id}", allow_failpoint=False)
+    expected = case["expected"]
+    if not isinstance(expected, dict) or set(expected) != expected_fields:
+        fail(f"expected has an invalid closed field set: {case_id}")
+    if (
+        not isinstance(expected["exit"], int)
+        or isinstance(expected["exit"], bool)
+        or not 0 <= expected["exit"] <= 255
+        or not isinstance(expected["resultKind"], str)
+        or not isinstance(expected["ok"], bool)
+        or not isinstance(expected["terminal"], bool)
+        or not isinstance(expected["mutates"], bool)
+        or expected["reason"] is not None
+        and not isinstance(expected["reason"], str)
+        or not isinstance(expected["eventTypes"], list)
+        or any(not isinstance(item, str) or not item for item in expected["eventTypes"])
+        or not isinstance(expected["receiptOps"], list)
+        or any(not isinstance(item, str) or not item for item in expected["receiptOps"])
+    ):
+        fail(f"expected has invalid field values: {case_id}")
+    if "argv" in case:
+        sequence = [validate_argv(case["argv"], "argv")]
+        env_sequence = [{}]
+        exit_sequence = [expected["exit"]]
+    else:
+        if (
+            not isinstance(case["argvSequence"], list)
+            or not 1 <= len(case["argvSequence"]) <= 16
+        ):
+            fail(f"argvSequence must contain 1..16 steps: {case_id}")
+        sequence = [
+            validate_argv(argv, f"argvSequence[{index}]")
+            for index, argv in enumerate(case["argvSequence"])
+        ]
+        raw_env_sequence = case.get("envSequence", [{} for _ in sequence])
+        if not isinstance(raw_env_sequence, list) or len(raw_env_sequence) != len(sequence):
+            fail(f"envSequence length mismatch: {case_id}")
+        env_sequence = [
+            validate_env_map(value, f"envSequence[{index}] for {case_id}", allow_failpoint=True)
+            for index, value in enumerate(raw_env_sequence)
+        ]
+        if "exitSequence" in case:
+            exit_sequence = case["exitSequence"]
+            if (
+                not isinstance(exit_sequence, list)
+                or len(exit_sequence) != len(sequence)
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 0 <= value <= 255
+                    for value in exit_sequence
+                )
+                or exit_sequence[-1] != expected["exit"]
+            ):
+                fail(f"invalid exitSequence: {case_id}")
+        else:
+            exit_sequence = [0 for _ in sequence]
+            exit_sequence[-1] = expected["exit"]
+
+    with tempfile.TemporaryDirectory(prefix=f"pr72-lifecycle-{case_id}-") as temporary:
+        temp = pathlib.Path(temporary)
+        state_root = temp / "state"
+        work = temp / "work"
+        home = temp / "home"
+        for directory in (state_root, work, home):
+            directory.mkdir(mode=0o700)
+        materialize_files(work, case["files"])
+        if case_id == "preflight-state-invalid":
+            # R28 requires a real state-store failure from a fresh empty root.
+            # An invalid final-component mode trips the production 0700 check
+            # without injecting any journal, session, or projection record.
+            os.chmod(state_root, 0o500)
+        script_path = temp / "providerScript.resolved.json"
+        script_length = resolve_provider_script(
+            case_dir, case["providerScript"], script_path
+        )
+        environment = {
+            "HOME": str(home),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": os.pathsep.join(
+                [
+                    str(fake_provider.parent),
+                    os.environ.get("PATH", "/usr/bin:/bin"),
+                ]
+            ),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "GPT_WEBAI_FAKE_SCRIPT": str(script_path),
+            "GPT_WEBAI_STATE_ROOT": str(state_root),
+        }
+        environment.update(case_env)
+        envelopes = []
+        contributed_event_ids = []
+        contributed_receipt_ids = []
+        for index, argv in enumerate(sequence):
+            step_environment = dict(environment)
+            step_environment.update(env_sequence[index])
+            step_failpoint = env_sequence[index].get("GPT_WEBAI_FAILPOINT")
+            expected_exit = exit_sequence[index]
+            if (expected_exit == 99) != (step_failpoint is not None):
+                fail(
+                    f"{case_id} command {index} failpoint/exitSequence disagreement"
+                )
+            before_head = read_head_event_id(state_root)
+            before_receipts = receipt_index(state_root)
+            completed = subprocess.run(
+                [str(binary), *command_argv(argv)],
+                cwd=work,
+                env=step_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=45,
+                check=False,
+            )
+            exit_code = completed.returncode if completed.returncode >= 0 else 128 - completed.returncode
+            if exit_code != expected_exit:
+                fail(
+                    f"{case_id} command {index} exit={exit_code} expected={expected_exit} "
+                    f"stdout={completed.stdout.decode('utf-8', 'replace')[:1000]} "
+                    f"stderr={completed.stderr.decode('utf-8', 'replace')[:1000]}"
+                )
+            after_head = read_head_event_id(state_root)
+            after_receipts = receipt_index(state_root)
+            if expected_exit == 99:
+                if completed.stdout:
+                    fail(f"{case_id} command {index} failpoint stdout is not empty")
+                expected_stderr = f"failpoint:{step_failpoint}\n".encode("utf-8")
+                if completed.stderr != expected_stderr:
+                    fail(f"{case_id} command {index} failpoint stderr is not exact")
+                if after_receipts != before_receipts:
+                    fail(f"{case_id} command {index} failpoint created a receipt")
+                contributed_event_ids.extend(
+                    ordered_head_segment(state_root, before_head, after_head)
+                )
+                continue
+
+            try:
+                envelope = json.loads(completed.stdout)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                fail(
+                    f"{case_id} command {index} stdout is not one JSON object: {error} "
+                    f"exit={exit_code} "
+                    f"stdout={completed.stdout.decode('utf-8', 'replace')[:1000]} "
+                    f"stderr={completed.stderr.decode('utf-8', 'replace')[:1000]}"
+                )
+            if completed.stdout != canonical_bytes(envelope):
+                fail(f"{case_id} command {index} stdout is not canonical JSON plus LF")
+            if envelope.get("schema") != "gpt-webai.lifecycle.r13.v1":
+                fail(f"{case_id} command {index} emitted a non-R13 envelope")
+            envelopes.append(envelope)
+            contributed_event_ids.extend(envelope["eventIds"])
+            contributed_receipt_ids.extend(envelope["receiptIds"])
+
+        if not envelopes or exit_sequence[-1] == 99:
+            fail(f"{case_id} final step must emit the expected envelope")
+        final = envelopes[-1]
+        for field in ("resultKind", "ok", "terminal", "reason"):
+            if final.get(field) != expected[field]:
+                fail(
+                    f"{case_id} {field}={final.get(field)!r} expected={expected[field]!r}"
+                )
+        event_ids = contributed_event_ids
+        receipt_ids = contributed_receipt_ids
+        if len(event_ids) != len(set(event_ids)):
+            fail(f"{case_id} emitted duplicate event IDs")
+        event_types = []
+        for event_id in event_ids:
+            event = read_canonical_json(state_root / "journal/events" / f"{event_id}.json")
+            if event.get("eventId") != event_id or not isinstance(event.get("eventType"), str):
+                fail(f"{case_id} event identity mismatch: {event_id}")
+            event_types.append(event["eventType"])
+        receipts = receipt_index(state_root)
+        try:
+            receipt_ops = [receipts[receipt_id] for receipt_id in receipt_ids]
+        except KeyError as error:
+            fail(f"{case_id} receipt file is missing: {error.args[0]}")
+        if event_types != expected["eventTypes"]:
+            fail(
+                f"{case_id} eventTypes mismatch\nactual={event_types!r}\n"
+                f"expected={expected['eventTypes']!r}"
+            )
+        if receipt_ops != expected["receiptOps"]:
+            fail(
+                f"{case_id} receiptOps mismatch\nactual={receipt_ops!r}\n"
+                f"expected={expected['receiptOps']!r}"
+            )
+        if bool(event_ids) != expected["mutates"]:
+            fail(f"{case_id} mutates oracle disagrees with emitted events")
+        counter_path = pathlib.Path(str(script_path) + ".counter")
+        consumed = int(counter_path.read_text(encoding="ascii")) if counter_path.exists() else 0
+        if consumed != script_length:
+            fail(
+                f"{case_id} consumed {consumed} provider frames; expected {script_length}"
+            )
+        if case_id == "preflight-state-invalid":
+            os.chmod(state_root, 0o700)
+    print(f"PASS lifecycle-r13 {case_id}")
+    return case_id
+
+
+if not fixture_root.is_dir() or fixture_root.is_symlink():
+    fail("fixture root is missing or unsafe")
+case_paths = sorted(fixture_root.glob("*/case.json"), key=lambda path: path.as_posix())
+if not case_paths:
+    fail("no lifecycle-r13 case.json files found")
+case_ids = []
+for case_path in case_paths:
+    case_id = run_case(case_path)
+    if case_id in case_ids:
+        fail(f"duplicate caseId: {case_id}")
+    case_ids.append(case_id)
+missing = sorted(required_cases - set(case_ids))
+if missing:
+    fail("missing required explicit cases: " + ", ".join(missing))
+print(f"PASS lifecycle-r13 fixtures={len(case_ids)}")
+PY
+}
+
+run_fake_only() {
+  assert_fake_paths
+  (
+    cd "$stack_root"
+    python3 scripts/check-cli-fixtures-r13.py \
+      --accepted tests/fixtures/cli-r13/accepted.jsonl \
+      --rejected tests/fixtures/cli-r13/rejected.jsonl \
+      --binary target/debug/gpt-webai-lifecycle
+    run_lifecycle_fixture_replay
+  )
+}
+
+run_full_only() {
+  assert_full_paths
+  command -v docker >/dev/null 2>&1 || fail 'docker is required for the full gate'
+  docker info >/dev/null 2>&1 || fail 'docker daemon is unavailable for the full gate'
+
+  (
+    set -euo pipefail
+    local full_root suffix project container_prefix container image docker_wrapper
+    local real_docker before_slots after_slots run_id request_id prompt attachment
+    full_root="$(mktemp -d "${TMPDIR:-/tmp}/gpt-webai-r13-full.XXXXXX")"
+    chmod 0700 "$full_root"
+    suffix="$(printf '%s' "$$-$(date +%s%N)" | sha256sum | cut -c1-12)"
+    project="pr72-r13-full-$suffix"
+    container_prefix="pr72-r13-full-$suffix"
+    container="$container_prefix-slot-01"
+    image="home-server/gpt-webai-slot-r13-fake:$suffix"
+    real_docker="$(command -v docker)"
+    docker_wrapper="$full_root/docker"
+    request_id="request-full-$suffix"
+    run_id="run-full-$suffix"
+    prompt="$full_root/prompt.txt"
+    attachment="$full_root/file-A.txt"
+
+    cleanup_full_gate() {
+      local cleanup_rc=$?
+      set +e
+      "$real_docker" compose -p "$project" \
+        -f "$stack_root/compose.yaml" -f "$stack_root/compose.fake.yaml" \
+        down --volumes --remove-orphans >/dev/null 2>&1
+      "$real_docker" image rm "$image" >/dev/null 2>&1
+      if [[ -n "$full_root" && -d "$full_root" ]]; then
+        rm -rf -- "$full_root"
+      fi
+      return "$cleanup_rc"
+    }
+    trap cleanup_full_gate EXIT INT TERM
+
+    install -d -m 0700 "$full_root/state"
+    python3 - "$prompt" "$attachment" "$docker_wrapper" "$real_docker" "$project" <<'PY'
+import os
+import pathlib
+import shlex
+import sys
+
+prompt = pathlib.Path(sys.argv[1])
+attachment = pathlib.Path(sys.argv[2])
+wrapper = pathlib.Path(sys.argv[3])
+real_docker = shlex.quote(sys.argv[4])
+fake_project = shlex.quote(sys.argv[5])
+prompt.write_bytes(b"PR72 containerized fake R13 round trip\n")
+attachment.write_bytes((b"PR72-FULL-FILE-A\n" * 4)[:64])
+wrapper.write_text(
+    """#!/usr/bin/env bash
+set -euo pipefail
+real_docker=__REAL_DOCKER__
+fake_project=__FAKE_PROJECT__
+args=(\"$@\")
+if [[ ${args[0]:-} == compose ]]; then
+  for ((index=1; index < ${#args[@]} - 1; index++)); do
+    if [[ ${args[index]} == -p && ${args[index + 1]} == gpt-webai-slot-pool ]]; then
+      args[index + 1]=$fake_project
+    fi
+  done
+fi
+exec \"$real_docker\" \"${args[@]}\"
+""".replace("__REAL_DOCKER__", real_docker).replace(
+        "__FAKE_PROJECT__", fake_project
+    ),
+    encoding="utf-8",
+    newline="\n",
+)
+for path, mode in ((prompt, 0o600), (attachment, 0o600), (wrapper, 0o700)):
+    os.chmod(path, mode)
+PY
+
+    export GPT_WEBAI_STATE_ROOT="$full_root/state"
+    export GPT_WEBAI_SLOT_COUNT=1
+    export GPT_WEBAI_SLOT_MODE=docker
+    export GPT_WEBAI_SLOT_CONTAINER_PREFIX="$container_prefix-"
+    export GPT_WEBAI_RUST_STATUS_PROVIDER_CHECK=false
+    export GPT_WEBAI_SLOT_UID="$(id -u)"
+    export GPT_WEBAI_SLOT_GID="$(id -g)"
+    export GPT_WEBAI_FAKE_IMAGE="$image"
+    export GPT_WEBAI_FAKE_PROVIDER_PATH="$stack_root/tests/gpt-webai-lifecycle/fixtures/fake-bin/gpt-webai-provider"
+    export GPT_WEBAI_FAKE_CONTAINER_PREFIX="$container_prefix"
+    export COMPOSE_FILE="$stack_root/compose.yaml:$stack_root/compose.fake.yaml"
+    export PR72_OWNER_ID="owner_$(printf '%s' "$suffix-owner" | sha256sum | cut -d' ' -f1)"
+    export PR72_OWNER_GENERATION=1
+    export PR72_RUNTIME_INCARNATION="runtime_$(printf '%s' "$suffix-runtime" | sha256sum | cut -d' ' -f1)"
+
+    before_slots="$($real_docker ps -a --filter 'name=^/gpt-webai-slot-' \
+      --format '{{.Names}}\t{{.Status}}\t{{.ID}}' | LC_ALL=C sort)"
+
+    "$real_docker" compose -p "$project" \
+      -f "$stack_root/compose.yaml" -f "$stack_root/compose.fake.yaml" \
+      config --format json >"$full_root/compose.rendered.json"
+    python3 - "$full_root/compose.rendered.json" "$GPT_WEBAI_STATE_ROOT" \
+      "$GPT_WEBAI_FAKE_PROVIDER_PATH" "$container" "$image" <<'PY'
+import json
 import pathlib
 import sys
 
-patterns = ["/tmp/" + "gpt-webai", "mktemp" + " -t"]
-for path_text in sys.argv[1:]:
-    path = pathlib.Path(path_text)
-    text = path.read_text(encoding="utf-8")
-    for pattern in patterns:
-        if pattern in text:
-            print(f"forbidden static string {pattern!r} in {path}")
-            sys.exit(1)
+document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+state_root, fake_provider, container, image = sys.argv[2:]
+service = document["services"]["gpt-webai-slot-01"]
+assert service["container_name"] == container
+assert service["image"] == image
+assert service["network_mode"] == "none"
+assert service["restart"] == "no"
+labels = service["labels"]
+assert set(labels) == {
+    "pr72.gpt-webai.owner-generation",
+    "pr72.gpt-webai.owner-id",
+    "pr72.gpt-webai.runtime-incarnation",
+}
+volumes = {item["target"]: item for item in service["volumes"]}
+assert set(volumes) == {
+    "/state/slot-01",
+    "/broker-attachments",
+    "/broker-prompts",
+    "/broker-artifacts",
+    "/usr/local/bin/node",
+}
+assert volumes["/state/slot-01"]["source"] == f"{state_root}/slots/slot-01/state"
+assert volumes["/broker-attachments"].get("read_only") is True
+assert volumes["/broker-prompts"].get("read_only") is True
+assert volumes["/broker-artifacts"]["source"] == f"{state_root}/artifacts"
+assert volumes["/usr/local/bin/node"]["source"] == fake_provider
+assert volumes["/usr/local/bin/node"].get("read_only") is True
 PY
-}
 
-run_nonnetwork_command() {
-  local out="$1" err="$2" status
-  shift 2
-  set +e
-  "$@" > "$out" 2> "$err"
-  status=$?
-  set -e
-  printf '%s' "$status"
-}
+    "$real_docker" compose -p "$project" \
+      -f "$stack_root/compose.yaml" -f "$stack_root/compose.fake.yaml" \
+      build gpt-webai-slot-01
 
-write_lock_holder() {
-  local name="$1" holder="$2" pid="$3" boot="$4"
-  mkdir -p "$state_dir/locks/$name.lock"
-  cat > "$state_dir/locks/$name.lock/holder" <<EOF
-holder=$holder
-boot_id=$boot
-pid=$pid
-EOF
-}
-
-reset_slot_case() {
-  reset_session_case "$1"
-  slot_mode=fake
-  slot_count=2
-}
-
-slot_broker() {
-  : "${GPT_WEBAI_TEST_ROOT:?set GPT_WEBAI_TEST_ROOT}"
-  test_root="$GPT_WEBAI_TEST_ROOT"
-  safe_rm_rf "$test_root"
-  mkdir -p "$test_root"
-  require_supervisor
-
-  reset_slot_case slot-attachment-redaction
-  attachment="$case_root/original secret basename.txt"
-  printf 'slot attachment payload\n' > "$attachment"
-  write_fake_sequence send-sequence sid:sid-slot-redact
-  write_fake_sequence poll-sequence done:redact
-  run_supervisor run --kind pro --file "$attachment" --prompt 'slot redact' > "$case_root/out" 2> "$case_root/err"
-  assert_contains '"sessionId":"sid-slot-redact"' "$case_root/out"
-  assert_contains 'BROWSER_AGENT_HOME='"$state_dir"'/slots/slot-01/state CDP_PORT=9223' "$fake_agbrowse_root/browser-agent-home-calls"
-  assert_contains '--file /broker-attachments/' "$agbrowse_log"
-  assert_contains '/files/001-' "$agbrowse_log"
-  assert_not_contains 'original secret basename' "$agbrowse_log"
-  assert_not_contains "$attachment" "$agbrowse_log"
-  prompt_file="$(find "$state_dir/requests" -name prompt.txt -print -quit)"
-  assert_file "$prompt_file"
-  assert_contains 'ATTACHMENT_ACCESS_GATE:' "$prompt_file"
-  assert_contains 'ATTACHMENT_MISSING' "$prompt_file"
-  assert_contains '001-' "$prompt_file"
-  assert_not_contains "$attachment" "$prompt_file"
-  assert_session_record_contains sid-slot-redact 'slotId=slot-01'
-
-  reset_slot_case slot-attachment-missing-envelope
-  attachment_canary="$case_root/canary.md"
-  printf 'ATTACHMENT_CANARY_FAKE\n' > "$attachment_canary"
-  write_fake_sequence send-sequence sid:sid-attachment-missing
-  write_fake_sequence poll-sequence done-attachment-missing
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --file "$attachment_canary" --prompt 'read canary')"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" provider.attachment_unavailable recovering
-  json_field_absent "$case_root/out" resumeCommand
-  assert_command_count 'web-ai send' 1
-  assert_command_count 'web-ai poll' 1
-  assert_session_record_contains sid-attachment-missing 'status=attachment_missing'
-  assert_session_record_contains sid-attachment-missing 'attachmentCount=1'
-  assert_no_web_ai_stop
-
-  reset_slot_case slot-attachment-missing-resume
-  mkdir -p "$state_dir/sessions"
-  cat > "$state_dir/sessions/slot-attached-running.record" <<'EOF'
-sessionId=sid-attachment-resume
-kind=pro
-model=pro
-effort=extended
-fingerprint=slot-attached-running
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-attachmentCount=1
-status=running
-EOF
-  write_fake_sequence resume-sequence resumed
-  write_fake_sequence poll-sequence done-attachment-missing
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor resume --kind pro --session sid-attachment-resume)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" provider.attachment_unavailable recovering
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai sessions resume' 1
-  assert_command_count 'web-ai poll' 1
-  assert_session_record_contains sid-attachment-resume 'status=attachment_missing'
-  assert_session_record_contains sid-attachment-resume 'attachmentCount=1'
-  assert_no_web_ai_stop
-
-  reset_slot_case slot-second-when-first-busy
-  write_lock_holder runtime-slot-slot-01 runtime "$$" boot-a
-  write_fake_sequence send-sequence sid:sid-slot-two
-  write_fake_sequence poll-sequence done:slot-two
-  run_supervisor run --kind pro --prompt 'slot two' > "$case_root/out" 2> "$case_root/err"
-  assert_contains '"sessionId":"sid-slot-two"' "$case_root/out"
-  assert_contains 'BROWSER_AGENT_HOME='"$state_dir"'/slots/slot-02/state CDP_PORT=9224' "$fake_agbrowse_root/browser-agent-home-calls"
-  assert_session_record_contains sid-slot-two 'slotId=slot-02'
-
-  reset_slot_case slot-missing-holder-lock-not-stolen
-  mkdir -p "$state_dir/locks/runtime-slot-slot-01.lock"
-  write_fake_sequence send-sequence sid:sid-slot-missing-holder
-  write_fake_sequence poll-sequence done:missing-holder
-  run_supervisor run --kind pro --prompt 'slot missing holder' > "$case_root/out" 2> "$case_root/err"
-  assert_contains '"sessionId":"sid-slot-missing-holder"' "$case_root/out"
-  assert_contains 'BROWSER_AGENT_HOME='"$state_dir"'/slots/slot-02/state CDP_PORT=9224' "$fake_agbrowse_root/browser-agent-home-calls"
-  assert_session_record_contains sid-slot-missing-holder 'slotId=slot-02'
-
-  local blocked_status
-  for blocked_status in repairing warming reseed_login degraded; do
-    reset_slot_case "slot-skip-$blocked_status"
-    mkdir -p "$state_dir/slots"
-    printf 'status=%s\nslotId=slot-01\n' "$blocked_status" > "$state_dir/slots/slot-01.state"
-    write_status_sequence reachable
-    write_fake_sequence send-sequence "sid:sid-slot-$blocked_status"
-    write_fake_sequence poll-sequence "done:skip-$blocked_status"
-    run_supervisor run --kind pro --prompt "skip $blocked_status slot" > "$case_root/out" 2> "$case_root/err"
-    assert_contains "\"sessionId\":\"sid-slot-$blocked_status\"" "$case_root/out"
-    assert_contains 'BROWSER_AGENT_HOME='"$state_dir"'/slots/slot-02/state CDP_PORT=9224' "$fake_agbrowse_root/browser-agent-home-calls"
-    assert_session_record_contains "sid-slot-$blocked_status" 'slotId=slot-02'
-  done
-
-  reset_slot_case slot-ensure-routes-to-slot
-  write_status_sequence unreachable
-  exit_code="$(GPT_WEBAI_SLOT_REPAIR_MAX_ATTEMPTS=1 run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor browser ensure --slot slot-01)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" browser.cdp_unreachable recovering
-  json_string_field_equals "$case_root/out" nextCommand 'gpt-webai-lifecycle browser ensure --slot slot-01'
-  json_field_absent "$case_root/out" resumeCommand
-  assert_file "$state_dir/slots/slot-01.repair"
-  assert_contains 'attempts=1' "$state_dir/slots/slot-01.repair"
-  assert_contains 'status=degraded' "$state_dir/slots/slot-01.repair"
-  assert_contains 'status=degraded' "$state_dir/slots/slot-01.state"
-
-  reset_slot_case slot-repair-backoff
-  write_status_sequence unreachable unreachable
-  exit_code="$(GPT_WEBAI_SLOT_REPAIR_MAX_ATTEMPTS=3 GPT_WEBAI_SLOT_REPAIR_BACKOFF_SECONDS=3600 run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor browser ensure --slot slot-01)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" browser.cdp_unreachable recovering
-  assert_contains 'attempts=1' "$state_dir/slots/slot-01.repair"
-  assert_contains 'status=repairing' "$state_dir/slots/slot-01.repair"
-  exit_code="$(GPT_WEBAI_SLOT_REPAIR_MAX_ATTEMPTS=3 GPT_WEBAI_SLOT_REPAIR_BACKOFF_SECONDS=3600 run_nonnetwork_command "$case_root/backoff.out" "$case_root/backoff.err" run_supervisor browser ensure --slot slot-01)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/backoff.out" browser.cdp_unreachable recovering
-  json_field_absent "$case_root/backoff.out" resumeCommand
-  assert_contains 'attempts=1' "$state_dir/slots/slot-01.repair"
-  run_supervisor status > "$case_root/status.out" 2> "$case_root/status.err"
-  assert_contains 'slot_01_status=repairing' "$case_root/status.out"
-  assert_contains 'slot_01_repair_attempts=1' "$case_root/status.out"
-  assert_contains 'slot_01_repair_max_attempts=3' "$case_root/status.out"
-  assert_contains 'slot_01_next_retry_at=' "$case_root/status.out"
-
-  reset_slot_case slot-browser-ensure-requires-slot
-  write_status_sequence reachable
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor browser ensure)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.slot_required recovering
-  assert_command_count 'web-ai status' 0
-  assert_command_count 'agbrowse start' 0
-
-  reset_slot_case slot-browser-ensure-login-required
-  fake_auth_state=login_required
-  write_status_sequence web-ai-ready
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor browser ensure --slot slot-01)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" auth.needs_login needs_user_action
-  assert_contains 'status=reseed_login' "$state_dir/slots/slot-01.state"
-  assert_contains 'reason=auth.needs_login' "$state_dir/slots/slot-01.state"
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_slot_case slot-run-login-required-no-send
-  fake_auth_state=login_required
-  write_status_sequence web-ai-ready
-  write_fake_sequence send-sequence fail-if-called
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'must not send while logged out')"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" auth.needs_login needs_user_action
-  assert_contains 'status=reseed_login' "$state_dir/slots/slot-01.state"
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_slot_case slot-pool-queued
-  write_lock_holder runtime-slot-slot-01 runtime "$$" boot-a
-  write_lock_holder runtime-slot-slot-02 runtime "$$" boot-a
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'queued slot')"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.pool_busy queued
-  queued_fp="$(request_fingerprint_fixture pro pro extended 'queued slot')"
-  json_string_field_equals "$case_root/out" nextCommand "gpt-webai-lifecycle queue resume --request $queued_fp"
-  assert_command_count 'web-ai send' 0
-  rm -rf "$state_dir/locks/runtime-slot-slot-01.lock" "$state_dir/locks/runtime-slot-slot-02.lock"
-  write_fake_sequence send-sequence sid:sid-queued-resume
-  write_fake_sequence poll-sequence done:queued-resume
-  run_supervisor queue resume --request "$queued_fp" > "$case_root/resume.out" 2> "$case_root/resume.err"
-  assert_contains '"sessionId":"sid-queued-resume"' "$case_root/resume.out"
-  assert_command_count 'web-ai send' 1
-
-  reset_slot_case slot-resume-lock-busy
-  mkdir -p "$state_dir/sessions"
-  cat > "$state_dir/sessions/slot-existing.record" <<'EOF'
-sessionId=sid-slot-resume
-kind=pro
-model=pro
-effort=extended
-fingerprint=slot-existing
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-status=done
-EOF
-  write_lock_holder runtime-slot-slot-01 runtime "$$" boot-a
-  write_fake_sequence poll-sequence done:must-not-poll
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor resume --kind pro --session sid-slot-resume)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" session.running running
-  assert_resume_command "$case_root/out" pro sid-slot-resume
-  assert_command_count 'web-ai sessions resume' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_slot_case slot-browser-ensure-lock-busy
-  write_lock_holder runtime-slot-slot-01 runtime "$$" boot-a
-  write_status_sequence reachable
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor browser ensure --slot slot-01)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.busy recovering
-  assert_command_count 'web-ai status' 0
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_slot_case slot-browser-ensure-active-record-busy
-  mkdir -p "$state_dir/sessions"
-  cat > "$state_dir/sessions/slot-active.record" <<'EOF'
-sessionId=sid-slot-active
-kind=pro
-model=pro
-effort=extended
-fingerprint=slot-active
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-status=running
-EOF
-  write_status_sequence reachable
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor browser ensure --slot slot-01)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.busy recovering
-  assert_command_count 'web-ai status' 0
-  run_supervisor status > "$case_root/status.out" 2> "$case_root/status.err"
-  assert_contains 'slot_01_status=busy' "$case_root/status.out"
-
-  reset_session_case slot-backed-pool-disabled-resume
-  slot_mode=off
-  mkdir -p "$state_dir/sessions"
-  cat > "$state_dir/sessions/slot-disabled-resume.record" <<'EOF'
-sessionId=sid-slot-disabled-resume
-kind=pro
-model=pro
-effort=extended
-fingerprint=slot-disabled-resume
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-status=done
-EOF
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor resume --kind pro --session sid-slot-disabled-resume)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.pool_unavailable recovering
-  assert_resume_command "$case_root/out" pro sid-slot-disabled-resume
-  assert_command_count 'web-ai sessions resume' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_session_case slot-backed-pool-disabled-run
-  slot_mode=off
-  mkdir -p "$state_dir/sessions"
-  disabled_prompt='slot backed disabled run'
-  disabled_fp="$(request_fingerprint_fixture pro pro extended "$disabled_prompt")"
-  cat > "$state_dir/sessions/$disabled_fp.record" <<EOF
-sessionId=sid-slot-disabled-run
-kind=pro
-model=pro
-effort=extended
-fingerprint=$disabled_fp
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-status=done
-EOF
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt "$disabled_prompt")"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.pool_unavailable recovering
-  assert_resume_command "$case_root/out" pro sid-slot-disabled-run
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_session_case slot-backed-pool-disabled-queue
-  slot_mode=off
-  mkdir -p "$state_dir/sessions"
-  cat > "$state_dir/sessions/slot-disabled-queue.record" <<'EOF'
-sessionId=sid-slot-disabled-queue
-kind=pro
-model=pro
-effort=extended
-fingerprint=slot-disabled-queue
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-status=queued
-EOF
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor queue resume --request slot-disabled-queue)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.pool_unavailable recovering
-  assert_resume_command "$case_root/out" pro sid-slot-disabled-queue
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_session_case slot-backed-pool-disabled-queue-sendless
-  slot_mode=off
-  mkdir -p "$state_dir/sessions"
-  cat > "$state_dir/sessions/slot-disabled-sendless.record" <<'EOF'
-sessionId=
-kind=pro
-model=pro
-effort=extended
-fingerprint=slot-disabled-sendless
-slotId=slot-01
-slotContainer=gpt-webai-slot-01
-status=queued
-EOF
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor queue resume --request slot-disabled-sendless)"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" slot.pool_unavailable recovering
-  json_field_absent "$case_root/out" resumeCommand
-  assert_command_count 'web-ai send' 0
-  assert_command_count 'web-ai poll' 0
-
-  reset_slot_case auth-seed-attachment-rejected
-  mkdir -p "$state_dir/auth-seed"
-  printf 'cookie-like-secret\n' > "$state_dir/auth-seed/seed.txt"
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --file "$state_dir/auth-seed/seed.txt" --prompt 'must reject seed')"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" input.invalid_file needs_user_action
-  assert_command_count 'web-ai send' 0
-
-  reset_slot_case slot-send-no-session-retries
-  unknown_fp="$(request_fingerprint_fixture pro pro extended 'slot no sid retry')"
-  write_fake_sequence send-sequence crash-no-sid provider-missing-fields sid:sid-after-retry
-  write_fake_sequence poll-sequence done:no-session-recovered
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'slot no sid retry')"
-  assert_eq "$exit_code" 0
-  assert_contains '"sessionId":"sid-after-retry"' "$case_root/out"
-  assert_command_count 'web-ai send' 3
-  assert_command_count 'web-ai poll' 1
-  assert_contains 'status=done' "$state_dir/sessions/$unknown_fp.record"
-  assert_session_record_contains sid-after-retry 'slotId=slot-01'
-  assert_event_reason send.unknown_session
-  run_supervisor status > "$case_root/status.out" 2> "$case_root/status.err"
-  assert_contains 'slot_01_status=ready' "$case_root/status.out"
-
-  reset_slot_case slot-send-no-session-retry-exhausted
-  send_session_retry_delays="0 0"
-  unknown_fp="$(request_fingerprint_fixture pro pro extended 'slot no sid exhausted')"
-  write_fake_sequence send-sequence crash-no-sid provider-missing-fields crash-no-sid sid:sid-exhausted-rerun
-  exit_code="$(run_nonnetwork_command "$case_root/out" "$case_root/err" run_supervisor run --kind pro --prompt 'slot no sid exhausted')"
-  assert_eq "$exit_code" 0
-  assert_success_envelope_fields "$case_root/out" send.unknown_session recovering
-  json_field_absent "$case_root/out" resumeCommand
-  assert_command_count 'web-ai send' 3
-  assert_contains 'status=send_unknown_session' "$state_dir/sessions/$unknown_fp.record"
-  run_supervisor status > "$case_root/status.out" 2> "$case_root/status.err"
-  assert_contains 'slot_01_status=ready' "$case_root/status.out"
-  write_fake_sequence poll-sequence done:exhausted-rerun
-  exit_code="$(run_nonnetwork_command "$case_root/reuse.out" "$case_root/reuse.err" run_supervisor run --kind pro --prompt 'slot no sid exhausted')"
-  assert_eq "$exit_code" 0
-  assert_contains '"sessionId":"sid-exhausted-rerun"' "$case_root/reuse.out"
-  assert_command_count 'web-ai send' 4
-  assert_command_count 'web-ai poll' 1
-
-  printf 'PASS slot-broker\n'
-  printf 'cleanup: fake slot broker cases retained under %s; no real Docker/Chrome/ChatGPT used\n' "$test_root"
-}
-
-write_fake_wrapper_bins() {
-  fake_wrapper_bin="$test_root/fake-wrapper-bin"
-  supervisor_log="$test_root/fake-supervisor.log"
-  agbrowse_log="$test_root/forbidden-agbrowse.log"
-  mkdir -p "$fake_wrapper_bin"
-
-  cat > "$fake_wrapper_bin/gpt-webai-lifecycle" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-log="${GPT_WEBAI_FAKE_SUPERVISOR_LOG:?set GPT_WEBAI_FAKE_SUPERVISOR_LOG}"
-kind=""
-prompt=""
-files=()
-display_prompt=""
-
-printf 'gpt-webai-lifecycle' >> "$log"
-for arg in "$@"; do
-  printf ' %q' "$arg" >> "$log"
-done
-printf ' timeout_pro=%s timeout_xhigh=%s\n' "${GPTPRO_TIMEOUT:-}" "${GPTXHIGH_TIMEOUT:-}" >> "$log"
-
-[[ "${1:-}" == run ]] || { printf 'expected run, got %s\n' "${1:-}" >&2; exit 2; }
-shift
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --kind) kind="${2:-}"; shift 2 ;;
-    --prompt) prompt="${2:-}"; shift 2 ;;
-    --file) files+=("${2:-}"); shift 2 ;;
-    *) printf 'unknown fake supervisor arg: %s\n' "$1" >&2; exit 2 ;;
-  esac
-done
-[[ -n "$kind" && -n "$prompt" ]] || { printf 'missing kind or prompt\n' >&2; exit 2; }
-display_prompt="$prompt"
-marker=$'\n\nUSER TASK:\n'
-if [[ "$display_prompt" == *"$marker"* ]]; then
-  display_prompt="${display_prompt##*"$marker"}"
-fi
-python3 - "$kind" "$display_prompt" "${#files[@]}" <<'PY'
+    if ! "$stack_root/target/debug/gpt-webai-lifecycle" run \
+      --json --docker-slot-provider --live-send --require-visual-gate \
+      --docker-bin "$docker_wrapper" \
+      --request-id "$request_id" --run-id "$run_id" \
+      --fencing-token "fence-$suffix" --model pro --effort standard \
+      --prompt-file "$prompt" --file "$attachment" \
+      --artifact-expectation optional --provider-timeout-ms 500000 \
+      --runtime-start-timeout-ms 120000 --runtime-stop-timeout-ms 120000 \
+      >"$full_root/run.stdout" 2>"$full_root/run.stderr"; then
+      sed -n '1,240p' "$full_root/run.stderr" >&2
+      fail 'containerized fake lifecycle round trip failed'
+    fi
+    python3 - "$full_root/run.stdout" "$GPT_WEBAI_STATE_ROOT" "$request_id" <<'PY'
 import json
+import pathlib
 import sys
 
-print(json.dumps(
-    {"fake": True, "kind": sys.argv[1], "prompt": sys.argv[2], "fileCount": int(sys.argv[3])},
-    ensure_ascii=False,
-    separators=(",", ":"),
-))
+stdout = pathlib.Path(sys.argv[1]).read_bytes()
+value = json.loads(stdout)
+assert stdout.endswith(b"\n") and stdout.count(b"\n") == 1
+assert value["schema"] == "gpt-webai.lifecycle.r13.v1"
+assert value["command"] == "run"
+assert value["resultKind"] == "run.terminal_optional_zero"
+assert value["ok"] is True and value["terminal"] is True
+assert value["sessionId"] == "sid-cli-docker"
+assert value["conversationUrl"] == "https://chatgpt.com/c/sid-cli-docker"
+assert not any("WEB:" in str(item) for item in value.values())
+state_root = pathlib.Path(sys.argv[2])
+request_id = sys.argv[3]
+assert (state_root / "sessions/sid-cli-docker.json").is_file()
+assert (state_root / f"artifacts/r-{request_id}").is_dir()
+assert value["eventIds"] and value["receiptIds"]
 PY
-EOF
-  chmod +x "$fake_wrapper_bin/gpt-webai-lifecycle"
 
-  cat > "$fake_wrapper_bin/agbrowse" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+    [[ "$($real_docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" == none ]] ||
+      fail 'full-gate container is not network-isolated'
+    [[ "$($real_docker inspect --format '{{.State.Status}}' "$container")" == exited ]] ||
+      fail 'lifecycle did not stop the full-gate container'
+    "$real_docker" inspect --format '{{json .Config.Labels}}' "$container" |
+      python3 -c 'import json,re,sys; v=json.load(sys.stdin); assert re.fullmatch(r"owner_[0-9a-f]{64}",v["pr72.gpt-webai.owner-id"]); assert re.fullmatch(r"[1-9][0-9]{0,4}",v["pr72.gpt-webai.owner-generation"]); assert re.fullmatch(r"runtime_[0-9a-f]{64}",v["pr72.gpt-webai.runtime-incarnation"])'
 
-log="${GPT_WEBAI_FORBIDDEN_AGBROWSE_LOG:?set GPT_WEBAI_FORBIDDEN_AGBROWSE_LOG}"
-printf 'agbrowse' >> "$log"
-for arg in "$@"; do
-  printf ' %q' "$arg" >> "$log"
-done
-printf '\n' >> "$log"
-printf 'forbidden agbrowse call from wrapper\n' >&2
-exit 71
-EOF
-  chmod +x "$fake_wrapper_bin/agbrowse"
-}
-
-run_wrapper() {
-  local wrapper="$1"
-  shift
-  PATH="$fake_wrapper_bin:$PATH" \
-    GPT_WEBAI_FAKE_SUPERVISOR_LOG="$supervisor_log" \
-    GPT_WEBAI_FORBIDDEN_AGBROWSE_LOG="$agbrowse_log" \
-    "$wrapper" "$@"
-}
-
-run_wrapper_stdin() {
-  local wrapper="$1" input="$2"
-  shift 2
-  PATH="$fake_wrapper_bin:$PATH" \
-    GPT_WEBAI_FAKE_SUPERVISOR_LOG="$supervisor_log" \
-    GPT_WEBAI_FORBIDDEN_AGBROWSE_LOG="$agbrowse_log" \
-    "$wrapper" "$@" <<< "$input"
-}
-
-supervisor_call_count() {
-  local count=0
-  if [[ -f "$supervisor_log" ]]; then
-    count="$(wc -l < "$supervisor_log" | tr -d ' ')"
-  fi
-  printf '%s' "$count"
-}
-
-assert_supervisor_call_count() {
-  local expected="$1"
-  assert_eq "$(supervisor_call_count)" "$expected"
-}
-
-assert_wrapper_usage_envelope() {
-  local file="$1"
-  json_success_envelope "$file" 1
-  json_string_field_equals "$file" reason input.empty_prompt
-  json_string_field_equals "$file" status needs_user_action
-  json_string_field_equals "$file" nextCommand 'gpt-webai-lifecycle --help'
-}
-
-wrappers() {
-  : "${GPT_WEBAI_TEST_ROOT:?set GPT_WEBAI_TEST_ROOT}"
-  test_root="$GPT_WEBAI_TEST_ROOT"
-  safe_rm_rf "$test_root"
-  mkdir -p "$test_root"
-  [[ -x "$gptpro_wrapper" ]] || fail "missing executable gptpro wrapper: $gptpro_wrapper"
-  [[ -x "$gptxhigh_wrapper" ]] || fail "missing executable gptxhigh wrapper: $gptxhigh_wrapper"
-  write_fake_wrapper_bins
-
-  run_wrapper "$gptpro_wrapper" hello pro > "$test_root/gptpro-argv.out" 2> "$test_root/gptpro-argv.err"
-  assert_contains '"kind":"pro"' "$test_root/gptpro-argv.out"
-  assert_contains '"prompt":"hello pro"' "$test_root/gptpro-argv.out"
-  assert_contains 'gpt-webai-lifecycle run --kind pro' "$supervisor_log"
-  assert_contains 'timeout_pro=10800' "$supervisor_log"
-
-  wrapper_file_one="$test_root/wrapper-one.txt"
-  wrapper_file_two="$test_root/wrapper-two.txt"
-  printf 'one\n' > "$wrapper_file_one"
-  printf 'two\n' > "$wrapper_file_two"
-  run_wrapper "$gptpro_wrapper" --file "$wrapper_file_one" --file="$wrapper_file_two" review attachments > "$test_root/gptpro-files.out" 2> "$test_root/gptpro-files.err"
-  assert_contains '"kind":"pro"' "$test_root/gptpro-files.out"
-  assert_contains '"prompt":"review attachments"' "$test_root/gptpro-files.out"
-  assert_contains '"fileCount":2' "$test_root/gptpro-files.out"
-  assert_contains "--file $wrapper_file_one --file $wrapper_file_two" "$supervisor_log"
-
-  run_wrapper_stdin "$gptpro_wrapper" 'stdin pro prompt' > "$test_root/gptpro-stdin.out" 2> "$test_root/gptpro-stdin.err"
-  assert_contains '"kind":"pro"' "$test_root/gptpro-stdin.out"
-  assert_contains '"prompt":"stdin pro prompt"' "$test_root/gptpro-stdin.out"
-  assert_contains 'timeout_pro=10800' "$supervisor_log"
-
-  run_wrapper_stdin "$gptpro_wrapper" 'stdin file prompt' --file "$wrapper_file_one" > "$test_root/gptpro-file-stdin.out" 2> "$test_root/gptpro-file-stdin.err"
-  assert_contains '"kind":"pro"' "$test_root/gptpro-file-stdin.out"
-  assert_contains '"prompt":"stdin file prompt"' "$test_root/gptpro-file-stdin.out"
-  assert_contains '"fileCount":1' "$test_root/gptpro-file-stdin.out"
-
-  run_wrapper "$gptxhigh_wrapper" hello xhigh > "$test_root/gptxhigh-argv.out" 2> "$test_root/gptxhigh-argv.err"
-  assert_contains '"kind":"xhigh"' "$test_root/gptxhigh-argv.out"
-  assert_contains '"prompt":"hello xhigh"' "$test_root/gptxhigh-argv.out"
-  assert_contains 'gpt-webai-lifecycle run --kind xhigh' "$supervisor_log"
-  assert_contains 'timeout_xhigh=300' "$supervisor_log"
-
-  run_wrapper_stdin "$gptxhigh_wrapper" 'stdin xhigh prompt' > "$test_root/gptxhigh-stdin.out" 2> "$test_root/gptxhigh-stdin.err"
-  assert_contains '"kind":"xhigh"' "$test_root/gptxhigh-stdin.out"
-  assert_contains '"prompt":"stdin xhigh prompt"' "$test_root/gptxhigh-stdin.out"
-  assert_contains 'timeout_xhigh=300' "$supervisor_log"
-  assert_supervisor_call_count 6
-  [[ ! -s "$agbrowse_log" ]] || fail 'wrapper called forbidden agbrowse directly'
-
-  exit_code="$(run_nonnetwork_command "$test_root/gptpro-empty-argv.out" "$test_root/gptpro-empty-argv.err" run_wrapper "$gptpro_wrapper" "")"
-  assert_eq "$exit_code" 0
-  assert_wrapper_usage_envelope "$test_root/gptpro-empty-argv.out"
-  assert_supervisor_call_count 6
-
-  exit_code="$(run_nonnetwork_command "$test_root/gptpro-empty-stdin.out" "$test_root/gptpro-empty-stdin.err" run_wrapper_stdin "$gptpro_wrapper" '   ')"
-  assert_eq "$exit_code" 0
-  assert_wrapper_usage_envelope "$test_root/gptpro-empty-stdin.out"
-  assert_supervisor_call_count 6
-
-  exit_code="$(run_nonnetwork_command "$test_root/gptxhigh-empty-argv.out" "$test_root/gptxhigh-empty-argv.err" run_wrapper "$gptxhigh_wrapper" "")"
-  assert_eq "$exit_code" 0
-  assert_wrapper_usage_envelope "$test_root/gptxhigh-empty-argv.out"
-  assert_supervisor_call_count 6
-
-  exit_code="$(run_nonnetwork_command "$test_root/gptxhigh-empty-stdin.out" "$test_root/gptxhigh-empty-stdin.err" run_wrapper_stdin "$gptxhigh_wrapper" '   ')"
-  assert_eq "$exit_code" 0
-  assert_wrapper_usage_envelope "$test_root/gptxhigh-empty-stdin.out"
-  assert_supervisor_call_count 6
-  [[ ! -s "$agbrowse_log" ]] || fail 'empty prompt called forbidden agbrowse directly'
-
-  printf 'PASS wrappers\n'
-  printf 'cleanup: fake supervisor and wrapper outputs retained under %s; no real agbrowse/ChatGPT/Chrome/Xvfb used\n' "$test_root"
-}
-
-safe_root() {
-  : "${GPT_WEBAI_TEST_ROOT:?set GPT_WEBAI_TEST_ROOT}"
-  test_root="$GPT_WEBAI_TEST_ROOT"
-  safe_rm_rf "$test_root"
-  mkdir -p "$test_root"
-
-  local allowed="$test_root/safe-root/allowed" err index unsafe
-  mkdir -p "$allowed"
-  printf 'delete me\n' > "$allowed/file"
-  safe_rm_rf "$allowed"
-  [[ ! -e "$allowed" ]] || fail "safe evidence-local cleanup did not remove: $allowed"
-
-  index=0
-  for unsafe in "" / "$HOME" "$repo_root" "$(dirname "$repo_root")" "$repo_root/.omo/evidence/../not-evidence" "$repo_root/.omo/not-evidence"; do
-    index=$((index + 1))
-    err="$test_root/safe-root-unsafe-$index.err"
-    if safe_rm_rf "$unsafe" 2> "$err"; then
-      fail "unsafe root accepted: $unsafe"
+    "$real_docker" start "$container" >/dev/null
+    healthy=0
+    for _ in $(seq 1 120); do
+      if [[ "$($real_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")" == healthy ]]; then
+        healthy=1
+        break
+      fi
+      sleep 0.5
+    done
+    [[ "$healthy" == 1 ]] || fail 'full-gate container did not become healthy'
+    "$real_docker" exec "$container" /bin/sh -eu -c \
+      "command -v python3 >/dev/null; test -r /broker-prompts/$run_id/prompt.txt; test -n \"\$(find /broker-attachments/$run_id -type f -print -quit)\"; test -n \"\$(find /state/slot-01/evidence -name provider-request.json -print -quit)\"; test -n \"\$(find /broker-artifacts/r-$request_id -type f -print -quit)\""
+    if "$real_docker" exec "$container" /bin/sh -c \
+      'printf x > /broker-prompts/pr72-write-probe' >/dev/null 2>&1; then
+      fail 'prompt mount is writable in the full-gate container'
     fi
-    assert_contains 'refusing unsafe rm -rf target' "$err"
-  done
+    if "$real_docker" exec "$container" /bin/sh -c \
+      'printf x > /broker-attachments/pr72-write-probe' >/dev/null 2>&1; then
+      fail 'attachment mount is writable in the full-gate container'
+    fi
+    "$real_docker" stop "$container" >/dev/null
 
-  printf 'PASS safe-root\n'
+    status_output="$($stack_root/target/debug/gpt-webai-lifecycle status --legacy-kv)"
+    grep -qx 'holders=0' <<<"$status_output"
+    grep -qx 'locks=0' <<<"$status_output"
+    after_slots="$($real_docker ps -a --filter 'name=^/gpt-webai-slot-' \
+      --format '{{.Names}}\t{{.Status}}\t{{.ID}}' | LC_ALL=C sort)"
+    [[ "$before_slots" == "$after_slots" ]] ||
+      fail 'full gate changed a pre-existing production slot container'
+    printf 'PASS full containerized fake R13 round trip container=%s\n' "$container"
+  )
 }
 
-case "${1:-}" in
-  safe-root)
-    safe_root
+run_smoke_gate() {
+  [[ "${GPT_WEBAI_LIVE:-}" == 1 ]] || usage_error
+  require_executable scripts/live-smoke.sh
+  exec bash "$stack_root/scripts/live-smoke.sh"
+}
+
+[[ "$#" -eq 1 ]] || usage_error
+case "$1" in
+  static) run_static_gate ;;
+  fake)
+    run_static_gate
+    run_fake_only
     ;;
-  state-core)
-    state_core
+  full)
+    run_static_gate
+    run_fake_only
+    run_full_only
     ;;
-  slot-broker)
-    slot_broker
-    ;;
-  wrappers)
-    wrappers
-    ;;
+  smoke) run_smoke_gate ;;
   all)
-    safe_root
-    state_core
-    slot_broker
-    wrappers
+    run_static_gate
+    run_fake_only
+    run_full_only
     ;;
-  *)
-    printf 'Usage: %s safe-root|state-core|slot-broker|wrappers|all\n' "$0" >&2
-    exit 2
-    ;;
+  *) usage_error ;;
 esac

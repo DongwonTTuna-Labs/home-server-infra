@@ -1,0 +1,1288 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=("$@")
+# The Docker full gate bind-mounts this executable over the container's
+# `node` binary.  Preserve the production docker-exec argv shape while
+# stripping only the one canonical provider entrypoint that Node would have
+# consumed before forwarding CLI arguments.
+if [[ "${args[0]:-}" == provider/chatgpt-playwright/cli.mjs ]]; then
+  args=("${args[@]:1}")
+fi
+log="${GPT_WEBAI_FAKE_PROVIDER_LOG:-}"
+fake_root="${GPT_WEBAI_FAKE_PROVIDER_ROOT:-${GPT_WEBAI_TEST_ROOT:-}/fake-provider}"
+
+fake_r13() {
+  exec python3 - "${args[@]}" <<'PY'
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import sys
+
+
+def canonical(value):
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8") + b"\n"
+
+
+def sha(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def h256(value):
+    return "sha256:" + sha(value)
+
+
+def derived(prefix, value):
+    return prefix + "_" + sha(canonical(value))
+
+
+def write_new(path, data):
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    os.chmod(parent, 0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def evidence(path):
+    data = ("fixture:" + path).encode("utf-8")
+    return {
+        "mediaType": "application/json",
+        "path": path,
+        "sha256": h256(data),
+        "sizeBytes": len(data),
+    }
+
+
+def control(label, turn_id=None):
+    label_hash = h256((label + ":label").encode("utf-8"))
+    dom_hash = h256((label + ":dom").encode("utf-8"))
+    box_hash = h256((label + ":box").encode("utf-8"))
+    value = {
+        "boundingBoxHash": box_hash,
+        "controlId": derived(
+            "control", ["button", "button", "", label_hash, dom_hash, box_hash]
+        ),
+        "disabled": False,
+        "domPathHash": dom_hash,
+        "labelHash": label_hash,
+        "role": "button",
+        "testIdHash": None,
+        "visible": True,
+    }
+    if turn_id is not None:
+        value = {
+            "boundingBoxHash": box_hash,
+            "controlId": value["controlId"],
+            "currentTurnId": turn_id,
+            "disabled": False,
+            "domPathHash": dom_hash,
+            "role": "button",
+            "visible": True,
+            "visibleTextHash": label_hash,
+        }
+    return value
+
+
+def root_id(label, role):
+    label_hash = h256((label + ":label").encode("utf-8"))
+    dom_hash = h256((label + ":dom").encode("utf-8"))
+    box_hash = h256((label + ":box").encode("utf-8"))
+    return derived("root", ["main", role, "", label_hash, dom_hash, box_hash])
+
+
+def receipt(operation, identity, session_id, payload):
+    value = {
+        "createdAtMs": 1000,
+        "operation": operation,
+        "operationId": identity["operationId"],
+        "payload": payload,
+        "receiptId": "",
+        "requestId": identity["requestId"],
+        "runId": identity["runId"],
+        "schema": "pr72.receipt.r13.v1",
+        "sessionId": session_id,
+    }
+    value["receiptId"] = "receipt_" + sha(canonical(value))
+    return value
+
+
+def load_script_entry(script_path):
+    if not script_path:
+        return {}, None
+    with open(script_path, "rb") as stream:
+        script_bytes = stream.read()
+    script = json.loads(script_bytes)
+    if not isinstance(script, list):
+        raise SystemExit("fake script must be an array")
+    lock_path = script_path + ".counter.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "r+") as lock_stream:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+        counter_path = script_path + ".counter"
+        try:
+            with open(counter_path, "r", encoding="ascii") as counter_stream:
+                index = int(counter_stream.read())
+        except FileNotFoundError:
+            index = 0
+        if index >= len(script):
+            raise SystemExit(3)
+        temporary = counter_path + ".next"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as counter_stream:
+            counter_stream.write(str(index + 1))
+            counter_stream.flush()
+            os.fsync(counter_stream.fileno())
+        os.replace(temporary, counter_path)
+        entry = script[index]
+    if not isinstance(entry, dict) or set(entry) != {
+        "expectOperation", "frame", "malformedBytesB64"
+    }:
+        raise SystemExit("invalid fake script entry")
+    malformed = entry["malformedBytesB64"]
+    frame_path = entry["frame"]
+    if malformed is not None:
+        if frame_path is not None or not isinstance(malformed, str):
+            raise SystemExit("invalid malformed fake frame")
+        return entry, base64.b64decode(malformed, validate=True)
+    frame = {}
+    if frame_path is not None:
+        if not isinstance(frame_path, str) or not os.path.isabs(frame_path):
+            raise SystemExit("fake frame path must be absolute")
+        with open(frame_path, "rb") as stream:
+            frame = json.load(stream)
+        if not isinstance(frame, dict):
+            raise SystemExit("fake frame must be an object")
+    entry = dict(entry)
+    entry["frameData"] = frame
+    return entry, None
+
+
+def expected_operation_matches(expected, actual):
+    if expected == actual:
+        return True
+    aliases = {
+        "send.pre_click": {"send-click", "send-reconcile"},
+        "send.post_click": {"send-click"},
+        "send.reconciled_turn_start": {"send-reconcile"},
+    }
+    return actual in aliases.get(expected, set())
+
+
+request_index = sys.argv.index("--request-file")
+request_path = sys.argv[request_index + 1]
+with open(request_path, "rb") as stream:
+    request = json.load(stream)
+
+operation = request["operation"]
+identity = request["identity"]
+operation_data = request["operationData"]
+entry, malformed_bytes = load_script_entry(os.environ.get("GPT_WEBAI_FAKE_SCRIPT"))
+if entry and not expected_operation_matches(entry["expectOperation"], operation):
+    raise SystemExit(3)
+if malformed_bytes is not None:
+    sys.stdout.buffer.write(malformed_bytes)
+    raise SystemExit(0)
+frame = entry.get("frameData", {}) if entry else {}
+variant = frame.get("variant", "success")
+
+state_root = os.environ.get("GPT_WEBAI_STATE_ROOT")
+if not state_root:
+    state_dir = os.environ.get("GPT_WEBAI_STATE_DIR")
+    if state_dir:
+        state_root = state_dir
+if not state_root and os.sep + "evidence" + os.sep in request_path:
+    state_root = request_path.split(os.sep + "evidence" + os.sep, 1)[0]
+if not state_root:
+    raise SystemExit("cannot derive the R13 fake provider state root")
+artifact_container_root = os.environ.get("GPT_WEBAI_ARTIFACTS_DIR")
+request_key = (
+    "r-" + identity["requestId"]
+    if identity["requestId"] is not None
+    else "d-" + identity["operationId"]
+)
+artifact_root = artifact_container_root or os.path.join(
+    state_root, "artifacts", request_key
+)
+
+
+def artifact_write_path(host_rel_path):
+    if not artifact_container_root:
+        return os.path.join(state_root, host_rel_path)
+    parts = host_rel_path.split("/")
+    request_key = os.path.basename(artifact_container_root.rstrip("/"))
+    if len(parts) < 3 or parts[:2] != ["artifacts", request_key]:
+        raise SystemExit("fake artifact path is outside the mounted request root")
+    return os.path.join(artifact_container_root, *parts[2:])
+
+operations_log = os.environ.get("GPT_WEBAI_FAKE_PROVIDER_OPERATIONS")
+if operations_log:
+    with open(operations_log, "a", encoding="utf-8") as stream:
+        stream.write(operation + "\n")
+
+browser_guid = "12345678-1234-1234-1234-123456789abc"
+raw_target = "fixture-target"
+page_id = derived(
+    "page",
+    ["pr72.page.r13.v1", browser_guid, raw_target, "main-frame", "loader-fixture"],
+)
+browser_context_id = derived(
+    "ctx", ["pr72.ctx.r13.v1", browser_guid, "fixture-context"]
+)
+target_id = derived("target", ["pr72.target.r13.v1", browser_guid, raw_target])
+fixture_evidence = evidence("cdp.sanitized.json")
+ok = True
+provider_reason = None
+status = "done"
+
+if operation == "status":
+    health_status = frame.get("healthStatus", "ready")
+    data = {
+        "composerReady": frame.get("composerReady", health_status in {"ready", "ready_model_correction_required"}),
+        "dockerStatus": frame.get("dockerStatus", "running"),
+        "healthStatus": health_status,
+        "modelLabel": frame.get("modelLabel", "pro" if health_status == "ready" else "unknown"),
+        "retryAfterMs": frame.get("retryAfterMs"),
+    }
+    if variant == "failure":
+        ok = False
+        provider_reason = frame.get("reason", "probe.unreachable")
+        status = "failed"
+elif operation == "capture.root":
+    if variant == "failure":
+        provider_reason = frame.get("reason", "capture.timeout")
+        ok = False
+        status = "failed"
+        data = {
+            "failureProof": {
+                "capturedAtMs": 2000,
+                "evidenceRefs": [fixture_evidence],
+                "reason": provider_reason,
+            },
+            "rootBindingCandidate": None,
+        }
+    else:
+        data = {
+            "failureProof": None,
+            "rootBindingCandidate": {
+                "browserContextId": browser_context_id,
+                "capturedAtMs": 2000,
+                "composerRootId": root_id("composer", "form"),
+                "conversationRootId": root_id("conversation", "main"),
+                "domMutationGeneration": 1,
+                "effortControl": control("effort"),
+                "evidenceRefs": [fixture_evidence],
+                "modelControl": control("model"),
+                "normalizedUrl": "https://chatgpt.com/",
+                "operationId": identity["operationId"],
+                "pageIncarnationId": page_id,
+                "selectorMargin": 100,
+                "targetId": target_id,
+            },
+        }
+elif operation == "ensure-model":
+    page = operation_data["pageBinding"]
+    if variant == "failure":
+        provider_reason = frame.get("reason", "provider.schema_drift")
+        ok = False
+        status = "failed"
+        failure_proof = None
+        if provider_reason not in {
+            "provider.schema_drift", "contract.invalid_provider_envelope", "binding.mismatch"
+        }:
+            failure_proof = {
+                "controlIdentityStable": provider_reason != "picker.control_drift",
+                "evidenceRefs": [fixture_evidence],
+                "failedAtMs": 3000,
+                "pickerOpened": True,
+                "reason": provider_reason,
+                "requestedEffortVisible": provider_reason != "picker.effort_absent",
+                "requestedModelVisible": provider_reason != "picker.model_absent",
+            }
+        data = {
+            "effortProof": None,
+            "failureProof": failure_proof,
+            "modelProof": None,
+            "observedPageBinding": page,
+        }
+    else:
+        data = {
+            "effortProof": {
+                "control": control("effort"),
+                "evidenceRefs": [fixture_evidence],
+                "observed": operation_data["requestedEffort"],
+                "requested": operation_data["requestedEffort"],
+                "selectedBy": "already_exact",
+                "verified": True,
+                "verifiedAtMs": 3000,
+            },
+            "failureProof": None,
+            "modelProof": {
+                "control": control("model"),
+                "evidenceRefs": [fixture_evidence],
+                "observed": operation_data["requestedModel"],
+                "requested": operation_data["requestedModel"],
+                "selectedBy": "already_exact",
+                "verified": True,
+                "verifiedAtMs": 3000,
+            },
+            "observedPageBinding": page,
+        }
+elif operation == "upload-only":
+    page = operation_data["pageBinding"]
+    chips = []
+    for record in operation_data["attachmentSet"]["records"]:
+        stem = record["containerRelPath"].rsplit("/", 1)[-1].rsplit(".", 1)[0].casefold()
+        stem_hash = sha(stem.encode("utf-8"))
+        chips.append({
+            "boundingBoxHash": h256((stem + ":box").encode("utf-8")),
+            "chipStableKey": h256(canonical([
+                "pr72.chip.r13.v1", page["pageIncarnationId"], stem_hash, 0
+            ])),
+            "complete": True,
+            "digest": record["sourceSha256"],
+            "evidenceRefs": [fixture_evidence],
+            "labelHash": h256((stem + ":label").encode("utf-8")),
+            "visibleSizeBytes": record["sizeBytes"],
+        })
+    stale = []
+    if variant == "stale_mismatch":
+        stale = [{
+            "boundingBoxHash": h256(b"stale:box"),
+            "chipStableKey": h256(canonical([
+                "pr72.chip.r13.v1", page["pageIncarnationId"], sha(b"stale"), 0
+            ])),
+            "complete": True,
+            "digest": h256(b"stale"),
+            "evidenceRefs": [fixture_evidence],
+            "labelHash": h256(b"stale:label"),
+            "visibleSizeBytes": 5,
+        }]
+        ok = False
+        provider_reason = "upload.stale_chip_mismatch"
+        status = "failed"
+    if variant == "failure":
+        ok = False
+        provider_reason = frame.get("reason", "upload.timeout")
+        status = "failed"
+        data = {
+            "failureReason": provider_reason,
+            "observedPageBinding": page,
+            "uploadProof": None,
+        }
+    else:
+        data = {
+            "failureReason": provider_reason,
+            "observedPageBinding": page,
+            "uploadProof": {
+                "allExpectedComplete": not stale,
+                "capturedAtMs": 4000,
+                "expectedSetSha256": operation_data["attachmentSet"]["setSha256"],
+                "retryIndex": operation_data["retryIndex"],
+                "staleChips": stale,
+                "uploadAttemptId": operation_data["uploadAttemptId"],
+                "visibleCurrentChips": chips,
+            },
+        }
+elif operation == "clear-upload":
+    page = operation_data["pageBinding"]
+    cleared = [{
+        "chipStableKey": item["chipStableKey"],
+        "cleared": True,
+        "digest": item.get("digest"),
+    } for item in operation_data["staleChips"]]
+    if variant == "failure":
+        ok = False
+        provider_reason = "upload.chip_removal_failed"
+        status = "failed"
+        data = {
+            "attemptedChipKeys": [item["chipStableKey"] for item in operation_data["staleChips"]],
+            "clearAttemptId": operation_data["clearAttemptId"],
+            "clearedChips": cleared[:-1],
+            "failureReason": provider_reason,
+            "observedPageBinding": page,
+        }
+    else:
+        data = {
+            "clearAttemptId": operation_data["clearAttemptId"],
+            "clearedChips": cleared,
+            "observedPageBinding": page,
+        }
+elif operation in {"send-click", "send-reconcile"}:
+    page = operation_data["pageBinding"]
+    attempt = operation_data["sendAttemptId"]
+    prompt_sha = (
+        operation_data["promptInput"]["sha256"]
+        if operation == "send-click" else operation_data["preClickReceipt"]["promptSha256"]
+    )
+    session_id = frame.get("sessionId", "sid-cli-docker")
+    user_turn = derived(
+        "turn", ["pr72.turn.r13.v1", session_id, "user", "user-message-fixture"]
+    )
+    assistant_turn = derived(
+        "turn", ["pr72.turn.r13.v1", session_id, "assistant", "assistant-message-fixture"]
+    )
+    if operation == "send-click":
+        pre = {
+            "assistantTurnId": None,
+            "capturedAtMs": 5000,
+            "conversationUrl": None,
+            "evidenceRefs": [evidence("send.pre-click.json")],
+            "kind": "pre_click",
+            "pageBinding": page,
+            "physicalClickCount": 0,
+            "promptSha256": prompt_sha,
+            "sendAttemptId": attempt,
+            "sessionId": None,
+            "userTurnId": None,
+        }
+    else:
+        pre = operation_data["preClickReceipt"]
+    terminal_kind = "post_click" if operation == "send-click" else "reconciled_turn_start"
+    terminal = {
+        "assistantTurnId": assistant_turn,
+        "capturedAtMs": 6000,
+        "conversationUrl": "https://chatgpt.com/c/" + session_id,
+        "evidenceRefs": [evidence("send.terminal.json")],
+        "kind": terminal_kind,
+        "pageBinding": page,
+        "physicalClickCount": 1 if operation == "send-click" else 0,
+        "promptSha256": prompt_sha,
+        "sendAttemptId": attempt,
+        "sessionId": session_id,
+        "userTurnId": user_turn,
+    }
+    if variant in {"uncertain", "failure"}:
+        terminal = None
+        ok = False
+        provider_reason = frame.get("reason", "send.turn_not_proven")
+        status = "failed"
+    data = {
+        "observedPageBinding": page,
+        "preClickReceipt": pre,
+        "terminalSendReceipt": terminal,
+    }
+    if operation == "send-click":
+        stage = receipt("send.pre_click", identity, None, pre)
+        write_new(
+            os.path.join(os.path.dirname(request_path), "send.pre-click.receipt.json"),
+            canonical(stage),
+        )
+        if terminal is not None:
+            stage = receipt("send.post_click", identity, session_id, terminal)
+            write_new(
+                os.path.join(os.path.dirname(request_path), "send.post-click.receipt.json"),
+                canonical(stage),
+            )
+    elif terminal is not None:
+        stage = receipt("send.reconcile", identity, session_id, terminal)
+        write_new(
+            os.path.join(os.path.dirname(request_path), "send.reconcile.receipt.json"),
+            canonical(stage),
+        )
+elif operation == "session-rebind":
+    expected = operation_data["expectation"]
+    generation = expected["lastKnownPageBindingGeneration"] + 1
+    session_id = expected["sessionId"]
+    answer = frame.get("answerText", "final answer").encode("utf-8")
+    answer_sha = h256(answer)
+    answer_rel = "answers/" + identity["operationId"] + ".rebind.answer.md"
+    root_hash = h256(canonical({"fixture": "rebind", "generation": generation}))
+    rebound_page = {
+        "bindingGeneration": generation,
+        "bindingId": derived(
+            "binding", ["pr72.page-binding.r13.v1", page_id, root_hash]
+        ),
+        "browserContextId": browser_context_id,
+        "cohort": expected["cohort"],
+        "domMutationGeneration": 2,
+        "leaseGeneration": expected["leaseGeneration"],
+        "leaseId": expected["leaseId"],
+        "pageIncarnationId": page_id,
+        "rootBindingHash": root_hash,
+        "runtimeIncarnationId": expected["runtimeIncarnationId"],
+        "runtimeOwnerGeneration": expected["runtimeOwnerGeneration"],
+        "runtimeOwnerId": expected["runtimeOwnerId"],
+        "slotId": expected["slotId"],
+        "targetId": target_id,
+    }
+    echo = dict(rebound_page)
+    echo.update({
+        "activeTurn": variant == "running",
+        "conversationUrl": expected["conversationUrl"],
+        "pageBindingGeneration": generation,
+        "requestId": expected["requestId"],
+        "runId": expected["runId"],
+        "sessionBindingId": derived(
+            "binding",
+            ["pr72.session-binding.r13.v1", session_id, expected["slotId"], expected["cohort"]],
+        ),
+        "sessionId": session_id,
+        "terminalAnswerSha256": None if variant == "running" else answer_sha,
+        "visibleAssistantTurnId": derived(
+            "turn", ["pr72.turn.r13.v1", session_id, "assistant", "assistant-message-fixture"]
+        ),
+        "visibleUserTurnId": derived(
+            "turn", ["pr72.turn.r13.v1", session_id, "user", "user-message-fixture"]
+        ),
+    })
+    if variant == "failure":
+        ok = False
+        provider_reason = frame.get("reason", "session.rebind_failed")
+        status = "failed"
+        data = {
+            "expectation": expected,
+            "failureReason": provider_reason,
+            "hydrationObservations": [],
+            "observedEcho": None,
+            "pageBindingGeneration": None,
+        }
+    else:
+        terminal_answer = None
+        state = "active_generation_visible"
+        if variant != "running":
+            write_new(os.path.join(artifact_root, answer_rel), answer)
+            terminal_answer = {
+                "answerRelPath": answer_rel,
+                "answerSha256": answer_sha,
+                "answerSizeBytes": len(answer),
+                "terminalAssistantTurnId": echo["visibleAssistantTurnId"],
+            }
+            state = "answer_visible"
+        data = {
+            "expectation": expected,
+            "failureReason": None,
+            "hydrationObservations": [{
+                "evidenceRefs": [fixture_evidence],
+                "observedAtMs": 7000,
+                "observedEcho": echo,
+                "remainingDeadlineMs": 89000,
+                "sequenceIndex": 0,
+                "state": state,
+            }],
+            "observedEcho": echo,
+            "pageBindingGeneration": generation,
+            "terminalAnswer": terminal_answer,
+        }
+elif operation == "poll":
+    expected = operation_data["expected"]
+    if variant == "failure":
+        ok = False
+        provider_reason = frame.get("reason", "session.content_unavailable")
+        status = "failed"
+        data = {
+            "answerRelPath": None,
+            "answerSha256": None,
+            "answerSizeBytes": None,
+            "bottomProof": None,
+            "expected": expected,
+            "observedEcho": None,
+            "pollState": "failed",
+            "terminalAssistantTurnId": None,
+        }
+    elif variant == "running":
+        observed = dict(expected)
+        observed["activeTurn"] = True
+        data = {
+            "answerRelPath": None,
+            "answerSha256": None,
+            "answerSizeBytes": None,
+            "bottomProof": None,
+            "expected": expected,
+            "observedEcho": observed,
+            "pollState": "running",
+            "terminalAssistantTurnId": None,
+        }
+        status = "running"
+    else:
+        answer = frame.get("answerText", "final answer").encode("utf-8")
+        answer_sha = h256(answer)
+        answer_rel = "answers/" + identity["operationId"] + ".answer.md"
+        write_new(os.path.join(artifact_root, answer_rel), answer)
+        observed = dict(expected)
+        observed.update({"activeTurn": False, "terminalAnswerSha256": answer_sha})
+        data = {
+            "answerRelPath": answer_rel,
+            "answerSha256": answer_sha,
+            "answerSizeBytes": len(answer),
+            "bottomProof": None,
+            "expected": expected,
+            "observedEcho": observed,
+            "pollState": "terminal",
+            "terminalAssistantTurnId": observed["visibleAssistantTurnId"],
+        }
+elif operation == "artifact-discover":
+    expected = operation_data["expected"]
+    bottom = {
+        "atBottom": True,
+        "capturedAtMs": 9000,
+        "evidenceRefs": [fixture_evidence],
+        "method": "dom_terminal_anchor",
+    }
+    if variant == "failure":
+        ok = False
+        provider_reason = frame.get("reason", "artifact.controls_ambiguous")
+        status = "failed"
+        data = {
+            "bottomProof": None,
+            "controls": [],
+            "failureReason": provider_reason,
+            "observedEcho": expected,
+            "zeroControlProof": None,
+        }
+    elif variant == "controls":
+        turn_id = operation_data["terminalAssistantTurnId"]
+        data = {
+            "bottomProof": bottom,
+            "controls": [control("download", turn_id)],
+            "failureReason": None,
+            "observedEcho": expected,
+            "zeroControlProof": None,
+        }
+    else:
+        zero = {
+            "artifactClaimId": operation_data["artifactClaimId"],
+            "bottomProof": bottom,
+            "capturedAtMs": 9000,
+            "controlCount": 0,
+            "evidenceRefs": [fixture_evidence],
+            "terminalAssistantTurnId": operation_data["terminalAssistantTurnId"],
+        }
+        data = {
+            "bottomProof": bottom,
+            "controls": [],
+            "failureReason": None,
+            "observedEcho": expected,
+            "zeroControlProof": zero,
+        }
+elif operation == "artifact-click-save":
+    expected = operation_data["expected"]
+    if variant == "failure":
+        ok = False
+        provider_reason = frame.get("reason", "artifact.download_timeout")
+        status = "failed"
+        data = {
+            "downloadReceipt": None,
+            "failureReason": provider_reason,
+            "observedEcho": expected,
+        }
+    else:
+        content = frame.get("content", "fixture download").encode("utf-8")
+        suggested = frame.get("suggestedFilename", "fixture.txt")
+        download_event_id = derived(
+            "download",
+            [
+                "pr72.download-event.r13.v1",
+                expected["pageIncarnationId"],
+                "fixture-download-guid",
+                suggested,
+            ],
+        )
+        artifact_id = derived(
+            "artifact",
+            [
+                "pr72.artifact.r13.v1",
+                operation_data["artifactClaimId"],
+                operation_data["control"]["controlId"],
+                download_event_id,
+            ],
+        )
+        host_path = (
+            operation_data["hostSaveDirectory"] + "/" + artifact_id + ".download"
+        )
+        write_new(artifact_write_path(host_path), content)
+        download = {
+            "artifactClaimId": operation_data["artifactClaimId"],
+            "artifactId": artifact_id,
+            "browserContextId": expected["browserContextId"],
+            "clickedAtMs": 10001,
+            "control": operation_data["control"],
+            "conversationUrl": expected["conversationUrl"],
+            "downloadEventId": download_event_id,
+            "hostSavedRelPath": host_path,
+            "listenerArmedAtMs": 10000,
+            "mediaType": "application/octet-stream",
+            "pageIncarnationId": expected["pageIncarnationId"],
+            "receivedAtMs": 10002,
+            "sessionId": expected["sessionId"],
+            "sha256": h256(content),
+            "sizeBytes": len(content),
+            "slotId": expected["slotId"],
+            "targetId": expected["targetId"],
+            "terminalAssistantTurnId": operation_data["terminalAssistantTurnId"],
+        }
+        data = {
+            "downloadReceipt": download,
+            "failureReason": None,
+            "observedEcho": expected,
+        }
+else:
+    raise SystemExit("unexpected R13 operation: " + operation)
+
+primary = receipt(
+    operation, identity, identity["sessionId"], data
+)
+primary_bytes = canonical(primary)
+write_new(
+    os.path.join(os.path.dirname(request_path), "provider-receipt.json"), primary_bytes
+)
+response = {
+    "identity": identity,
+    "ok": ok,
+    "operation": operation,
+    "operationData": data,
+    "providerReason": provider_reason,
+    "receipt": {
+        "mediaType": "application/json",
+        "path": "provider-receipt.json",
+        "sha256": h256(primary_bytes),
+        "sizeBytes": len(primary_bytes),
+    },
+    "schema": "gpt-webai.provider.response.r13.v1",
+    "status": status,
+}
+sys.stdout.buffer.write(canonical(response))
+PY
+}
+
+if [[ " ${args[*]} " == *" --request-file "* ]]; then
+  fake_r13
+fi
+
+  if [[ -n "$log" ]]; then
+    mkdir -p "$(dirname "$log")"
+    printf 'gpt-webai-provider' >> "$log"
+  for arg in "${args[@]}"; do
+    printf ' %q' "$arg" >> "$log"
+  done
+  printf '\n' >> "$log"
+fi
+
+if [[ -n "${BROWSER_AGENT_HOME:-}" ]]; then
+  mkdir -p "$fake_root"
+  printf '%s BROWSER_AGENT_HOME=%s CDP_PORT=%s GPT_WEBAI_ARTIFACTS_DIR=%s GPT_WEBAI_ARTIFACTS_HOST_DIR=%s\n' \
+    "${args[*]}" \
+    "$BROWSER_AGENT_HOME" \
+    "${CDP_PORT:-}" \
+    "${GPT_WEBAI_ARTIFACTS_DIR:-}" \
+    "${GPT_WEBAI_ARTIFACTS_HOST_DIR:-}" >> "$fake_root/browser-agent-home-calls"
+fi
+
+next_status() {
+  local seq="$fake_root/status-sequence"
+  local tmp="$fake_root/status-sequence.next.$$"
+  local line="" current first=1
+
+  if [[ -f "$seq" ]]; then
+    mkdir -p "$fake_root"
+    : > "$tmp"
+    while IFS= read -r current || [[ -n "$current" ]]; do
+      if [[ "$first" -eq 1 ]]; then
+        line="$current"
+        first=0
+      else
+        printf '%s\n' "$current" >> "$tmp"
+      fi
+    done < "$seq"
+    mv -f "$tmp" "$seq"
+  fi
+
+  case "${line:-unreachable}" in
+    reachable|reachable-headed)
+      printf '{"fake":true,"cdp":"reachable","headed":true}\n'
+      ;;
+    provider-ready)
+      printf '{"ok":true,"vendor":"chatgpt","status":"ready","url":"https://chatgpt.com/","capabilities":[{"capabilityId":"chatgpt-active-tab-verification","state":"ok"},{"capabilityId":"chatgpt-composer-visible","state":"ok"}]}\n'
+      ;;
+    provider-ready-idle-composer)
+      printf '{"ok":true,"vendor":"chatgpt","status":"ready","url":"https://chatgpt.com/","composer":true,"send":false,"pro":true}\n'
+      ;;
+    provider-driver-missing)
+      printf 'docker exec failed: exec: "gpt-webai-provider": executable file not found in $PATH\n' >&2
+      exit 127
+      ;;
+    provider-limit)
+      printf '{"ok":true,"vendor":"chatgpt","status":"provider_limit","reason":"provider.limit","url":"https://chatgpt.com/c/limit"}\n'
+      ;;
+    pro-required)
+      printf '{"ok":true,"vendor":"chatgpt","status":"subscription_required","reason":"auth.needs_pro","url":"https://chatgpt.com/"}\n'
+      ;;
+    about-blank)
+      printf '{"ok":true,"vendor":"chatgpt","status":"ready","url":"about:blank","capabilities":[]}\n'
+      ;;
+    reachable-headless)
+      printf '{"fake":true,"cdp":"reachable","headed":false}\n'
+      ;;
+    unreachable)
+      printf '{"fake":true,"cdp":"unreachable","headed":false}\n'
+      ;;
+    misleading-success)
+      printf '{"fake":true,"ok":true}\n'
+      ;;
+    malformed)
+      printf 'not-json\n'
+      ;;
+    exit-hard)
+      printf 'fake status failed\n' >&2
+      exit 70
+      ;;
+    network-disconnected)
+      printf 'fake network disconnected: ERR_INTERNET_DISCONNECTED DNS lookup failed\n' >&2
+      exit 70
+      ;;
+    *)
+      printf '{"fake":true,"cdp":"%s","headed":false}\n' "$line"
+      ;;
+  esac
+}
+
+next_sequence() {
+  local name="$1" default_value="$2"
+  local seq="$fake_root/$name"
+  local tmp="$fake_root/$name.next.$$"
+  local lock="$fake_root/$name.lock"
+  local line="" current first=1
+  local waited=0
+
+  mkdir -p "$fake_root"
+  while ! mkdir "$lock" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [[ "$waited" -gt 500 ]]; then
+      printf 'timed out waiting for fake sequence lock: %s\n' "$name" >&2
+      exit 76
+    fi
+    sleep 0.01
+  done
+
+  if [[ -f "$seq" ]]; then
+    : > "$tmp"
+    while IFS= read -r current || [[ -n "$current" ]]; do
+      if [[ "$first" -eq 1 ]]; then
+        line="$current"
+        first=0
+      else
+        printf '%s\n' "$current" >> "$tmp"
+      fi
+    done < "$seq"
+    mv -f "$tmp" "$seq"
+  fi
+  rmdir "$lock" 2>/dev/null || true
+
+  printf '%s' "${line:-$default_value}"
+}
+
+arg_value() {
+  local name="$1" index
+  for ((index = 0; index < ${#args[@]}; index++)); do
+    if [[ "${args[$index]}" == "$name" ]]; then
+      printf '%s' "${args[$((index + 1))]:-}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_ledger_before_poll() {
+  local sid="$1"
+  local file
+  [[ -f "$fake_root/require-ledger-before-poll" ]] || return 0
+  shopt -s nullglob
+  for file in "${GPT_WEBAI_STATE_ROOT:-}/sessions"/*.json; do
+    if grep -F -- "sessionId=$sid" "$file" >/dev/null 2>&1; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  printf 'poll before local ledger for %s\n' "$sid" >&2
+  exit 73
+}
+
+fake_send() {
+  local event sid guard_dir="" holding_file=""
+  mkdir -p "$fake_root"
+  if [[ -n "${GPT_WEBAI_FAKE_SEND_OVERLAP_GUARD:-}" ]]; then
+    guard_dir="$GPT_WEBAI_FAKE_SEND_OVERLAP_GUARD"
+    if ! mkdir "$guard_dir" 2>/dev/null; then
+      printf 'overlap\n' > "$fake_root/send-overlap"
+      printf 'fake send overlap detected\n' >&2
+      exit 74
+    fi
+    trap "rmdir '$guard_dir' 2>/dev/null || true" EXIT
+  fi
+  if [[ -n "${GPT_WEBAI_FAKE_SEND_HOLD_FILE:-}" && -e "$GPT_WEBAI_FAKE_SEND_HOLD_FILE" ]]; then
+    holding_file="$fake_root/send-holding.$$"
+    printf '%s\n' "$$" > "$holding_file"
+    while [[ -e "$GPT_WEBAI_FAKE_SEND_HOLD_FILE" ]]; do
+      sleep 0.05
+    done
+    rm -f "$holding_file"
+  fi
+  printf '%s\n' "${args[*]}" >> "$fake_root/send-calls"
+  event="$(next_sequence send-sequence 'sid:sid-auto')"
+  case "$event" in
+    sid:*)
+      sid="${event#sid:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    sid-no-target:*)
+      sid="${event#sid-no-target:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent"}\n' "$sid"
+      ;;
+    sid-root:*)
+      sid="${event#sid-root:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent","targetId":"target-%s","conversationUrl":"https://chatgpt.com/"}\n' "$sid" "$sid"
+      ;;
+    sid-crash:*)
+      sid="${event#sid-crash:}"
+      printf '{"fake":true,"sessionId":"%s","status":"sent"}\n' "$sid"
+      printf 'fake send crashed after session id\n' >&2
+      exit 70
+      ;;
+    crash-no-sid)
+      printf 'fake send crashed before session id\n' >&2
+      exit 70
+      ;;
+    malformed|malformed-hard)
+      printf '%s\n' "${GPT_WEBAI_FAKE_MALFORMED_OUTPUT:-not-json}"
+      ;;
+    provider-missing-fields|missing-session-fields)
+      printf '{"fake":true,"provider":{"conversationId":"conv-send","state":"created"}}\n'
+      ;;
+    auth-login-required)
+      printf '{"fake":true,"status":"login_required","provider":{"status":"auth_required","page":"login"}}\n'
+      ;;
+    provider-limit)
+      printf '{"fake":true,"status":"provider_limit","reason":"provider.limit","message":"too many requests"}\n'
+      ;;
+    pro-required)
+      printf '{"fake":true,"status":"subscription_required","reason":"auth.needs_pro","message":"upgrade required"}\n'
+      ;;
+    attachment-unavailable)
+      printf '{"fake":true,"status":"attachment_unavailable","reason":"provider.attachment_unavailable","message":"attachment chip missing"}\n'
+      ;;
+    hard)
+      printf 'fake send hard failure\n' >&2
+      exit 70
+      ;;
+    network-disconnected)
+      printf 'fake network disconnected before session id: ERR_INTERNET_DISCONNECTED\n' >&2
+      exit 70
+      ;;
+    fail-if-called)
+      printf 'send must not be called\n' >&2
+      exit 71
+      ;;
+    *)
+      printf '{"fake":true,"sessionId":"%s","status":"sent"}\n' "$event"
+      ;;
+  esac
+}
+
+fake_poll() {
+  local sid event timeout confirm_timeout is_start_confirm=0
+  sid="$(arg_value --session || true)"
+  timeout="$(arg_value --timeout || true)"
+  confirm_timeout="${GPT_WEBAI_SEND_START_CONFIRM_TIMEOUT:-45}"
+  [[ -n "$sid" ]] || { printf 'missing --session for poll\n' >&2; exit 2; }
+  if [[ "$timeout" == "$confirm_timeout" ]]; then
+    is_start_confirm=1
+  fi
+  mkdir -p "$fake_root"
+  printf '%s\n' "${args[*]}" >> "$fake_root/poll-calls"
+  require_ledger_before_poll "$sid"
+  if [[ "$is_start_confirm" -eq 1 ]]; then
+    event="$(next_sequence start-confirm-sequence running)"
+  else
+    event="$(next_sequence poll-sequence done)"
+  fi
+  case "$event" in
+    running|start-running)
+      printf '{"fake":true,"sessionId":"%s","status":"running","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","activeTurn":true,"assistantCount":1,"userCount":1,"turnEvidence":{"activeTurn":true,"newUserTurn":true}}\n' "$sid" "$sid" "$sid"
+      ;;
+    running-no-turn)
+      printf '{"fake":true,"sessionId":"%s","status":"running","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","activeTurn":false,"assistantCount":0,"userCount":0,"turnEvidence":{"activeTurn":false,"newUserTurn":false,"newAssistantTurn":false}}\n' "$sid" "$sid" "$sid"
+      ;;
+    running-counts-only)
+      printf '{"fake":true,"sessionId":"%s","status":"running","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","activeTurn":false,"assistantCount":1,"userCount":1,"turnEvidence":{"activeTurn":false}}\n' "$sid" "$sid" "$sid"
+      ;;
+    root-url|running-root-url)
+      printf '{"fake":true,"sessionId":"%s","status":"running","targetId":"target-%s","conversationUrl":"https://chatgpt.com/"}\n' "$sid" "$sid"
+      ;;
+    empty|empty-output)
+      exit 124
+      ;;
+    mismatch|sid-mismatch)
+      printf '{"fake":true,"sessionId":"sid-mismatched","status":"running","targetId":"target-mismatched","conversationUrl":"https://chatgpt.com/c/sid-mismatched"}\n'
+      ;;
+    done)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"ok","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-empty-answer)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"   ","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-root-url)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"root url must not pass","targetId":"target-%s","conversationUrl":"https://chatgpt.com/"}\n' "$sid" "$sid"
+      ;;
+    done-wrong-url)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"wrong conversation must not pass","targetId":"target-other-session","conversationUrl":"https://chatgpt.com/c/other-session"}\n' "$sid"
+      ;;
+    done-artifact-label-no-artifacts)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"CHANGES_REQUIRED\\nArtifact: missing-current-turn.tar.gz","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[]}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-artifact-filename-no-artifacts)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"PATCH_READY\\nArtifact filename: pr72-gpt-webai-lifecycle-patch-bundle.tar.gz\\nArtifact sha256: a3ee000408fa12dc8ab8dbddf58b0a6424c0048397f4a4c0cbe14751a81fcd64","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[]}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-download-warning-no-artifacts)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"PATCH_READY\\nFinal answer text exists but an attempted artifact download failed.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[],"warnings":[{"reason":"artifact.download_timeout","phase":"download.saveAs","visibleFilename":"pr72-gpt-webai-lifecycle-patch-bundle.tar.gz","message":"download.saveAs: ENOENT: no such file or directory"}],"downloadCandidateCount":1}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-download-warning-with-artifact)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"PATCH_READY\\nFinal answer text exists with one saved artifact and one download warning.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[{"download":{"visibleFilename":"pr72-gpt-webai-lifecycle-patch-bundle.tar.gz","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":12}}],"warnings":[{"reason":"artifact.download_timeout","phase":"download.saveAs","visibleFilename":"second-candidate.tar.gz","message":"download.saveAs: ENOENT: no such file or directory"}],"downloadCandidateCount":2}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-inline-diff-artifact-fixture)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"PATCH_READY\\n\\nDiff\\ndiff --git a/t b/t\\n+      printf '\''Artifact filename: pr72-gpt-webai-lifecycle-patch-bundle.tar.gz'\''\\n","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[]}\n' "$sid" "$sid" "$sid"
+      ;;
+    done:*)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"%s","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "${event#done:}" "$sid" "$sid"
+      ;;
+    recovered-in-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"complete","answerText":"I'\''ll inspect the source first, then provide a downloadable artifact bundle.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","usedFallbacks":["recovery"],"warnings":["response-recovered-after-timeout"],"responseStableMs":0}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-progress-prologue)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"I'\''ll verify the archive integrity first, then inspect the manifest, diff, source, fake-test evidence, runtime status, and DOM/readiness notes against the PR goals before deciding the verdict.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-pro-thinking)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"Pro thinking","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-focusing-review)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"The attachment gate passed; I’m focusing review on final-answer recovery, CDP ownership and teardown, artifact scoping, and whether tests/evidence cover those paths.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-now-inspect-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"I verified the expected attachment is present and matches its declared checksum. I’ll now inspect the packaged source, tests, diff, and evidence against the required artifact/lifecycle blocking criteria.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-im-now-inspecting-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"The archive and internal checksums are validated, and I’m now inspecting implementation gates: session URL mapping, hydration behavior, artifact recovery, fake-provider contracts, and fail-closed edge cases.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-found-checking-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"The archive is readable and matches the declared SHA-256; all substantive bundle checksums validate, except the SHA256SUMS self-entry. I’ve found the guard in provider and lifecycle paths and am checking terminal-verdict preservation plus test proof of no final artifacts.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-now-in-code-review-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"The attachment gate has passed, and I’m now in code-level review of the progress guards across provider, lifecycle, and show/recovery paths. I’m also checking artifact/session scoping and treating local fake-suite timeout context cautiously rather than as evidence.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-markerless-required-verdict)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"The source bundle is readable and the implementation review is being evaluated against the requested criteria. No verdict token has been emitted yet.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-required-verdict-diff-only)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"diff --git a/fix.txt b/fix.txt\\n+patch body without a verdict marker","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-required-verdict-marker-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"I’m still checking whether to return LGTM_NO_BLOCKING or CHANGES_REQUIRED after I finish reviewing.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-specifically-rerunning-progress)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"I’m specifically re-running the fake-test contract around resume artifact-required handling while cross-checking it against the bundled source and evidence.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    recovered-complete)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"complete","answerText":"final recovered answer","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","usedFallbacks":["recovery"],"warnings":["response-recovered-after-timeout"],"responseStableMs":0}\n' "$sid" "$sid" "$sid"
+      ;;
+    attachment-missing|done-attachment-missing)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"ATTACHMENT_MISSING","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-mentions-attachment-missing)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"LGTM\\n- Non-blocking note: the prompt mentions ATTACHMENT_MISSING as an exact sentinel, but this answer is not that sentinel.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-mentions-auth-needs-pro)
+      printf '{"fake":true,"ok":true,"sessionId":"%s","status":"done","answerText":"PATCH_READY\\nFinding: the previous lifecycle bug was an auth.needs_pro false positive inside terminal answer text, not a subscription_required provider state.","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1},"responseStableMs":2500}\n' "$sid" "$sid" "$sid"
+      ;;
+    done-no-target:*)
+      printf '{"fake":true,"sessionId":"%s","status":"done","text":"%s"}\n' "$sid" "${event#done-no-target:}"
+      ;;
+    timeout)
+      printf '{"fake":true,"sessionId":"%s","status":"timeout"}\n' "$sid"
+      exit 124
+      ;;
+    timeout-with-url)
+      printf '{"fake":true,"sessionId":"%s","status":"timeout","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      exit 124
+      ;;
+    crash)
+      printf 'CDP connection failed for %s\n' "$sid" >&2
+      exit 70
+      ;;
+    malformed)
+      printf 'not-json\n'
+      ;;
+    provider-missing-fields)
+      printf '{"fake":true,"provider":{"conversationId":"%s","state":"complete","message":{"content":"ok"}}}\n' "$sid"
+      ;;
+    auth-login-required)
+      printf '{"fake":true,"sessionId":"%s","status":"login_required","provider":{"status":"auth_required","page":"login"}}\n' "$sid"
+      ;;
+    provider-limit)
+      printf '{"fake":true,"sessionId":"%s","status":"provider_limit","reason":"provider.limit","message":"too many requests","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    pro-required)
+      printf '{"fake":true,"sessionId":"%s","status":"subscription_required","reason":"auth.needs_pro","message":"upgrade required","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    artifact-controls-absent)
+      printf '{"fake":true,"sessionId":"%s","status":"artifact.controls_absent","reason":"artifact.controls_absent","text":"ARTIFACT_DONE but no controls","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[]}\n' "$sid" "$sid" "$sid"
+      ;;
+    hard)
+      printf 'fake poll hard failure for %s\n' "$sid" >&2
+      exit 70
+      ;;
+    *)
+      printf '{"fake":true,"sessionId":"%s","status":"%s"}\n' "$sid" "$event"
+      ;;
+  esac
+}
+
+fake_sessions() {
+  local action="${args[1]:-}" sid event
+  mkdir -p "$fake_root"
+  case "$action" in
+    list)
+      printf '%s\n' "${args[*]}" >> "$fake_root/list-calls"
+      if [[ -f "$fake_root/sessions-list.json" ]]; then
+        cat "$fake_root/sessions-list.json"
+      else
+        printf '{"fake":true,"sessions":[]}\n'
+      fi
+      return 0
+      ;;
+    show)
+      sid="${args[2]:-}"
+      if [[ -z "$sid" || "$sid" == --* ]]; then
+        sid="$(arg_value --session || true)"
+      fi
+      [[ -n "$sid" ]] || { printf 'missing --session for sessions %s\n' "$action" >&2; exit 2; }
+      printf '%s\n' "${args[*]}" >> "$fake_root/show-calls"
+      event="$(next_sequence show-sequence shown)"
+      ;;
+    resume)
+      sid="${args[2]:-}"
+      if [[ -z "$sid" || "$sid" == --* ]]; then
+        sid="$(arg_value --session || true)"
+      fi
+      [[ -n "$sid" ]] || { printf 'missing --session for sessions %s\n' "$action" >&2; exit 2; }
+      printf '%s\n' "${args[*]}" >> "$fake_root/resume-calls"
+      event="$(next_sequence resume-sequence resumed)"
+      ;;
+    prune)
+      printf '%s\n' "${args[*]}" >> "$fake_root/prune-calls"
+      if [[ -f "$fake_root/prune-fail" ]]; then
+        printf 'fake sessions prune must not be called\n' >&2
+        exit 71
+      fi
+      printf '{"fake":true,"pruned":0}\n'
+      return 0
+      ;;
+    *)
+      printf 'unsupported fake sessions action: %s\n' "$action" >&2
+      exit 2
+      ;;
+  esac
+
+  case "$event" in
+    malformed)
+      printf 'not-json\n'
+      ;;
+    malformed-patch)
+      printf 'PATCH_READY\n\n'
+      printf 'diff --git a/context.txt b/context.txt\n'
+      printf -- '--- a/context.txt\n'
+      printf '+++ b/context.txt\n'
+      printf '@@ -1 +1 @@\n'
+      printf -- '-old\n'
+      printf -- '+new\n'
+      ;;
+    hard)
+      printf 'fake sessions %s hard failure for %s\n' "$action" "$sid" >&2
+      exit 70
+      ;;
+    target-metadata)
+      printf '{"fake":true,"status":"show","session":{"sessionId":"%s","targetId":"target-%s","tabId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}}\n' "$sid" "$sid" "$sid" "$sid"
+      ;;
+    final-visible)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"final visible answer from resumed ChatGPT UI","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","activeTurn":false,"assistantCount":1,"userCount":1,"assistantTurn":{"turnIndex":0,"domId":"assistant-final","textSha256":"sha-final-visible"},"turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1,"latestAssistantSha256":"sha-final-visible"}}\n' "$sid" "$sid" "$sid"
+      ;;
+    final-visible-artifact)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"final visible answer with recovered artifact","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","activeTurn":false,"assistantCount":1,"userCount":1,"artifacts":[{"download":{"visibleFilename":"recovered.tar.gz","savedPath":"/tmp/recovered.tar.gz","size":12,"sha256":"sha-recovered"}}],"assistantTurn":{"turnIndex":0,"domId":"assistant-final","textSha256":"sha-final-visible-artifact"},"turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1,"latestAssistantSha256":"sha-final-visible-artifact"}}\n' "$sid" "$sid" "$sid"
+      ;;
+    final-visible-wrong-url)
+      printf '{"fake":true,"sessionId":"%s","status":"done","answerText":"final answer from another ChatGPT conversation","targetId":"target-other-session","conversationUrl":"https://chatgpt.com/c/other-session","activeTurn":false,"assistantCount":1,"userCount":1,"assistantTurn":{"turnIndex":0,"domId":"assistant-final","textSha256":"sha-final-visible-wrong"},"turnEvidence":{"activeTurn":false,"userCount":1,"assistantCount":1,"latestAssistantSha256":"sha-final-visible-wrong"}}\n' "$sid"
+      ;;
+    artifact-controls-absent)
+      printf '{"fake":true,"sessionId":"%s","status":"artifact.controls_absent","reason":"artifact.controls_absent","answerText":"ARTIFACT_DONE but no controls","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s","artifacts":[]}\n' "$sid" "$sid" "$sid"
+      ;;
+    pro-required)
+      printf '{"fake":true,"sessionId":"%s","status":"subscription_required","reason":"auth.needs_pro","message":"upgrade required","targetId":"target-%s","conversationUrl":"https://chatgpt.com/c/%s"}\n' "$sid" "$sid" "$sid"
+      ;;
+    *)
+      if [[ -f "$fake_root/sessions-success-stderr" ]]; then
+        printf '[poll] 0s - stabilizing...\n' >&2
+      fi
+      printf '{"fake":true,"sessionId":"%s","status":"%s"}\n' "$sid" "$event"
+      ;;
+  esac
+}
+
+fake_start() {
+  mkdir -p "$fake_root"
+  if [[ -f "$fake_root/start-fail" ]]; then
+    printf 'fake start failed\n' >&2
+    exit 70
+  fi
+  printf '%s\n' "${args[*]}" >> "$fake_root/start-calls"
+  printf '{"fake":true,"started":true}\n'
+}
+
+fake_tab_cleanup() {
+  mkdir -p "$fake_root"
+  printf '%s\n' "${args[*]}" >> "$fake_root/tab-cleanup-calls"
+  if [[ -f "$fake_root/tab-cleanup.json" ]]; then
+    cat "$fake_root/tab-cleanup.json"
+  else
+    printf '{"fake":true,"candidates":[],"untracked":[]}\n'
+  fi
+}
+
+case "${args[0]:-}" in
+  status)
+    next_status
+    ;;
+  send)
+    fake_send
+    ;;
+  poll)
+    fake_poll
+    ;;
+  sessions)
+    fake_sessions
+    ;;
+  stop)
+    mkdir -p "$fake_root"
+    printf '%s\n' "${args[*]}" >> "$fake_root/stop-calls"
+    printf 'fake provider stop must not be called\n' >&2
+    exit 71
+    ;;
+  doctor)
+    printf 'fake doctor must not be called\n' >&2
+    exit 71
+    ;;
+  start)
+    fake_start
+    ;;
+  tab-cleanup)
+    fake_tab_cleanup
+    ;;
+  *)
+    printf '{"fake":true,"ok":true}\n'
+    ;;
+esac

@@ -1,0 +1,141 @@
+operation	process_outcome	provider_status	result_variant	reason_domain	provider_exit	session_id	answer_text	artifacts	required_lifecycle_status	source_predicate
+capture.root	exit_0	capture_failed	capture_failed	null	0	null	null	null	capture_failed	root screenshot and DOM both unsaved
+capture.root	exit_0	captured	captured	null	0	null	null	null	captured	root screenshot or DOM saved
+capture.root	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	null	null	null	failed	ProviderContractError::InvalidArtifactObject
+capture.root	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	null	null	null	failed	ProviderContractError::InvalidField
+capture.root	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	null	null	null	failed	ProviderContractError::NotObject
+capture.root	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	null	null	null	failed	ProviderContractError::UnknownStatus
+capture.root	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	null	null	null	failed	ProviderInvocationError::Json
+capture.root	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	null	null	null	failed	ProviderInvocationError::Io
+capture.root	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	null	null	null	failed	ProviderInvocationError::StderrTooLarge
+capture.root	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	null	null	null	failed	ProviderInvocationError::StdoutTooLarge
+capture.root	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	null	null	null	failed	ProviderInvocationError::Timeout
+capture.session	exit_0	capture_failed	capture_failed	null	0	required	null	null	capture_failed	pinned-session screenshot and DOM both unsaved
+capture.session	exit_0	captured	captured	null	0	required	null	null	captured	pinned-session screenshot or DOM saved
+capture.session	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	required	null	null	failed	ProviderContractError::InvalidArtifactObject
+capture.session	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	required	null	null	failed	ProviderContractError::InvalidField
+capture.session	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	required	null	null	failed	ProviderContractError::NotObject
+capture.session	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	required	null	null	failed	ProviderContractError::UnknownStatus
+capture.session	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	required	null	null	failed	ProviderInvocationError::Json
+capture.session	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	required	null	null	failed	ProviderInvocationError::Io
+capture.session	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	required	null	null	failed	ProviderInvocationError::StderrTooLarge
+capture.session	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	required	null	null	failed	ProviderInvocationError::StdoutTooLarge
+capture.session	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	required	null	null	failed	ProviderInvocationError::Timeout
+download	exit_0	artifact.controls_absent	artifact_controls_absent	artifact.controls_absent	0	required	null	empty	artifact.controls_absent	required or claimed artifact has no visible control
+download	exit_0	artifact.download_timeout	artifact_download_timeout	artifact.download_timeout	0	required	null	optional	artifact.download_timeout	download candidate or warning exists without complete saved artifact
+download	exit_0	artifact.recovery_failed	artifact_recovery_failed	artifact.recovery_failed	0	required	null	optional	artifact.recovery_failed	Rust download recovery invocation or persistence fails
+download	exit_0	done	done	null	0	required	null	array	done	artifact expectation and durable download receipts are satisfied
+download	exit_0	provider_limit	postclick_provider_limit	provider.limit	0	required	null	optional	provider_limit	blocking provider-limit surface appears after click
+download	exit_0	provider_limit	preclick_provider_limit	provider.limit	0	required	null	null	provider_limit	blocking provider-limit surface exists before artifact click
+download	exit_0	scroll.bottom_unverified	content_scroll_unverified	visual_reason_enum	0	required	optional	null	scroll.bottom_unverified	unhydrated state also lacks strict bottom proof
+download	exit_0	scroll.bottom_unverified	postclick_scroll_unverified	visual_reason_enum	0	required	null	optional	scroll.bottom_unverified	post-click capture lacks strict bottom proof
+download	exit_0	scroll.bottom_unverified	preclick_scroll_unverified	visual_reason_enum	0	required	null	null	scroll.bottom_unverified	pre-click strict bottom proof is unverified
+download	exit_0	session.content_unavailable	content_unavailable	session.content_unavailable	0	required	null	null	session.content_unavailable	conversation does not hydrate within the bounded window
+download	exit_0	session.start_unconfirmed	root_url_unconfirmed	session.start_unconfirmed	0	required	null	null	session.start_unconfirmed	selected page URL is not a non-root conversation URL
+download	exit_0	session.start_unconfirmed	session_url_mismatch	session.url_mismatch	0	required	null	null	session.start_unconfirmed	conversation URL session id differs from pinned session
+download	exit_2	provider.schema_drift	missing_session	provider.schema_drift	2	null	null	null	provider.schema_drift	download session argument absent
+download	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	required	null	null	failed	ProviderContractError::InvalidArtifactObject
+download	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	required	null	null	failed	ProviderContractError::InvalidField
+download	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	required	null	null	failed	ProviderContractError::NotObject
+download	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	required	null	null	failed	ProviderContractError::UnknownStatus
+download	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	required	null	null	failed	ProviderInvocationError::Json
+download	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	required	null	null	failed	ProviderInvocationError::Io
+download	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	required	null	null	failed	ProviderInvocationError::StderrTooLarge
+download	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	required	null	null	failed	ProviderInvocationError::StdoutTooLarge
+download	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	required	null	null	failed	ProviderInvocationError::Timeout
+poll	exit_0	artifact.controls_absent	artifact_controls_absent	artifact.controls_absent	0	required	required	empty	artifact.controls_absent	required or claimed artifact has no visible control
+poll	exit_0	artifact.download_timeout	artifact_download_timeout	artifact.download_timeout	0	required	required	optional	artifact.download_timeout	download candidate or warning exists without complete saved artifact
+poll	exit_0	artifact.recovery_failed	artifact_recovery_failed	artifact.recovery_failed	0	required	required	optional	artifact.recovery_failed	Rust artifact-recovery invocation fails after terminal answer
+poll	exit_0	done	done	null	0	required	required	array	done	stable terminal answer and artifact expectation are satisfied
+poll	exit_0	provider_limit	terminal_provider_limit	provider.limit	0	required	required	null	provider_limit	terminal candidate coexists with blocking provider-limit surface
+poll	exit_0	running	progress_prologue	answer.progress_prologue	0	required	required	null	running	stable visible text is only the progress prologue
+poll	exit_0	scroll.bottom_unverified	terminal_scroll_unverified	visual_reason_enum	0	required	required	null	scroll.bottom_unverified	terminal answer exists but strict bottom proof is unverified
+poll	exit_0	session.running_unverified	progress_scroll_unverified	visual_reason_enum	0	required	required	null	session.running_unverified	progress prologue plus unverified bottom capture
+poll	exit_0	session.start_unconfirmed	root_url_unconfirmed	session.start_unconfirmed	0	required	null	null	session.start_unconfirmed	selected page URL is not a non-root conversation URL
+poll	exit_0	session.start_unconfirmed	session_url_mismatch	session.url_mismatch	0	required	null	null	session.start_unconfirmed	conversation URL session id differs from pinned session
+poll	exit_124	running	timeout_active_or_empty	null	124	required	null	null	running	deadline reached with active generation or no answer text
+poll	exit_124	session.running_unverified	initial_scroll_unverified	visual_reason_enum	124	required	optional	null	session.running_unverified	pre-wait screenshot or DOM bottom proof is unverified
+poll	exit_124	session.running_unverified	timeout_running_scroll_unverified	visual_reason_enum	124	required	optional	null	session.running_unverified	running or empty state plus unverified terminal capture
+poll	exit_2	provider.schema_drift	missing_session	provider.schema_drift	2	null	null	null	provider.schema_drift	poll session argument absent
+poll	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	required	null	null	failed	ProviderContractError::InvalidArtifactObject
+poll	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	required	null	null	failed	ProviderContractError::InvalidField
+poll	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	required	null	null	failed	ProviderContractError::NotObject
+poll	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	required	null	null	failed	ProviderContractError::UnknownStatus
+poll	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	required	null	null	failed	ProviderInvocationError::Json
+poll	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	required	null	null	failed	ProviderInvocationError::Io
+poll	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	required	null	null	failed	ProviderInvocationError::StderrTooLarge
+poll	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	required	null	null	failed	ProviderInvocationError::StdoutTooLarge
+poll	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	required	null	null	failed	ProviderInvocationError::Timeout
+send	exit_0	attachment_unavailable	attachment_unavailable	provider.attachment_unavailable	0	null	null	null	attachment_unavailable	one or more requested attachment chips never become complete
+send	exit_0	login_required	readiness_login_required	auth.needs_login	0	null	null	null	login_required	fresh page login or challenge visible
+send	exit_0	model.selection_mismatch	model_control_unverified	model.selection_unverified	0	null	null	null	model.selection_mismatch	bounded picker flow cannot identify selected control
+send	exit_0	model.selection_mismatch	model_selection_mismatch	model.selection_mismatch	0	null	null	null	model.selection_mismatch	bounded picker selection does not reverify requested model
+send	exit_0	provider_limit	readiness_provider_limit	provider.limit	0	null	null	null	provider_limit	fresh page blocking provider-limit surface visible
+send	exit_0	sent	sent	null	0	required	null	null	sent	non-root session id and new-turn evidence both confirmed
+send	exit_0	session.start_unconfirmed	session_start_unconfirmed	session.start_unconfirmed	0	null	null	null	session.start_unconfirmed	new turn lacks non-root conversation session id
+send	exit_0	subscription_required	model_subscription_required	auth.needs_pro	0	null	null	null	subscription_required	model picker proves Pro unavailable behind upgrade
+send	exit_0	subscription_required	readiness_subscription_required	auth.needs_pro	0	null	null	null	subscription_required	fresh page subscription gate visible
+send	exit_2	provider.schema_drift	missing_prompt	provider.schema_drift	2	null	null	null	provider.schema_drift	prompt absent before browser operation
+send	exit_70	unreachable	readiness_unreachable	provider.schema_drift	70	null	null	null	unreachable	readiness is neither ready nor a closed blocking state
+send	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	null	null	null	failed	ProviderContractError::InvalidArtifactObject
+send	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	null	null	null	failed	ProviderContractError::InvalidField
+send	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	null	null	null	failed	ProviderContractError::NotObject
+send	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	null	null	null	failed	ProviderContractError::UnknownStatus
+send	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	null	null	null	failed	ProviderInvocationError::Json
+send	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	null	null	null	failed	ProviderInvocationError::Io
+send	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	null	null	null	failed	ProviderInvocationError::StderrTooLarge
+send	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	null	null	null	failed	ProviderInvocationError::StdoutTooLarge
+send	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	null	null	null	failed	ProviderInvocationError::Timeout
+session.resume	exit_0	artifact.controls_absent	artifact_controls_absent	artifact.controls_absent	0	required	required	empty	artifact.controls_absent	answer claims an artifact but no visible control exists
+session.resume	exit_0	artifact.download_timeout	artifact_download_timeout	artifact.download_timeout	0	required	required	optional	artifact.download_timeout	artifact recovery sees an incomplete download candidate or warning
+session.resume	exit_0	artifact.recovery_failed	artifact_recovery_failed	artifact.recovery_failed	0	required	required	optional	artifact.recovery_failed	artifact recovery provider invocation or persistence fails
+session.resume	exit_0	done	done	null	0	required	required	array	done	stable final visible answer and optional artifact recovery complete
+session.resume	exit_0	provider_limit	terminal_provider_limit	provider.limit	0	required	optional	optional	provider_limit	resume terminal candidate coexists with blocking limit surface
+session.resume	exit_0	resumed	idle_resumed	null	0	required	null	null	resumed	valid hydrated session has no active or final assistant answer
+session.resume	exit_0	running	running	answer.progress_prologue_or_null	0	required	optional	null	running	active turn or progress prologue remains
+session.resume	exit_0	session.content_unavailable	content_unavailable	session.content_unavailable	0	required	null	null	session.content_unavailable	conversation does not hydrate within the bounded window
+session.resume	exit_0	session.running_unverified	terminal_scroll_unverified	visual_reason_enum	0	required	optional	optional	session.running_unverified	resume terminal candidate or artifact capture lacks strict bottom proof
+session.resume	exit_0	session.start_unconfirmed	root_url_unconfirmed	session.start_unconfirmed	0	required	null	null	session.start_unconfirmed	selected page URL is not a non-root conversation URL
+session.resume	exit_0	session.start_unconfirmed	session_url_mismatch	session.url_mismatch	0	required	null	null	session.start_unconfirmed	conversation URL session id differs from pinned session
+session.resume	exit_2	provider.schema_drift	missing_session	provider.schema_drift	2	null	null	null	provider.schema_drift	resume session argument absent
+session.resume	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	required	null	null	failed	ProviderContractError::InvalidArtifactObject
+session.resume	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	required	null	null	failed	ProviderContractError::InvalidField
+session.resume	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	required	null	null	failed	ProviderContractError::NotObject
+session.resume	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	required	null	null	failed	ProviderContractError::UnknownStatus
+session.resume	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	required	null	null	failed	ProviderInvocationError::Json
+session.resume	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	required	null	null	failed	ProviderInvocationError::Io
+session.resume	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	required	null	null	failed	ProviderInvocationError::StderrTooLarge
+session.resume	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	required	null	null	failed	ProviderInvocationError::StdoutTooLarge
+session.resume	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	required	null	null	failed	ProviderInvocationError::Timeout
+session.show	exit_0	done	done	null	0	required	required	null	done	stable final visible assistant answer
+session.show	exit_0	provider_limit	terminal_provider_limit	provider.limit	0	required	optional	null	provider_limit	show terminal candidate coexists with blocking limit surface
+session.show	exit_0	running	running	answer.progress_prologue_or_null	0	required	optional	null	running	active turn or progress prologue remains
+session.show	exit_0	session.content_unavailable	content_unavailable	session.content_unavailable	0	required	null	null	session.content_unavailable	conversation does not hydrate within the bounded window
+session.show	exit_0	session.running_unverified	terminal_scroll_unverified	visual_reason_enum	0	required	optional	null	session.running_unverified	show terminal candidate lacks strict bottom proof
+session.show	exit_0	session.start_unconfirmed	root_url_unconfirmed	session.start_unconfirmed	0	required	null	null	session.start_unconfirmed	selected page URL is not a non-root conversation URL
+session.show	exit_0	session.start_unconfirmed	session_url_mismatch	session.url_mismatch	0	required	null	null	session.start_unconfirmed	conversation URL session id differs from pinned session
+session.show	exit_0	show	idle_show	null	0	required	null	null	show	valid hydrated session has no active or final assistant answer
+session.show	exit_2	provider.schema_drift	missing_session	provider.schema_drift	2	null	null	null	provider.schema_drift	show session argument absent
+session.show	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	required	null	null	failed	ProviderContractError::InvalidArtifactObject
+session.show	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	required	null	null	failed	ProviderContractError::InvalidField
+session.show	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	required	null	null	failed	ProviderContractError::NotObject
+session.show	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	required	null	null	failed	ProviderContractError::UnknownStatus
+session.show	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	required	null	null	failed	ProviderInvocationError::Json
+session.show	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	required	null	null	failed	ProviderInvocationError::Io
+session.show	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	required	null	null	failed	ProviderInvocationError::StderrTooLarge
+session.show	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	required	null	null	failed	ProviderInvocationError::StdoutTooLarge
+session.show	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	required	null	null	failed	ProviderInvocationError::Timeout
+status	exit_0	login_required	login_required	auth.needs_login	0	null	null	null	login_required	login or challenge visible
+status	exit_0	provider_limit	provider_limit	provider.limit	0	null	null	null	provider_limit	blocking provider-limit surface visible
+status	exit_0	ready	ready	null	0	null	null	null	ready	composer and Pro ready
+status	exit_0	subscription_required	subscription_required	auth.needs_pro	0	null	null	null	subscription_required	Pro unavailable or upgrade blocks composer
+status	exit_0	unknown	unknown	null	0	null	null	null	unknown	no closed readiness predicate matches
+status	invocation_error	not_applicable	invocation_contract_invalid_artifact	provider.contract.invalid_artifact	null	null	null	null	failed	ProviderContractError::InvalidArtifactObject
+status	invocation_error	not_applicable	invocation_contract_invalid_field	provider.contract.invalid_field	null	null	null	null	failed	ProviderContractError::InvalidField
+status	invocation_error	not_applicable	invocation_contract_not_object	provider.contract.not_object	null	null	null	null	failed	ProviderContractError::NotObject
+status	invocation_error	not_applicable	invocation_contract_unknown_status	provider.contract.unknown_status	null	null	null	null	failed	ProviderContractError::UnknownStatus
+status	invocation_error	not_applicable	invocation_invalid_json	provider.invalid_json	null	null	null	null	failed	ProviderInvocationError::Json
+status	invocation_error	not_applicable	invocation_io_error	provider.io_error	null	null	null	null	failed	ProviderInvocationError::Io
+status	invocation_error	not_applicable	invocation_stderr_too_large	provider.stderr_too_large	null	null	null	null	failed	ProviderInvocationError::StderrTooLarge
+status	invocation_error	not_applicable	invocation_stdout_too_large	provider.stdout_too_large	null	null	null	null	failed	ProviderInvocationError::StdoutTooLarge
+status	invocation_error	not_applicable	invocation_timeout	provider.timeout	null	null	null	null	failed	ProviderInvocationError::Timeout

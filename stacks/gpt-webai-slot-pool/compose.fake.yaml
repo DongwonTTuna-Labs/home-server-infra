@@ -1,0 +1,38 @@
+x-fake-slot: &fake-slot
+  image: "${GPT_WEBAI_FAKE_IMAGE:?set GPT_WEBAI_FAKE_IMAGE}"
+  network_mode: "none"
+  restart: "no"
+  volumes:
+    - ${GPT_WEBAI_FAKE_PROVIDER_PATH:?set GPT_WEBAI_FAKE_PROVIDER_PATH}:/usr/local/bin/node:ro
+
+services:
+  gpt-webai-slot-01:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-01"
+  gpt-webai-slot-02:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-02"
+  gpt-webai-slot-03:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-03"
+  gpt-webai-slot-04:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-04"
+  gpt-webai-slot-05:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-05"
+  gpt-webai-slot-06:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-06"
+  gpt-webai-slot-07:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-07"
+  gpt-webai-slot-08:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-08"
+  gpt-webai-slot-09:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-09"
+  gpt-webai-slot-10:
+    <<: *fake-slot
+    container_name: "${GPT_WEBAI_FAKE_CONTAINER_PREFIX:?set GPT_WEBAI_FAKE_CONTAINER_PREFIX}-slot-10"

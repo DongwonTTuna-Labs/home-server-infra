@@ -1,0 +1,1 @@
+{"argv":["cleanup","--json","--apply"],"caseId":"cleanup-applied","env":{},"expected":{"eventTypes":[],"exit":0,"mutates":false,"ok":true,"reason":null,"receiptOps":[],"resultKind":"cleanup.applied","terminal":true},"files":[],"providerScript":[],"schemaVersion":"pr72.lifecycle-fixture.r13.v1"}

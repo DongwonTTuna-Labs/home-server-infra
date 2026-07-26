@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/gpt-webai-lifecycle"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false

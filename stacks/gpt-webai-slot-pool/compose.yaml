@@ -4,6 +4,11 @@ x-slot-env: &slot-env
   CHROME_NO_SANDBOX: "1"
   CHROME_BINARY_PATH: /usr/bin/chromium
   DISPLAY: ":99"
+  GPT_WEBAI_ATTACHMENT_READY_TIMEOUT_MS: "180000"
+  GPT_WEBAI_SEND_READY_TIMEOUT_MS: "180000"
+  PR72_OWNER_ID: "${PR72_OWNER_ID:?set PR72_OWNER_ID}"
+  PR72_OWNER_GENERATION: "${PR72_OWNER_GENERATION:?set PR72_OWNER_GENERATION}"
+  PR72_RUNTIME_INCARNATION: "${PR72_RUNTIME_INCARNATION:?set PR72_RUNTIME_INCARNATION}"
 
 x-slot-common: &slot-common
   build:
@@ -16,6 +21,10 @@ x-slot-common: &slot-common
     - no-new-privileges:true
   cap_drop:
     - ALL
+  labels:
+    pr72.gpt-webai.owner-id: "${PR72_OWNER_ID:?set PR72_OWNER_ID}"
+    pr72.gpt-webai.owner-generation: "${PR72_OWNER_GENERATION:?set PR72_OWNER_GENERATION}"
+    pr72.gpt-webai.runtime-incarnation: "${PR72_RUNTIME_INCARNATION:?set PR72_RUNTIME_INCARNATION}"
   environment:
     <<: *slot-env
   healthcheck:
@@ -34,8 +43,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-01
       CDP_PORT: "9223"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-01/state:/state/slot-01
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-01/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-01/state:/state/slot-01
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-01/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-01/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-02:
     <<: *slot-common
@@ -45,8 +56,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-02
       CDP_PORT: "9224"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-02/state:/state/slot-02
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-02/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-02/state:/state/slot-02
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-02/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-02/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-03:
     <<: *slot-common
@@ -56,8 +69,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-03
       CDP_PORT: "9225"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-03/state:/state/slot-03
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-03/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-03/state:/state/slot-03
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-03/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-03/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-04:
     <<: *slot-common
@@ -67,8 +82,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-04
       CDP_PORT: "9226"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-04/state:/state/slot-04
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-04/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-04/state:/state/slot-04
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-04/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-04/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-05:
     <<: *slot-common
@@ -78,8 +95,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-05
       CDP_PORT: "9227"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-05/state:/state/slot-05
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-05/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-05/state:/state/slot-05
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-05/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-05/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-06:
     <<: *slot-common
@@ -89,8 +108,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-06
       CDP_PORT: "9228"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-06/state:/state/slot-06
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-06/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-06/state:/state/slot-06
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-06/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-06/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-07:
     <<: *slot-common
@@ -100,8 +121,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-07
       CDP_PORT: "9229"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-07/state:/state/slot-07
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-07/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-07/state:/state/slot-07
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-07/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-07/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-08:
     <<: *slot-common
@@ -111,8 +134,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-08
       CDP_PORT: "9230"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-08/state:/state/slot-08
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-08/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-08/state:/state/slot-08
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-08/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-08/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-09:
     <<: *slot-common
@@ -122,8 +147,10 @@ services:
       BROWSER_AGENT_HOME: /state/slot-09
       CDP_PORT: "9231"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-09/state:/state/slot-09
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-09/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-09/state:/state/slot-09
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-09/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-09/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
 
   gpt-webai-slot-10:
     <<: *slot-common
@@ -133,5 +160,7 @@ services:
       BROWSER_AGENT_HOME: /state/slot-10
       CDP_PORT: "9232"
     volumes:
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-10/state:/state/slot-10
-      - ${GPT_WEBAI_STATE_DIR:-/home/dongwonttuna/.local/state/gpt-webai-lifecycle}/slots/slot-10/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-10/state:/state/slot-10
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-10/attachments:/broker-attachments:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/slots/slot-10/prompts:/broker-prompts:ro
+      - ${GPT_WEBAI_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/gpt-webai-lifecycle/r13}/artifacts:/broker-artifacts
