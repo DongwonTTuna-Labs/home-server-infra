@@ -491,10 +491,25 @@ concurrent_unknown_operations() {
 }
 
 finalize_case() {
-  local cleanup_failed=0 session slot prefix rc
+  local cleanup_failed=0 session slot prefix rc record kind
   local release_kinds='release.allocatable,release.cooldown_blocked,release.already_released,release.stop_skipped_owner_alive,release.target_unknown,release.fencing_mismatch,release.takeover_unproven,release.stop_failed,release.cleanup_failed,release.lock_contended'
   declare -A seen_sessions=() seen_slots=()
   set +e
+  # Cleanup passes only on a clean release outcome AND its exact canonical exit
+  # (§12.3): allocatable/cooldown_blocked/already_released/stop_skipped_owner_alive
+  # exit 0; target_unknown (nothing was acquired, e.g. read-only preflight) exit 70.
+  # Every genuine failure kind fails cleanup regardless of rc.
+  release_outcome_clean() {
+    local kind="$1" rc="$2"
+    case "$kind" in
+      release.allocatable|release.cooldown_blocked|release.already_released|release.stop_skipped_owner_alive)
+        (( rc == 0 )) ;;
+      release.target_unknown)
+        (( rc == 70 )) ;;
+      *)
+        return 1 ;;
+    esac
+  }
   for session in "${sessions_to_release[@]}"; do
     [[ -n "$session" && -z "${seen_sessions[$session]:-}" ]] || continue
     seen_sessions[$session]=1
@@ -505,10 +520,13 @@ finalize_case() {
     rc=$?
     printf '%s\n' "$rc" >"$prefix.rc"
     chmod 0600 -- "$prefix".*
-    validate_envelope_record \
-      "$prefix.stdout" "$prefix.stderr" "$prefix.rc" "$release_kinds" >/dev/null ||
+    if record="$(validate_envelope_record \
+      "$prefix.stdout" "$prefix.stderr" "$prefix.rc" "$release_kinds")"; then
+      kind="$(printf '%s\n' "$record" | sed -n '3p')"
+      release_outcome_clean "$kind" "$rc" || cleanup_failed=1
+    else
       cleanup_failed=1
-    (( rc == 0 )) || cleanup_failed=1
+    fi
   done
   if (( ${#seen_sessions[@]} == 0 )); then
     for slot in "${slots_to_release[@]}"; do
@@ -521,10 +539,13 @@ finalize_case() {
       rc=$?
       printf '%s\n' "$rc" >"$prefix.rc"
       chmod 0600 -- "$prefix".*
-      validate_envelope_record \
-        "$prefix.stdout" "$prefix.stderr" "$prefix.rc" "$release_kinds" >/dev/null ||
+      if record="$(validate_envelope_record \
+        "$prefix.stdout" "$prefix.stderr" "$prefix.rc" "$release_kinds")"; then
+        kind="$(printf '%s\n' "$record" | sed -n '3p')"
+        release_outcome_clean "$kind" "$rc" || cleanup_failed=1
+      else
         cleanup_failed=1
-      (( rc == 0 )) || cleanup_failed=1
+      fi
     done
   fi
   CASE_STEP=$((CASE_STEP + 1))
@@ -705,10 +726,12 @@ run_one_case() {
 case "$mode" in
   iteration)
     ordinal="$iteration"
-    while IFS=$'\t' read -r id _; do
+    # Read the catalog on fd 3: case steps run stdin-consuming children
+    # (docker exec -i), which would otherwise swallow the remaining rows.
+    while IFS=$'\t' read -r -u 3 id _; do
       [[ "$id" != caseId && "$id" == L* ]] || continue
       run_one_case "$id" "$ordinal"
-    done <"$catalog"
+    done 3<"$catalog"
     ;;
   case)
     run_one_case "$case_id" 1

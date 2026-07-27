@@ -65,10 +65,28 @@ export async function withBrowserR13(callback) {
   const { chromium } = await import('playwright-core');
   const artifactsDir = playwrightArtifactsDir();
   await mkdir(artifactsDir, { recursive: true });
-  const browser = await chromium.connectOverCDP(cdpEndpoint(), {
-    artifactsDir,
-    isLocal: true,
-  });
+  // A freshly (re)started slot runtime needs a few seconds before Chrome
+  // listens on CDP. That startup window is an expected runtime state, not a
+  // health verdict, so retry transient connect failures within the canonical
+  // probe deadline (STATE_AND_RECOVERY §5: deadlineMs 15000) before failing.
+  const deadlineMs = 15_000;
+  const retryDelayMs = 500;
+  const startedAt = Date.now();
+  let browser;
+  for (;;) {
+    try {
+      browser = await chromium.connectOverCDP(cdpEndpoint(), {
+        artifactsDir,
+        isLocal: true,
+      });
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const transient = /ECONNREFUSED|ECONNRESET|socket hang up|retrieving websocket url/i.test(message);
+      if (!transient || Date.now() - startedAt + retryDelayMs > deadlineMs) throw error;
+      await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+    }
+  }
   return callback(browser);
 }
 

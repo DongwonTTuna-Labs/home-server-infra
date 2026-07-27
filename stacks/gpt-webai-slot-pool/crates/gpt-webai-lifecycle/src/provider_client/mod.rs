@@ -236,8 +236,8 @@ pub enum R13ProviderInvocationError {
     ResponseContract(R13ProviderContractError),
     #[error("provider stdout was not one canonical JSON object plus LF: {0}")]
     Canonical(serde_json::Error),
-    #[error("provider rc {code} is not a valid R13 envelope result")]
-    ProcessExit { code: i32 },
+    #[error("provider rc {code} is not a valid R13 envelope result: {stderr}")]
+    ProcessExit { code: i32, stderr: String },
     #[error("provider rc/envelope mismatch for rc {code}")]
     ExitEnvelopeMismatch { code: i32 },
     #[error("provider process terminated without an exit code")]
@@ -311,11 +311,17 @@ pub fn run_r13_provider_invocation(
         .ok_or(R13ProviderInvocationError::MissingExitCode)?;
     crate::failpoint::propagate_provider_exit(code, &output.stdout, &output.stderr);
     if !matches!(code, 0 | 2 | 70 | 124) {
-        return Err(R13ProviderInvocationError::ProcessExit { code });
+        return Err(R13ProviderInvocationError::ProcessExit {
+            code,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
     }
     if !matches!(code, 0 | 124) {
         return if output.stdout.is_empty() {
-            Err(R13ProviderInvocationError::ProcessExit { code })
+            Err(R13ProviderInvocationError::ProcessExit {
+                code,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
         } else {
             Err(R13ProviderInvocationError::ExitEnvelopeMismatch { code })
         };

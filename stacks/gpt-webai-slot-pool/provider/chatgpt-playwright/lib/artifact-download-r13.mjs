@@ -151,13 +151,16 @@ export function buildArtifactControl(candidate, terminalAssistantTurnId) {
   const ariaLabelHash = candidate.ariaLabel
     ? `sha256:${sha256Text(candidate.ariaLabel)}`
     : null;
+  // Semantic identity only (tag, role, testId, accessible-name, DOM path);
+  // boundingBoxHash is excluded from the id — it is presentation that shifts on
+  // scroll/reflow — and carried as a separate field. Matches the root/control
+  // id tuple in root-selector.mjs and UI_AND_ARTIFACT_FLOW.md §2.
   const controlId = `control_${canonicalSha256([
     candidate.tagName.toLowerCase(),
     candidate.role || '',
     testIdHash ?? '',
     ariaLabelHash ?? '',
     domPathHash,
-    boundingBoxHash,
   ])}`;
   return {
     boundingBoxHash,

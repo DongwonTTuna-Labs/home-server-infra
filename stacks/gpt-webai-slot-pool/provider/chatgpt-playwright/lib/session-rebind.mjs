@@ -6,6 +6,7 @@ import { conversationIdFromUrl, sha256Text } from './common.mjs';
 import {
   derivePageBindingId,
   deriveSessionBindingId,
+  deriveTurnId,
 } from './contracts/r13.mjs';
 import { captureRootState } from './root-selector.mjs';
 import {
@@ -151,6 +152,16 @@ export async function observeR13Session(page, {
   const terminalAnswerSha256 = !activeTurn && latestAssistant?.text
     ? `sha256:${sha256Text(latestAssistant.text)}`
     : null;
+  // Derive the assistant turn id from the SAME node that supplies answerText
+  // (the direct `[data-message-author-role]` scan), not the article-based
+  // snapshot. The two scans disagree intermittently (the completed answer is
+  // found by the direct scan before it is wrapped in a `conversation-turn`
+  // article), which left answerText present but the turn id null — so the
+  // hydration loop never reached `answer_visible` and timed out. deriveTurnId
+  // matches send-confirmation's derivation for the same dataMessageId.
+  const assistantTurnId = latestAssistant?.dataMessageId
+    ? deriveTurnId(observedSessionId, 'assistant', latestAssistant.dataMessageId)
+    : (turns.latestAssistant?.turnId ?? null);
   const generation = pageBindingGeneration
     ?? expected.pageBindingGeneration
     ?? expected.lastKnownPageBindingGeneration + 1;
@@ -181,7 +192,7 @@ export async function observeR13Session(page, {
     slotId: expected.slotId,
     targetId: root.targetId,
     terminalAnswerSha256,
-    visibleAssistantTurnId: turns.latestAssistant?.turnId ?? null,
+    visibleAssistantTurnId: assistantTurnId,
     visibleUserTurnId: turns.latestUser?.turnId ?? null,
   };
   return {

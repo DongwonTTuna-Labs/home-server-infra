@@ -262,7 +262,14 @@ export async function handlePoll(context, overrides = {}) {
     pageBindingGeneration: expected.pageBindingGeneration,
     sessionId: expected.sessionId,
   });
-  while (observation.activeTurn && Date.now() < deadline) {
+  // Settle to a DEFINITIVE state: keep polling while the turn is still
+  // streaming (activeTurn) OR the turn has ended but its answer text has not
+  // materialized yet (a brief post-stream gap where the assistant turn is
+  // marked complete before its text node is readable — common with short/fast
+  // answers). Returning `running` with activeTurn=false in that gap violates
+  // the running-requires-active-turn contract, so wait it out (bounded by the
+  // poll deadline) before deciding running vs terminal.
+  while ((observation.activeTurn || !observation.answerText) && Date.now() < deadline) {
     await captureEvidence();
     await page.waitForTimeout(Math.min(750, Math.max(1, deadline - Date.now())));
     observation = await dependencies.observeR13Session(page, {

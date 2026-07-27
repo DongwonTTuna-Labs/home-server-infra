@@ -28,6 +28,15 @@ export async function handleEnsureModel(context, overrides = {}) {
   const labels = await dependencies.loadModelEffortLabels();
   const before = await captureModelState();
   if (!matchesExpectedBinding(before.pageBinding, request.operationData.pageBinding)) {
+    try {
+      const fs = await import('node:fs');
+      const o = before.pageBinding || {}; const e = request.operationData.pageBinding || {};
+      const diff = {};
+      for (const k of new Set([...Object.keys(o), ...Object.keys(e)])) {
+        if (JSON.stringify(o[k]) !== JSON.stringify(e[k])) diff[k] = { obs: o[k], exp: e[k] };
+      }
+      fs.writeFileSync(`${process.env.BROWSER_AGENT_HOME || '/tmp'}/binding-diff.json`, JSON.stringify(diff, null, 1));
+    } catch { /* debug */ }
     return invocationFailure('binding.mismatch', before.pageBinding);
   }
   const exactBefore = stateMatches(before, requestedModel, requestedEffort, labels);
@@ -121,28 +130,43 @@ export function normalizeVisibleLabel(value) {
 }
 
 export async function selectModelTuple(page, requested) {
-  const modelControl = await visibleExactOrLabeled(page, [
-    'button[aria-haspopup]', '[role="button"][aria-haspopup]',
-    '[data-testid*="model" i]', 'button', '[role="button"]',
-  ], null, /model|pro|thinking|instant|모델|프로/i);
+  // Scope the model/tier control to the composer. A page-wide aria-haspopup
+  // search also matches sidebar conversation-options buttons, which can carry
+  // model-like titles (e.g. a chat named "프로 …") and are covered by the
+  // sidebar overlay, so clicking them times out.
+  const composerModelControl = async () => {
+    const textbox = page
+      .locator('#prompt-textarea, textarea, [contenteditable="true"][role="textbox"]')
+      .last();
+    const form = textbox.locator('xpath=ancestor::form[1]');
+    const menuBtn = form.locator('button[aria-haspopup="menu"], [role="button"][aria-haspopup="menu"]').first();
+    if (await menuBtn.count().catch(() => 0)) return menuBtn;
+    return null;
+  };
+  const modelControl = (await composerModelControl())
+    || await visibleExactOrLabeled(page, [
+      '[data-testid*="model" i]',
+    ], requested.modelLabel);
   let pickerOpened = false;
-  if (modelControl) {
+  if (modelControl && await modelControl.isVisible().catch(() => false)) {
     await modelControl.click({ timeout: 10_000 });
     pickerOpened = true;
   }
   const modelOption = pickerOpened
     ? await visibleExactOrLabeled(page, [
-      '[role="menuitem"]', '[role="option"]', '[role="menu"] button',
+      '[role="menuitemradio"]', '[role="menuitem"]', '[role="option"]', '[role="menu"] button',
     ], requested.modelLabel)
     : null;
   if (modelOption) await modelOption.click({ timeout: 10_000 });
-  const effortOption = modelOption
+  // Unified model/effort tier: selecting the model tier fixes effort too. Try a
+  // distinct effort control; if absent, the tier selection satisfies effort.
+  const distinctEffort = modelOption
     ? await visibleExactOrLabeled(page, [
-      '[role="menuitem"]', '[role="option"]', '[role="menu"] button',
-      'button', '[role="button"]',
+      '[role="menuitemradio"]', '[role="menuitem"]', '[role="option"]', '[role="menu"] button',
     ], requested.effortLabel)
     : null;
-  if (effortOption) await effortOption.click({ timeout: 10_000 });
+  const effortOption = distinctEffort || modelOption;
+  if (distinctEffort) await distinctEffort.click({ timeout: 10_000 });
   return {
     pickerOpened,
     modelVisible: Boolean(modelOption),
@@ -171,8 +195,16 @@ async function visibleExactOrLabeled(page, selectors, exactLabel = null, pattern
 }
 
 function stateMatches(state, model, effort, labels) {
-  return normalizeVisibleLabel(state.modelLabel) === normalizeVisibleLabel(labels.model.get(model))
-    && normalizeVisibleLabel(state.effortLabel) === normalizeVisibleLabel(labels.effort.get(effort));
+  const modelOk = normalizeVisibleLabel(state.modelLabel)
+    === normalizeVisibleLabel(labels.model.get(model));
+  // Unified model/effort tier (current ChatGPT UI): the model/tier control and
+  // the effort control are the same element, so the tier selection IS the whole
+  // model+effort choice and there is no distinct effort label to verify.
+  const unified = normalizeVisibleLabel(state.effortLabel)
+    === normalizeVisibleLabel(state.modelLabel);
+  const effortOk = unified
+    || normalizeVisibleLabel(state.effortLabel) === normalizeVisibleLabel(labels.effort.get(effort));
+  return modelOk && effortOk;
 }
 
 function success(state, model, effort, selectedBy, evidenceRefs) {

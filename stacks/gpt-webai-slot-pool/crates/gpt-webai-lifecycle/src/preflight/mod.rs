@@ -137,7 +137,11 @@ fn invoke_status_attempt(
             cohort: crate::allocator::cohort_of(&slot.slot_id.0).map(str::to_string),
             operation_id: operation_id.to_string(),
             request_id: None,
-            run_id: Some(input.run_id.clone()),
+            // The provider-request identity must satisfy the shared runId⟹requestId
+            // invariant (provider r13.mjs; events.rs). Preflight/status probes carry no
+            // requestId, so the provider identity carries no runId either; the CLI runId
+            // still appears in the R13 envelope (set separately by the command layer).
+            run_id: None,
             session_id: None,
             slot_id: slot.slot_id.0.clone(),
         },

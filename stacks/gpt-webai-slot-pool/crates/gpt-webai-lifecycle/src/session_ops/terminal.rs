@@ -203,7 +203,12 @@ fn persist_after_artifact(
     };
     Ok(TerminalPipelineOutput {
         source_event: published,
-        result: if artifacts.optional_zero {
+        // Zero artifact controls yields `terminal_optional_zero` only when the
+        // request opted into optional artifacts. With expectation `none` the run
+        // never wanted artifacts, so a text-only terminal answer is a plain
+        // `terminal_success` (canonical crosswalk: `ae-none.artifact-zero` ->
+        // run.terminal_success; `ae-optional.artifact-zero` -> optional_zero).
+        result: if artifacts.optional_zero && input.artifact_expectation == "optional" {
             TerminalResult::OptionalZero
         } else {
             TerminalResult::Success

@@ -23,16 +23,21 @@ export async function handleUploadOnly(context, overrides = {}) {
     }
     return absolute;
   });
+  // Observe the page binding BEFORE uploading. Attaching a file mutates the
+  // composer (adds a chip), shifting its structural identity, so a post-upload
+  // binding would never match the pre-upload expected binding. The binding
+  // identifies the bound page; upload completeness is verified by the chip
+  // observation below.
+  const observedPageBinding = await observePageBinding();
+  if (canonicalSha256(observedPageBinding) !== canonicalSha256(request.operationData.pageBinding)) {
+    return uploadFailure('upload.incomplete', observedPageBinding);
+  }
   await dependencies.setFiles(page, files);
   const observed = await dependencies.waitForUploadChips(
     page,
     attachmentSet.count,
     Math.min(request.deadlineMs, 30_000),
   );
-  const observedPageBinding = await observePageBinding();
-  if (canonicalSha256(observedPageBinding) !== canonicalSha256(request.operationData.pageBinding)) {
-    return uploadFailure('upload.incomplete', observedPageBinding);
-  }
   const proof = uploadProof({
     attachmentSet,
     before,
@@ -123,24 +128,45 @@ export async function observeUploadChips(page) {
       }
       return current === document.documentElement ? result : null;
     };
-    const seeds = Array.from(document.querySelectorAll(
-      '[data-testid*="attachment" i],[class*="attachment" i],[data-testid*="file" i]',
-    )).filter(visible);
+    // Enumerate attached files by SEMANTICS, not CSS classes (which ChatGPT
+    // rewrites often). Every attached file is presented, inside the composer,
+    // by controls whose accessible name references the filename — most reliably
+    // the remove button ("Remove file N: <name>"). Anchor on any name-bearing
+    // control and extract the filename token. Staged attachments use
+    // content-hashed (whitespace-free) names, so a run ending in a short
+    // extension survives action-label prefixes and file-type suffixes; this
+    // makes detection independent of the composer's markup.
+    const FILENAME = /[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu;
+    const nameOf = node => (
+      node.getAttribute('aria-label') || node.getAttribute('title')
+      || node.innerText || node.textContent || ''
+    );
+    // Scope to the composer (the region holding the message textbox) so a
+    // filename mentioned elsewhere on the page is never mistaken for a chip.
+    const textbox = document.querySelector(
+      '#prompt-textarea,[contenteditable="true"][role="textbox"],[contenteditable="true"],textarea',
+    );
+    const scope = (textbox && (textbox.closest('form') || textbox.parentElement?.parentElement))
+      || document.body;
+    const seeds = Array.from(scope.querySelectorAll('button,[role="button"],[aria-label],[title]'))
+      .filter(node => visible(node)
+        && !node.closest('[data-testid*="profile" i]')
+        && FILENAME.test(nameOf(node)));
     return seeds.map(seed => {
-      const accessibleFilename = (
-        seed.getAttribute('aria-label') || seed.getAttribute('title')
-        || seed.innerText || seed.textContent || ''
-      ).trim();
-      let root = seed;
+      const accessibleFilename = (nameOf(seed).match(FILENAME)?.[0] ?? '').trim();
+      if (!accessibleFilename) return null;
+      // Resolve the chip container for geometry/completeness: the nearest
+      // ancestor that both holds a control (the remove button) and shows the
+      // filename text. Start above the name-bearing seed so a bare button does
+      // not resolve to itself.
+      let root = seed.matches?.('button,[role="button"]') ? seed.parentElement : seed;
       while (root) {
-        const controls = [
-          ...(root.matches?.('button,[role="button"]') ? [root] : []),
-          ...root.querySelectorAll('button,[role="button"]'),
-        ].filter(visible);
-        if (controls.length > 0 && visible(root)) break;
+        const hasControl = Boolean(root.querySelector('button,[role="button"]'));
+        const showsName = FILENAME.test(root.innerText || root.textContent || '');
+        if (hasControl && showsName && visible(root)) break;
         root = root.parentElement;
       }
-      if (!root || !accessibleFilename) return null;
+      if (!root) return null;
       const rect = root.getBoundingClientRect();
       const busy = root.getAttribute('aria-busy') === 'true'
         || Boolean(root.querySelector('[role="progressbar"],[aria-busy="true"]'));

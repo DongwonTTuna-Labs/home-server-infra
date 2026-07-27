@@ -30,6 +30,12 @@ export async function handleSendClick(context, overrides = {}) {
   const { pageBinding, promptInput, sendAttemptId } = request.operationData;
   const prompt = await dependencies.readPromptInput(promptInput);
   const baseline = await dependencies.r13TurnObservations(page);
+  // Observe the page binding BEFORE typing. The binding identifies the bound
+  // page; a composer's structural identity includes its bounding box, which
+  // shifts once text is entered, so observing after fillPrompt would never match
+  // the pre-typing expected binding. Composer *content* is verified separately
+  // by the digest check below.
+  const observedPageBinding = await observePageBinding();
   await dependencies.fillPrompt(page, prompt.toString('utf8'));
   const composerText = await dependencies.readPromptComposer(page);
   if (`sha256:${sha256Text(composerText)}` !== promptInput.sha256) {
@@ -51,7 +57,6 @@ export async function handleSendClick(context, overrides = {}) {
     payload: preClickReceipt,
   });
 
-  const observedPageBinding = await observePageBinding();
   if (canonicalSha256(observedPageBinding) !== canonicalSha256(pageBinding)) {
     return sendFailure('send.turn_not_proven', preClickReceipt, observedPageBinding);
   }

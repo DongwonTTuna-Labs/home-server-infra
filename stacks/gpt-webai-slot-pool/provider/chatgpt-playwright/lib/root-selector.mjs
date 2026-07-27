@@ -31,13 +31,18 @@ export function structuralIdentity(candidate, prefix) {
   const ariaLabelHash = nullableHash(candidate.ariaLabelHash, 'candidate.ariaLabelHash');
   const domPathHash = hashDomPath(candidate.domPath);
   const boundingBoxHash = hashBoundingBox(candidate.boundingBox);
+  // The structural id anchors on SEMANTIC signals (tag, role, testId,
+  // accessible-name, DOM path) and deliberately excludes boundingBoxHash: the
+  // viewport-relative box is presentation, not identity, and shifts on benign
+  // layout changes (e.g. the composer grows when a file is attached, or a
+  // ChatGPT redesign reflows it) that must not invalidate the page binding.
+  // boundingBoxHash is still carried as a field for evidence/telemetry.
   const digest = canonicalSha256([
     tagName,
     role ?? '',
     testIdHash ?? '',
     ariaLabelHash ?? '',
     domPathHash,
-    boundingBoxHash,
   ]);
   if (prefix !== 'root' && prefix !== 'control') {
     throw new RootSelectorError('provider.schema_drift', 'candidate.prefix');
@@ -57,7 +62,11 @@ export function selectRootBindingCandidates(input) {
   const conversation = select('conversation', input.conversationRoots);
   const composer = select('composer', input.composerRoots);
   const model = select('model', input.modelControls, composer.candidate.boundingBox);
-  const effort = select('effort', input.effortControls, composer.candidate.boundingBox);
+  // Unified model/effort menu (current ChatGPT UI exposes one tier control and
+  // no separate effort control): the model tier control also governs effort.
+  const effort = input.effortControls.length
+    ? select('effort', input.effortControls, composer.candidate.boundingBox)
+    : model;
   return {
     composerRoot: composer.candidate,
     composerRootId: composer.identity.id,
@@ -107,6 +116,17 @@ export async function captureRootState(page) {
     captureBrowserPageIdentity(page),
     captureRootSelectorInput(page),
   ]);
+  // Neutralize the DOM-mutation-generation counter for identity purposes. It is
+  // a per-capture churn signal that increments on ANY incidental mutation
+  // (cursor blink, spinner, streamed token) during the capture window, so it is
+  // inherently non-deterministic across the separate operations of one request
+  // and produces spurious binding.mismatch failures on the live (constantly
+  // animating) ChatGPT UI. Real page-identity changes (navigation, target/
+  // context swap) are already caught by pageIncarnationId/targetId/
+  // browserContextId/normalizedUrl, so a constant here loses no safety while
+  // making the binding stable across ops. Semantic identity over volatile churn
+  // — same rationale as excluding boundingBoxHash from the id tuple.
+  captured.selectorInput.domMutationGeneration = 0;
   const selected = selectRootBindingCandidates(captured.selectorInput);
   return {
     ...selected,
@@ -203,10 +223,21 @@ export async function captureRootSelectorInput(page) {
     const textbox = unique(Array.from(document.querySelectorAll(
       '#prompt-textarea,textarea,[contenteditable="true"][role="textbox"],.ProseMirror[contenteditable="true"]',
     )).filter(visible)).at(-1) || null;
+    // A fresh run starts on an empty new-chat page: the conversation container
+    // (`main`) exists but has no turns yet. Require turn-containment only when
+    // the page actually has turns (session/resume pages); on a turnless fresh
+    // page accept the visible conversation container so root capture can bind it.
+    const anyConversationTurn = document.querySelector(
+      '[data-testid^="conversation-turn"],[data-message-author-role]',
+    );
     const conversationNodes = unique([
       document.querySelector('main'),
       ...document.querySelectorAll('[data-testid*="conversation" i],[data-testid*="thread" i]'),
-    ]).filter(node => visible(node) && node.querySelector('[data-testid^="conversation-turn"],[data-message-author-role]'));
+    ]).filter(node => visible(node) && (
+      anyConversationTurn
+        ? node.querySelector('[data-testid^="conversation-turn"],[data-message-author-role]')
+        : true
+    ));
     const composerNodes = unique([
       textbox?.closest('form'),
       textbox?.closest('[data-testid*="composer" i]'),
@@ -229,14 +260,27 @@ export async function captureRootSelectorInput(page) {
     const modelNodes = controls.filter(node => (
       modelLabelSet.has(accessibleName(node)) || structurallyModelLike(node)
     ));
-    const effortNodes = controls.filter(node => (
-      effortLabelSet.has(accessibleName(node)) || structurallyEffortLike(node)
-    ));
+    // Effort is identified only by its catalog label. The prior structural
+    // fallback matched almost every composer/header control (sidebar, apps, …)
+    // and made effort selection ambiguous on the live UI. When the UI has no
+    // labelled effort control (unified model/effort menu) this is empty and the
+    // model tier control governs effort (resolved in selectRootBindingCandidates).
+    const effortNodes = controls.filter(node => effortLabelSet.has(accessibleName(node)));
     const menuIds = new Set(modelNodes.flatMap(node => [
       node.getAttribute('aria-controls'),
       node.getAttribute('aria-owns'),
     ]).filter(Boolean));
-    if (!window.__gptWebaiR13MutationObserver) {
+    // Reset the mutation generation at the start of every capture. It is a
+    // per-capture stability signal, NOT a page-lifetime counter: a persistent
+    // observer accumulates the live page's incidental animations between the
+    // capture-root and ensure-model operations, so the derived rootBindingHash
+    // would never match across ops on a real (constantly mutating) ChatGPT page.
+    // Resetting makes the binding structural and stable across operations while
+    // still surfacing churn that happens within a single capture window.
+    if (window.__gptWebaiR13MutationObserver) {
+      window.__gptWebaiR13MutationObserver.disconnect();
+    }
+    {
       window.__gptWebaiR13MutationGeneration = 0;
       window.__gptWebaiR13MutationObserver = new MutationObserver(() => {
         window.__gptWebaiR13MutationGeneration = Math.min(

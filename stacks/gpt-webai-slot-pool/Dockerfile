@@ -30,6 +30,8 @@ RUN chmod 0755 /usr/local/bin/gpt-webai-slot-entrypoint /usr/local/bin/gpt-webai
     && find /usr/local/lib/gpt-webai-slot-pool/provider/chatgpt-playwright -type d -exec chmod 0755 {} + \
     && find /usr/local/lib/gpt-webai-slot-pool/provider/chatgpt-playwright -type f -exec chmod 0644 {} + \
     && chmod 0755 /usr/local/lib/gpt-webai-slot-pool/provider/chatgpt-playwright/cli.mjs \
+    && find /usr/local/lib/gpt-webai-slot-pool/contracts -type d -exec chmod 0755 {} + \
+    && find /usr/local/lib/gpt-webai-slot-pool/contracts -type f -exec chmod 0644 {} + \
     && ln -sf /usr/local/lib/gpt-webai-slot-pool/provider/chatgpt-playwright/cli.mjs /usr/local/bin/gpt-webai-provider
 
 ENV CHROME_BINARY_PATH=/usr/bin/chromium
