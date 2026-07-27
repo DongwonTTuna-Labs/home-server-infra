@@ -16,12 +16,15 @@ export async function reconcileSend(
 ): Promise<ReconcileResult> {
   const openPages = await session.relevantPages();
   if (!params.conversationUrl) {
-    return bindFoundPage(session, await scanPages(session, openPages, params.promptSha256));
+    // URL/turn identity가 아직 없는 창구간에는 prompt sha만 권위가 있다. send와 이
+    // 전체 판정은 daemon mutation 큐가 직렬화하므로 클릭 전 DOM을 관찰할 수 없다.
+    // 큐를 지난 뒤 같은 prompt가 둘 이상이면 어느 요청인지 증명할 수 없으므로 닫힌다.
+    return (await scanPages(session, openPages, params.promptSha256)).result;
   }
 
   const alreadyOpen = openPages.filter((page) => page.url() === params.conversationUrl);
   if (alreadyOpen.length > 0) {
-    return bindFoundPage(session, await scanPages(session, alreadyOpen, params.promptSha256));
+    return (await scanPages(session, alreadyOpen, params.promptSha256)).result;
   }
 
   let opened: Page;
@@ -33,7 +36,7 @@ export async function reconcileSend(
       await session.relevantPages(),
       params.promptSha256,
     );
-    const result = bindFoundPage(session, fallback);
+    const result = fallback.result;
     return result.found ? result : { found: false, proven: false };
   }
 
@@ -43,19 +46,11 @@ export async function reconcileSend(
       await session.relevantPages(),
       params.promptSha256,
     );
-    const result = bindFoundPage(session, fallback);
+    const result = fallback.result;
     return result.found ? result : { found: false, proven: false };
   }
 
-  return bindFoundPage(
-    session,
-    await scanPages(session, [opened], params.promptSha256),
-  );
-}
-
-function bindFoundPage(session: BrowserSession, outcome: ScanOutcome): ReconcileResult {
-  if (outcome.result.found && outcome.page) session.bindPage(outcome.page);
-  return outcome.result;
+  return (await scanPages(session, [opened], params.promptSha256)).result;
 }
 
 async function scanPages(
@@ -64,20 +59,29 @@ async function scanPages(
   promptSha256: string,
 ): Promise<ScanOutcome> {
   let observedConversation = false;
+  let unreadable = false;
+  let unboundMatch = false;
+  const matches: Array<{ page: Page; result: ReconcileResult }> = [];
   for (const page of pages) {
     const conversationUrl = page.url();
-    if (!session.isConversationUrl(conversationUrl)) continue;
-    const turns = await readTurns(page).catch(() => []);
-    if (turns.length === 0) continue;
-    observedConversation = true;
+    const turns = await readTurns(page).catch(() => null);
+    if (!turns) {
+      unreadable = true;
+      continue;
+    }
     const user = [...turns].reverse().find((turn) => (
       turn.role === "user" && sha256Text(turn.text) === promptSha256
     ));
+    if (!session.isConversationUrl(conversationUrl)) {
+      if (user) unboundMatch = true;
+      continue;
+    }
+    observedConversation = true;
     if (!user) continue;
     const assistant = turns.find((turn) => (
       turn.role === "assistant" && turn.domIndex > user.domIndex
     ));
-    return {
+    matches.push({
       result: {
         found: true,
         conversationUrl,
@@ -86,7 +90,11 @@ async function scanPages(
         proven: true,
       },
       page,
-    };
+    });
+  }
+  if (matches.length === 1 && !unreadable && !unboundMatch) return matches[0]!;
+  if (matches.length > 1 || unreadable || unboundMatch) {
+    return { result: { found: false, proven: false }, page: null };
   }
   return { result: { found: false, proven: observedConversation }, page: null };
 }

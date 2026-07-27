@@ -14,7 +14,7 @@ export type SendAttemptState =
   | "no_send_proven"
   | "uncertain";
 
-export type SlotState = "idle" | "busy" | "needs_login" | "provider_limit";
+export type SlotState = "idle" | "needs_login" | "provider_limit";
 
 export interface RequestRow {
   id: string;
@@ -65,6 +65,7 @@ export interface SlotConfig {
 
 export interface SlotsConfig {
   image: string;
+  maxConcurrent: number;
   slots: SlotConfig[];
 }
 
@@ -152,6 +153,10 @@ export interface OpenParams {
   conversationUrl: string;
 }
 
+export interface CloseConversationParams {
+  conversationUrl: string;
+}
+
 export interface CaptureFailureParams {
   tag: string;
 }
@@ -169,6 +174,7 @@ export interface RpcMethods {
   poll: { params: PollParams; result: PollResult };
   download: { params: DownloadParams; result: DownloadResult };
   open: { params: OpenParams; result: { ok: boolean } };
+  closeConversation: { params: CloseConversationParams; result: { ok: boolean } };
   captureFailure: { params: CaptureFailureParams; result: CaptureFailureResult };
 }
 

@@ -16,7 +16,12 @@ MANIFEST 해시 봉인, 정본 바이트 동결, 결정 addendum 체인은 **의
   답변 markdown + ChatGPT가 렌더한 다운로드 파일(artifacts)을 host에 저장 → JSON envelope로 반환.
 - 절대 중복 전송하지 않는다 (전송 불확실 시 fail-closed + resume으로 해소).
 - Pro Extended는 수 시간 걸릴 수 있다: timeout은 실패가 아니라 `running` + `resumeCommand`.
-- 동시 요청 다수(여러 Claude 세션이 동시에 gptpro 호출)를 슬롯 풀로 처리.
+- 동시 요청 다수(여러 Claude 세션이 동시에 gptpro 호출)를 처리하되, **로그인 관리 단위는
+  계정이다**: 슬롯 = 계정 = Chrome 프로필 1개 = 로그인 1개. 동시성은 슬롯을 늘리는 게
+  아니라 한 Chrome 안의 **탭 멀티플렉싱**으로 확보한다 (§8.1). 프로필 복제로 로그인을
+  "일괄화"하지 않는다 — ChatGPT의 rotating refresh token 때문에 같은 세션 사본 여럿이
+  서로를 로그아웃시킨다.
+- 로그인 수명주기 운영을 1급 기능으로: 원클릭 재시딩(`login`, §9.1) + 일일 keepalive(§9.2).
 - UI 리디자인에 강한 시맨틱 셀렉터. 셀렉터는 한 파일에 모아 한 곳만 고치면 되게 한다.
 
 **비범위 (구현 금지)**
@@ -89,6 +94,9 @@ stacks/gpt-webai-pro/
     supervisor.e2e.test.ts   # supervisor ↔ mock daemon (전송 멱등성 시나리오)
   scripts/
     container-smoke.sh       # 이미지 빌드 + 컨테이너 1개로 fake 하네스 왕복
+  systemd/
+    gpt-webai-pro-keepalive.service  # user unit (§9.2)
+    gpt-webai-pro-keepalive.timer
 ```
 
 state root: `${GPT_WEBAI_PRO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/gpt-webai-pro}`
@@ -155,10 +163,15 @@ CREATE TABLE slots (
   id             TEXT PRIMARY KEY,          -- config/slots.json과 조인
   account        TEXT NOT NULL,
   state          TEXT NOT NULL DEFAULT 'idle' CHECK (state IN
-                 ('idle','busy','needs_login','provider_limit')),
+                 ('idle','needs_login','provider_limit')),
   cooldown_until INTEGER, last_used_at INTEGER
 );
 ```
+
+`busy`는 슬롯 상태가 아니다 — 슬롯 점유도는 requests 테이블의 비종결 행 수로 파생한다
+(`user_version=2` 마이그레이션: slots 테이블 재생성, 기존 'busy' 행은 'idle'로).
+config 동기화 시 config에 없는 슬롯 행은 비종결 요청이 참조하지 않으면 삭제한다
+(과거 requests.slot_id 문자열은 이력으로 그대로 둔다).
 
 `log.jsonl`은 디버깅 편의용 append 로그이고 진실이 아니다. 복구는 항상 SQLite 기준.
 
@@ -180,7 +193,9 @@ staged ─▶ sending ─▶ generating ─▶ complete
    동일 basename 충돌은 첫 `.` 앞에 `-2`,`-3` 부가로 해소(복합 확장자 보존:
    `a.tar.gz`→`a-2.tar.gz`). 이후 RPC `files[].name`은 이 최종 이름.
    슬롯 할당 시점에 `slots/<slotId>/inbox/<reqId>/`로 복사한다.
-2. 슬롯 할당(§8): `BEGIN IMMEDIATE`로 idle 슬롯 선점 → busy. 없으면 envelope `recovering`
+2. 슬롯 할당(§8): `BEGIN IMMEDIATE` 트랜잭션 안에서 "할당 가능(§8) AND 비종결 요청 수 <
+   maxConcurrent"인 슬롯 중 **점유도 최소 → last_used_at 최구(最舊)** 순으로 선택해
+   requests.slot_id를 기록한다(이 기록이 곧 점유). 없으면 envelope `recovering`
    + `nextCommand: resume`(대기 재시도는 호출자 몫; 큐잉 데몬은 만들지 않는다).
 3. 컨테이너 보장: 안 돌면 이전 stopped 컨테이너를 교체하고 fresh token으로 create/start,
    authenticated health 준비 대기(최대 60s).
@@ -298,10 +313,20 @@ supervisor가 슬롯당 32-hex 토큰을 `slots/<slotId>/daemon.token`(0600)에 
 | `open` | `{conversationUrl}` | `{ok}` | resume용 네비게이션 |
 | `captureFailure` | `{tag}` | `{screenshotPath, htmlPath}` | outbox에 저장, supervisor가 회수 |
 
-**daemon은 모든 RPC를 단일 큐로 직렬 처리한다** (동시 실행 없음). 따라서 reconcile은
-항상 진행 중이던 send가 끝난 뒤에 실행되고, "reconcile이 클릭 직전 상태를 관찰"하는
-인터리빙은 데몬 차원에서 불가능하다. `poll`의 waitMs 대기도 큐를 점유한다 — supervisor는
-같은 슬롯에 요청 하나만 태우므로 문제 없다.
+**daemon 동시성 규칙 (탭 멀티플렉싱)**: 브라우저를 **변경**하는 RPC(send, reconcile의
+네비게이션 구간, open, download, closeConversation)는 단일 **mutation 큐**로 직렬
+처리한다 — reconcile 판정이 진행 중 send와 인터리빙되지 않는 보장은 유지된다.
+읽기 전용 RPC(poll의 관찰 루프, readiness, health, captureFailure)는 큐 밖에서 동시
+실행한다(서로 다른 탭에 대한 동시 poll이 서로를 막지 않아야 한다). 단 poll이 탭
+바인딩을 위해 네비게이션이 필요해지면 그 네비게이션만 mutation 큐를 거친다.
+
+- **send는 항상 새 탭에서 시작한다** (`context.newPage()` → 루트 이동 → 컴포저).
+  진행 중인 다른 요청의 탭을 건드리지 않는다.
+- `closeConversation {conversationUrl}` RPC: 요청 종결 후 supervisor가 호출, 해당 탭을
+  best-effort로 닫는다 (탭 누적 방지).
+- entrypoint의 Chromium에 백그라운드 탭 스로틀링 방지 플래그를 준다:
+  `--disable-background-timer-throttling --disable-backgrounding-occluded-windows
+  --disable-renderer-backgrounding`.
 
 에러: JSON-RPC error, `data: {kind, phase?, detail}`.
 kind 폐쇄 목록: `needs_login, provider_limit, model_unavailable, nav_failed, compose_failed,
@@ -380,12 +405,21 @@ CDP 이벤트와의 이중 상관은 하지 않는다.
 
 ```json
 { "image": "home-server/gpt-webai-pro-slot:latest",
+  "maxConcurrent": 3,
   "slots": [
-    {"id":"slot-01","account":"a","port":19301}, {"id":"slot-02","account":"a","port":19302},
-    {"id":"slot-03","account":"a","port":19303}, {"id":"slot-04","account":"b","port":19304},
-    {"id":"slot-05","account":"b","port":19305}, {"id":"slot-06","account":"b","port":19306},
-    {"id":"slot-07","account":"b","port":19307}, {"id":"slot-08","account":"c","port":19308},
-    {"id":"slot-09","account":"c","port":19309}, {"id":"slot-10","account":"c","port":19310} ] }
+    {"id":"slot-a","account":"a","port":19301},
+    {"id":"slot-b","account":"b","port":19302},
+    {"id":"slot-c","account":"c","port":19303} ] }
+```
+
+### 8.1 슬롯 = 계정 (2026-07-27 재편)
+
+**슬롯 하나가 계정 하나이고 프로필 하나이고 로그인 하나다.** 같은 계정에 프로필 여러 개를
+두지 않는다 — 로그인 관리 표면을 계정 수로 고정하기 위해서다. 슬롯당 동시 요청은
+`maxConcurrent`(기본 3)까지 허용하며, 동시성은 §6.2의 탭 멀티플렉싱이 담당한다.
+컨테이너는 해당 슬롯의 비종결 요청이 0이 될 때 정지한다.
+
+```
 ```
 
 - **할당**: idle & cooldown 지난 슬롯 중, `last_used_at`이 가장 오래된 **계정**의 가장 오래된
@@ -420,7 +454,42 @@ CDP 이벤트와의 이중 상관은 하지 않는다.
 
 기존 `gptpro` 호출 계약을 그대로 승계한다 (전역 CLAUDE.md의 envelope 불변식 호환).
 
-커맨드: `run | resume | status | cleanup | release | smoke`
+커맨드: `run | resume | status | cleanup | release | smoke | login | keepalive`
+
+### 9.1 `login --slot <id>` — 원클릭 로그인 시딩
+
+로그인(자격증명·2FA·CAPTCHA)은 자동화하지 않는다 — 사람이 직접 하되, 컨테이너 안
+Chrome에 손이 닿게 만든다:
+
+1. 해당 슬롯에 비종결 요청이 없는지 확인(있으면 거부).
+2. 컨테이너를 **login 모드**로 재생성: env `GWP_LOGIN_MODE=1` → entrypoint가 Xvfb를
+   1440x900으로 띄우고 x11vnc(-localhost)+noVNC(websockify)를 추가 기동.
+   noVNC 포트 = `port + 600` (19901..), `-p 127.0.0.1:<novnc>:<novnc>`만 추가 publish.
+   (인증: loopback 전용 + 단일 사용자 호스트 — daemon 포트와 동일한 신뢰 모델. VNC
+   비밀번호는 두지 않는다.)
+3. `사용자에게 http://127.0.0.1:<novnc>/vnc.html 안내`와 대기 경과는 stderr에 출력하고,
+   5초 간격으로 daemon `readiness`를 폴링(최대 15분). stdout은 마지막 JSON 한 객체+LF만.
+4. `ready` 관찰 → 컨테이너 정지 → 슬롯 idle 기록 →
+   `{"ok":true,"slot":"slot-a","state":"ready","novncUrl":"http://127.0.0.1:19901/vnc.html"}`
+   (exit 0). 타임아웃도 컨테이너 정지 후 `state:"needs_login"`,
+   `errorKind:"login_timeout"` JSON(exit 0). SIGINT/SIGTERM은 정지 후
+   `errorKind:"login_aborted"` JSON(exit 130). 컨테이너/RPC 오류는
+   `errorKind:"daemon_unreachable"` JSON(exit 0). 슬롯 없음/비종결 요청은 exit 2.
+- 이미지에 `x11vnc novnc websockify` 패키지 추가. 일반 모드에서는 어느 것도 기동하지
+  않고 포트도 publish하지 않는다.
+
+### 9.2 `keepalive` — 세션 사용-갱신 + 만료 조기 감지
+
+세션은 쓰지 않으면 죽는다. `keepalive`는 모든 구성 슬롯에 대해(상태 무관, 단 비종결
+요청이 있는 슬롯은 스킵 — 이미 살아 있음): 컨테이너 기동 → `readiness`(페이지 로드가
+곧 토큰 갱신) → 원래 꺼져 있었으면 정지. `ready→idle`, `needs_login`, `provider_limit`의
+확정 관찰만 slots.state에 기록하며 `unknown`/기동·RPC 오류는 기존 DB 상태를 보존한다.
+출력은 `{"ok":true,"slots":[{"id","state","probe"}]}`. `state`는 DB 최종 상태,
+`probe`는 `ready|needs_login|provider_limit|unknown|unreachable`; active-request 스킵은
+`unknown`. exit는 항상 0(needs_login/unreachable도 실패가 아니라 관찰 결과다).
+
+repo에 systemd user unit 2개를 둔다 (`systemd/gpt-webai-pro-keepalive.service|.timer`,
+`OnCalendar=*-*-* 09:20`, `RandomizedDelaySec=600`, README에 설치법). 설치는 운영자 몫.
 
 ```
 gpt-webai-pro run [--prompt-file P | 프롬프트 인자 | stdin] [--file F]... [--timeout-seconds N]
@@ -431,9 +500,9 @@ gpt-webai-pro release --session req_...   # 강제 종결(failed 처리) + 컨�
 gpt-webai-pro smoke                       # 라이브 1회 왕복. GWP_LIVE=1 필수
 ```
 
-§9의 요청 envelope는 **run / resume / release**에 적용된다. `status`/`cleanup`/`smoke`는
-자체 JSON을 출력한다 (status:
-`{"ok":true,"slots":[{"id","account","state","cooldownUntil","lastUsedAt"}],`
+§9의 요청 envelope는 **run / resume / release**에 적용된다.
+`status`/`cleanup`/`smoke`/`login`/`keepalive`는 자체 JSON을 출력한다 (status:
+`{"ok":true,"slots":[{"id","account","state","cooldownUntil","lastUsedAt","activeRequests"}],`
 `"requests":[{"id","status","slotId","ageSeconds","conversationUrl"}]}` — 비종결 요청만;
 cleanup: `{"ok":true,"dryRun":bool,"actions":[{"kind","target","detail"}]}`).
 

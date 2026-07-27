@@ -1,14 +1,17 @@
+import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { Page } from "playwright-core";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 
 import { GwpError, errorMessage } from "../shared/errors.js";
 import { atomicWrite, mkdirp } from "../shared/fsx.js";
 import type {
   CaptureFailureParams,
+  CloseConversationParams,
   DownloadParams,
   LabelConfig,
   OpenParams,
@@ -30,6 +33,8 @@ interface JsonRpcRequest {
   method: RpcMethod;
   params?: unknown;
 }
+
+type EnqueueMutation = <T>(operation: () => Promise<T>) => Promise<T>;
 
 export interface DaemonHandle {
   port: number;
@@ -65,11 +70,10 @@ export async function startDaemon(options: {
     });
   });
   const downloader = new ArtifactDownloader(options.outboxDir);
-  let rpcQueue: Promise<void> = Promise.resolve();
+  const enqueueMutation = createMutationQueue();
   webSockets.on("connection", (socket) => {
     socket.on("message", (data) => {
-      const task = rpcQueue.then(() => handleMessage(socket, data, options, downloader));
-      rpcQueue = task.catch(() => undefined);
+      void handleMessage(socket, data, options, downloader, enqueueMutation);
     });
   });
   const port = await listen(server, options.port);
@@ -93,6 +97,7 @@ async function handleMessage(
     labels: LabelConfig;
   },
   downloader: ArtifactDownloader,
+  enqueueMutation: EnqueueMutation,
 ): Promise<void> {
   let request: JsonRpcRequest | undefined;
   try {
@@ -100,7 +105,7 @@ async function handleMessage(
     if (request.jsonrpc !== "2.0" || !Number.isInteger(request.id)) {
       throw new Error("invalid JSON-RPC request");
     }
-    const result = await dispatch(request, options, downloader);
+    const result = await dispatch(request, options, downloader, enqueueMutation);
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
   } catch (error) {
     const gwp = error instanceof GwpError
@@ -133,57 +138,89 @@ async function dispatch(
     labels: LabelConfig;
   },
   downloader: ArtifactDownloader,
+  enqueueMutation: EnqueueMutation,
 ): Promise<unknown> {
   switch (request.method) {
     case "health": {
-      const page = await options.session.currentPage();
+      const page = await options.session.inspectionPage();
       return {
         ok: options.session.connected(),
         chromeConnected: options.session.connected(),
-        currentUrl: page.url(),
+        currentUrl: page?.url() ?? "",
       };
     }
-    case "readiness":
-      return readinessObservation(
-        await options.session.currentPage(),
-        options.labels.intelligence,
-      );
+    case "readiness": {
+      const page = await options.session.inspectionPage();
+      return page
+        ? readinessObservation(page, options.labels.intelligence)
+        : { state: "unknown", modelLabel: "" };
+    }
     case "send":
-      return sendMessage(options.session, request.params as SendParams, options.labels);
+      return enqueueMutation(() => (
+        sendMessage(options.session, request.params as SendParams, options.labels)
+      ));
     case "reconcile":
-      return reconcileSend(options.session, request.params as ReconcileParams);
+      // The whole verdict stays behind the mutation queue: a URL-less reconcile must
+      // never inspect the new tab between send's navigation/click and confirmed result.
+      return enqueueMutation(() => (
+        reconcileSend(options.session, request.params as ReconcileParams)
+      ));
     case "poll":
-      return pollConversation(options.session, request.params as PollParams);
+      return pollConversation(
+        options.session,
+        request.params as PollParams,
+        (conversationUrl) => enqueueMutation(() => options.session.open(conversationUrl)),
+      );
     case "download":
-      return downloader.download(options.session, request.params as DownloadParams);
+      return enqueueMutation(() => (
+        downloader.download(options.session, request.params as DownloadParams)
+      ));
     case "open": {
-      await options.session.open((request.params as OpenParams).conversationUrl);
+      await enqueueMutation(() => (
+        options.session.open((request.params as OpenParams).conversationUrl)
+      ));
       return { ok: true };
     }
-    case "captureFailure":
-      return captureFailure(
-        await options.session.currentPage(),
-        options.outboxDir,
-        request.params as CaptureFailureParams,
-      );
+    case "closeConversation": {
+      await enqueueMutation(() => (
+        options.session.closeConversation(
+          (request.params as CloseConversationParams).conversationUrl,
+        )
+      ));
+      return { ok: true };
+    }
+    case "captureFailure": {
+      const page = await options.session.inspectionPage();
+      if (!page) throw new GwpError("internal", "no browser page is available to capture");
+      return captureFailure(page, options.outboxDir, request.params as CaptureFailureParams);
+    }
     default:
       throw new GwpError("internal", `unknown RPC method: ${String(request.method)}`);
   }
 }
 
 async function captureFailure(
-  page: Awaited<ReturnType<BrowserSession["currentPage"]>>,
+  page: Page,
   outboxDir: string,
   params: CaptureFailureParams,
 ): Promise<{ screenshotPath: string; htmlPath: string }> {
   const tag = params.tag.replace(/[^a-z0-9._-]+/giu, "-").slice(0, 80) || "failure";
-  const stamp = Date.now();
+  const stamp = `${Date.now()}-${process.pid}-${randomBytes(6).toString("hex")}`;
   await mkdirp(outboxDir);
   const screenshotPath = path.join(outboxDir, `${stamp}-${tag}.png`);
   const htmlPath = path.join(outboxDir, `${stamp}-${tag}.html`);
   await page.screenshot({ path: screenshotPath, fullPage: true });
   await atomicWrite(htmlPath, await page.content());
   return { screenshotPath, htmlPath };
+}
+
+function createMutationQueue(): EnqueueMutation {
+  let tail: Promise<void> = Promise.resolve();
+  return <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = tail.then(operation);
+    tail = result.then(() => undefined, () => undefined);
+    return result;
+  };
 }
 
 function listen(server: Server, port: number): Promise<number> {

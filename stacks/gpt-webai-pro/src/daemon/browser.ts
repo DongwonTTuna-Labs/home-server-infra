@@ -3,7 +3,6 @@ import { chromium, type Browser, type Page } from "playwright-core";
 import { GwpError, isDirectNetworkFailure } from "../shared/errors.js";
 
 export class BrowserSession {
-  private page: Page | null = null;
   readonly baseUrl: string;
   readonly baseOrigin: string;
 
@@ -18,13 +17,13 @@ export class BrowserSession {
   static async connect(cdpUrl: string, baseUrl: string): Promise<BrowserSession> {
     const browser = await chromium.connectOverCDP(cdpUrl);
     const session = new BrowserSession(browser, baseUrl);
-    await session.currentPage();
+    await session.ensureInitialPage();
     return session;
   }
 
   static async fromBrowser(browser: Browser, baseUrl: string): Promise<BrowserSession> {
     const session = new BrowserSession(browser, baseUrl);
-    await session.currentPage();
+    await session.ensureInitialPage();
     return session;
   }
 
@@ -32,27 +31,14 @@ export class BrowserSession {
     return this.browser.isConnected();
   }
 
-  async currentPage(): Promise<Page> {
-    if (this.page && !this.page.isClosed()) return this.page;
-    const relevant = await this.relevantPages();
-    this.page = relevant.at(-1) ?? null;
-    if (this.page) return this.page;
-    const context = this.browser.contexts()[0] ?? await this.browser.newContext();
-    this.page = await context.newPage();
-    await this.navigate(this.page, this.baseUrl);
-    return this.page;
-  }
-
-  bindPage(page: Page): Page {
-    if (page.isClosed()) throw new GwpError("nav_failed", "cannot bind a closed browser page");
-    this.page = page;
-    return page;
+  async inspectionPage(): Promise<Page | null> {
+    return (await this.relevantPages()).at(-1) ?? null;
   }
 
   async newConversation(): Promise<Page> {
-    const page = await this.currentPage();
+    const context = this.browser.contexts()[0] ?? await this.browser.newContext();
+    const page = await context.newPage();
     await this.navigate(page, this.baseUrl);
-    this.page = page;
     return page;
   }
 
@@ -60,10 +46,22 @@ export class BrowserSession {
     if (!this.isConversationUrl(conversationUrl)) {
       throw new GwpError("nav_failed", `rejected conversation URL: ${conversationUrl}`);
     }
-    const page = await this.currentPage();
-    if (page.url() !== conversationUrl) await this.navigate(page, conversationUrl);
-    this.page = page;
+    const existing = await this.findConversationPage(conversationUrl);
+    if (existing) return existing;
+    const context = this.browser.contexts()[0] ?? await this.browser.newContext();
+    const page = await context.newPage();
+    await this.navigate(page, conversationUrl);
     return page;
+  }
+
+  async findConversationPage(conversationUrl: string): Promise<Page | null> {
+    return (await this.relevantPages()).find((page) => page.url() === conversationUrl) ?? null;
+  }
+
+  async closeConversation(conversationUrl: string): Promise<void> {
+    for (const page of await this.relevantPages()) {
+      if (page.url() === conversationUrl) await page.close().catch(() => undefined);
+    }
   }
 
   async relevantPages(): Promise<Page[]> {
@@ -87,6 +85,13 @@ export class BrowserSession {
     } catch {
       return false;
     }
+  }
+
+  private async ensureInitialPage(): Promise<void> {
+    if ((await this.relevantPages()).length > 0) return;
+    const context = this.browser.contexts()[0] ?? await this.browser.newContext();
+    const page = await context.newPage();
+    await this.navigate(page, this.baseUrl);
   }
 
   private async navigate(page: Page, url: string): Promise<void> {

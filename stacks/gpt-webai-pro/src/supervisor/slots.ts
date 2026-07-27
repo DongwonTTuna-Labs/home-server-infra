@@ -7,25 +7,10 @@ function age(value: number | null): number {
   return value === null ? Number.NEGATIVE_INFINITY : value;
 }
 
-export function allocateSlot(
-  db: GwpDatabase,
-  config: SlotConfig[],
-  now = Date.now(),
-  excluded = new Set<string>(),
-): SlotConfig | null {
-  return db.immediate(() => {
-    const rows = db.listSlots();
-    const selected = selectSlot(rows, config, now, excluded);
-    if (!selected) return null;
-    db.connection.prepare("UPDATE slots SET state = 'busy', last_used_at = ? WHERE id = ?")
-      .run(now, selected.id);
-    return selected;
-  });
-}
-
 export function claimSlotForRequest(
   db: GwpDatabase,
   config: SlotConfig[],
+  maxConcurrent: number,
   requestId: string,
   now = Date.now(),
   excluded = new Set<string>(),
@@ -41,10 +26,9 @@ export function claimSlotForRequest(
     }
     if (request.status !== "staged") return { request, slot: null };
 
-    const selected = selectSlot(db.listSlots(), config, now, excluded);
+    const selected = selectSlot(db, db.listSlots(), config, maxConcurrent, now, excluded);
     if (!selected) return { request, slot: null };
-    db.connection.prepare("UPDATE slots SET state = 'busy', last_used_at = ? WHERE id = ?")
-      .run(now, selected.id);
+    db.connection.prepare("UPDATE slots SET last_used_at = ? WHERE id = ?").run(now, selected.id);
     const claimed = db.connection.prepare(`
       UPDATE requests SET slot_id = ?, updated_at = ?
       WHERE id = ? AND status = 'staged' AND slot_id IS NULL
@@ -55,40 +39,23 @@ export function claimSlotForRequest(
 }
 
 function selectSlot(
+  db: GwpDatabase,
   rows: SlotRow[],
   config: SlotConfig[],
+  maxConcurrent: number,
   now: number,
   excluded: Set<string>,
 ): SlotConfig | null {
   const configured = new Map(config.map((slot) => [slot.id, slot]));
-  const eligible = rows.filter((slot) => (
-    configured.has(slot.id)
-    && !excluded.has(slot.id)
-    && (
-      (slot.state === "idle" && (slot.cooldown_until === null || slot.cooldown_until <= now))
-      || (slot.state === "provider_limit" && slot.cooldown_until !== null && slot.cooldown_until <= now)
-    )
-  ));
+  const eligible = rows.map((slot) => ({ slot, active: db.countActiveForSlot(slot.id) }))
+    .filter(({ slot, active }) => configured.has(slot.id) && !excluded.has(slot.id)
+      && active < maxConcurrent && (slot.state === "idle"
+        || (slot.state === "provider_limit" && slot.cooldown_until !== null
+          && slot.cooldown_until <= now)));
   if (eligible.length === 0) return null;
-
-  const byAccount = new Map<string, SlotRow[]>();
-  for (const slot of rows) {
-    if (!configured.has(slot.id)) continue;
-    const group = byAccount.get(slot.account) ?? [];
-    group.push(slot);
-    byAccount.set(slot.account, group);
-  }
-  const eligibleAccounts = [...new Set(eligible.map((slot) => slot.account))];
-  eligibleAccounts.sort((left, right) => {
-    const leftLast = Math.max(...(byAccount.get(left) ?? []).map((slot) => age(slot.last_used_at)));
-    const rightLast = Math.max(...(byAccount.get(right) ?? []).map((slot) => age(slot.last_used_at)));
-    return leftLast - rightLast || left.localeCompare(right);
-  });
-  const account = eligibleAccounts[0]!;
-  const selected = eligible
-    .filter((slot) => slot.account === account)
-    .sort((left, right) => age(left.last_used_at) - age(right.last_used_at)
-      || left.id.localeCompare(right.id))[0]!;
+  const selected = eligible.sort((left, right) => left.active - right.active
+    || age(left.slot.last_used_at) - age(right.slot.last_used_at)
+    || left.slot.id.localeCompare(right.slot.id))[0]!.slot;
   return configured.get(selected.id)!;
 }
 
@@ -114,32 +81,6 @@ export function markSlotIdle(db: GwpDatabase, slotId: string): void {
   db.connection.prepare(`
     UPDATE slots SET state = 'idle', cooldown_until = NULL WHERE id = ?
   `).run(slotId);
-}
-
-export function releaseSlotIfUnused(
-  db: GwpDatabase,
-  slotId: string,
-  excludingRequestId?: string,
-): boolean {
-  if (db.countActiveForSlot(slotId, excludingRequestId) !== 0) return false;
-  const result = db.connection.prepare(`
-    UPDATE slots SET state = 'idle', cooldown_until = NULL
-    WHERE id = ? AND state = 'busy'
-  `).run(slotId);
-  return result.changes === 1;
-}
-
-export function recoverStaleBusySlots(db: GwpDatabase, apply: boolean): string[] {
-  const stale = db.listSlots()
-    .filter((slot) => slot.state === "busy" && db.countActiveForSlot(slot.id) === 0)
-    .map((slot) => slot.id);
-  if (apply) {
-    const statement = db.connection.prepare("UPDATE slots SET state = 'idle' WHERE id = ?");
-    db.immediate(() => {
-      for (const slotId of stale) statement.run(slotId);
-    });
-  }
-  return stale;
 }
 
 export { PROVIDER_COOLDOWN_MS };

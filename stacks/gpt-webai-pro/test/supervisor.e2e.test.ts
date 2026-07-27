@@ -12,8 +12,13 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { sha256File, sha256Text } from "../src/shared/fsx.js";
 import type { SlotConfig } from "../src/shared/types.js";
-import { Supervisor } from "../src/supervisor/run.js";
-import { markSlotNeedsLogin } from "../src/supervisor/slots.js";
+import {
+  InputError,
+  LoginInterruptedError,
+  LoginTimeoutError,
+  Supervisor,
+} from "../src/supervisor/run.js";
+import { markSlotNeedsLogin, markSlotProviderLimit } from "../src/supervisor/slots.js";
 
 const DROP = Symbol("drop connection");
 
@@ -116,6 +121,7 @@ class MockDaemon {
 async function fixture(
   t: TestContext,
   definitions: Array<{ id: string; account: string; handler: Handler }>,
+  options: { maxConcurrent?: number } = {},
 ): Promise<{ supervisor: Supervisor; directory: string; daemons: MockDaemon[] }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-supervisor-"));
   const daemons: MockDaemon[] = [];
@@ -135,7 +141,11 @@ async function fixture(
     });
   }
   const configPath = path.join(directory, "slots.json");
-  await writeFile(configPath, JSON.stringify({ image: "unused-in-tests", slots }));
+  await writeFile(configPath, JSON.stringify({
+    image: "unused-in-tests",
+    maxConcurrent: options.maxConcurrent ?? 3,
+    slots,
+  }));
   const supervisor = await Supervisor.open({
     stateDir: path.join(directory, "state"),
     configPath,
@@ -162,6 +172,7 @@ function standardHandler(overrides: Handler): Handler {
   return async (method, params, socket) => {
     if (method === "readiness") return { state: "ready", modelLabel: "Pro" };
     if (method === "poll") return complete("mock answer", pollUrl(params));
+    if (method === "closeConversation") return { ok: true };
     return overrides(method, params, socket);
   };
 }
@@ -455,40 +466,109 @@ test("reconcile proven-not-found permits attempt 2 and attempt 2 exhaustion stop
   });
 });
 
-test("two concurrent runs claim different slots and rotate accounts", async (t) => {
-  const prompts = new Map<string, string[]>();
-  const definitions = [
-    { id: "slot-01", account: "a" },
-    { id: "slot-02", account: "b" },
-  ].map((slot) => ({
-    ...slot,
+test("one slot multiplexes two requests with independent conversation identities", async (t) => {
+  const sends = new Map<string, {
+    conversationUrl: string;
+    userTurnId: string;
+    assistantTurnId: string;
+  }>();
+  const closed: string[] = [];
+  const { supervisor } = await fixture(t, [{
+    id: "slot-a",
+    account: "a",
+    handler: async (method, params) => {
+      if (method === "readiness") return { state: "ready", modelLabel: "Pro" };
+      if (method === "send") {
+        assert.equal(params?.newConversation, true);
+        const prompt = String(params?.prompt);
+        const identity = {
+          conversationUrl: `https://chatgpt.com/c/${prompt}`,
+          userTurnId: `user-${prompt}`,
+          assistantTurnId: `assistant-${prompt}`,
+        };
+        sends.set(prompt, identity);
+        return identity;
+      }
+      if (method === "poll") {
+        const conversationUrl = pollUrl(params);
+        const prompt = conversationUrl.split("/").at(-1)!;
+        const identity = sends.get(prompt);
+        assert.ok(identity, `poll used an unknown conversation ${conversationUrl}`);
+        assert.equal(params?.userTurnId, identity.userTurnId);
+        assert.equal(params?.assistantTurnId, identity.assistantTurnId);
+        return complete(`answer-${prompt}`, conversationUrl);
+      }
+      if (method === "closeConversation") {
+        closed.push(pollUrl(params));
+        return { ok: true };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  }]);
+
+  const [left, right] = await Promise.all([
+    supervisor.run("left", [], 0),
+    supervisor.run("right", [], 0),
+  ]);
+  assert.equal(left.status, "running");
+  assert.equal(right.status, "running");
+  assert.equal(supervisor.db.getRequest(left.sessionId!)?.slot_id, "slot-a");
+  assert.equal(supervisor.db.getRequest(right.sessionId!)?.slot_id, "slot-a");
+  assert.deepEqual([...sends.keys()].sort(), ["left", "right"]);
+
+  const active = await supervisor.status();
+  assert.equal(active.slots[0]?.activeRequests, 2);
+  assert.deepEqual(
+    active.requests.map((request) => request.id).sort(),
+    [left.sessionId!, right.sessionId!].sort(),
+  );
+
+  const leftComplete = await supervisor.resume(left.sessionId!, 2);
+  assert.equal(leftComplete.status, "complete");
+  assert.equal(leftComplete.answer, "answer-left");
+  assert.deepEqual(closed, ["https://chatgpt.com/c/left"]);
+  assert.equal(supervisor.db.getRequest(right.sessionId!)?.status, "generating");
+  assert.equal((await supervisor.status()).slots[0]?.activeRequests, 1);
+
+  const rightComplete = await supervisor.resume(right.sessionId!, 2);
+  assert.equal(rightComplete.status, "complete");
+  assert.equal(rightComplete.answer, "answer-right");
+  assert.deepEqual(closed, [
+    "https://chatgpt.com/c/left",
+    "https://chatgpt.com/c/right",
+  ]);
+  assert.equal((await supervisor.status()).slots[0]?.activeRequests, 0);
+});
+
+test("maxConcurrent exhaustion leaves the extra request recovering with pool_busy", async (t) => {
+  const { supervisor } = await fixture(t, [{
+    id: "slot-a",
+    account: "a",
     handler: standardHandler((method, params) => {
       if (method === "send") {
-        const values = prompts.get(slot.id) ?? [];
-        values.push(String(params?.prompt));
-        prompts.set(slot.id, values);
+        const prompt = String(params?.prompt);
         return {
-          conversationUrl: `https://chatgpt.com/c/${slot.id}`,
-          userTurnId: `user-${slot.id}`,
-          assistantTurnId: `assistant-${slot.id}`,
+          conversationUrl: `https://chatgpt.com/c/${prompt}`,
+          userTurnId: `user-${prompt}`,
+          assistantTurnId: `assistant-${prompt}`,
         };
       }
       throw new Error(`unexpected ${method}`);
     }),
-  }));
-  const { supervisor } = await fixture(t, definitions);
-  const [left, right] = await Promise.all([
-    supervisor.run("left", [], 2),
-    supervisor.run("right", [], 2),
-  ]);
-  assert.equal(left.status, "complete");
-  assert.equal(right.status, "complete");
-  assert.deepEqual([...prompts.keys()].sort(), ["slot-01", "slot-02"]);
-  const assigned = [
-    supervisor.db.getRequest(left.sessionId!)?.slot_id,
-    supervisor.db.getRequest(right.sessionId!)?.slot_id,
-  ];
-  assert.equal(new Set(assigned).size, 2);
+  }], { maxConcurrent: 2 });
+
+  const first = await supervisor.run("capacity-1", [], 0);
+  const second = await supervisor.run("capacity-2", [], 0);
+  assert.equal(first.status, "running");
+  assert.equal(second.status, "running");
+
+  const overflow = await supervisor.run("capacity-3", [], 0);
+  assert.equal(overflow.status, "recovering");
+  assert.equal(overflow.errorKind, "pool_busy");
+  assert.match(overflow.resumeCommand ?? "", new RegExp(overflow.sessionId!));
+  assert.equal(supervisor.db.getRequest(overflow.sessionId!)?.status, "staged");
+  assert.equal(supervisor.db.getRequest(overflow.sessionId!)?.slot_id, null);
+  assert.equal((await supervisor.status()).slots[0]?.activeRequests, 2);
 });
 
 test("provider-limit slot is skipped and receives a three-minute cooldown", async (t) => {
@@ -729,8 +809,10 @@ test("request-level attachments survive pool wait and duplicate basenames are st
       }
       throw new Error(`unexpected ${method}`);
     }),
-  }]);
-  supervisor.db.connection.prepare("UPDATE slots SET state = 'busy' WHERE id = 'slot-01'").run();
+  }], { maxConcurrent: 1 });
+  const blockerId = "req_5000000000000003";
+  supervisor.db.createRequest(blockerId, sha256Text("capacity blocker"));
+  supervisor.db.updateRequest(blockerId, { slot_id: "slot-01" });
   const one = path.join(directory, "one");
   const two = path.join(directory, "two");
   await Promise.all([mkdir(one), mkdir(two)]);
@@ -745,7 +827,7 @@ test("request-level attachments survive pool wait and duplicate basenames are st
   assert.equal(waiting.status, "recovering");
   const attachmentDir = path.join(directory, "state", "requests", waiting.sessionId!, "attachments");
   assert.deepEqual((await readdir(attachmentDir)).sort(), ["a-2.tar.gz", "a.tar.gz"]);
-  supervisor.db.connection.prepare("UPDATE slots SET state = 'idle' WHERE id = 'slot-01'").run();
+  supervisor.db.setRequestStatus(blockerId, "complete");
   const resumed = await supervisor.resume(waiting.sessionId!, 2);
   assert.equal(resumed.status, "complete");
   assert.deepEqual(
@@ -796,6 +878,210 @@ test("artifact failures retry twice, preserve successes, and still complete", as
   assert.equal(result.artifacts.length, 1);
   assert.match(result.message ?? "", /1 artifact control/);
   assert.equal(failedDownloads, 2);
+});
+
+test("keepalive separates probe results from durable slot states", async (t) => {
+  const observed = new Map<string, "ready" | "needs_login" | "provider_limit" | "unknown">([
+    ["slot-ready", "ready"],
+    ["slot-login", "needs_login"],
+    ["slot-limit", "provider_limit"],
+    ["slot-unknown", "unknown"],
+    ["slot-active", "ready"],
+  ]);
+  const readinessCalls = new Map<string, number>();
+  const definitions = [...observed].map(([id, state]) => ({
+    id,
+    account: id,
+    handler: (method: string) => {
+      if (method !== "readiness") throw new Error(`unexpected ${method}`);
+      readinessCalls.set(id, (readinessCalls.get(id) ?? 0) + 1);
+      return { state, modelLabel: "Pro" };
+    },
+  }));
+  const { supervisor, daemons } = await fixture(t, definitions);
+  markSlotNeedsLogin(supervisor.db, "slot-ready");
+  markSlotNeedsLogin(supervisor.db, "slot-active");
+  markSlotProviderLimit(supervisor.db, "slot-unknown", 1_000);
+  const activeId = "req_5000000000000004";
+  supervisor.db.createRequest(activeId, sha256Text("already alive"));
+  supervisor.db.updateRequest(activeId, { slot_id: "slot-active" });
+
+  const before = Date.now();
+  const report = await supervisor.keepalive();
+  assert.deepEqual(report, {
+    ok: true,
+    slots: [
+      { id: "slot-ready", state: "idle", probe: "ready" },
+      { id: "slot-login", state: "needs_login", probe: "needs_login" },
+      { id: "slot-limit", state: "provider_limit", probe: "provider_limit" },
+      { id: "slot-unknown", state: "provider_limit", probe: "unknown" },
+      { id: "slot-active", state: "needs_login", probe: "unknown" },
+    ],
+  });
+  assert.deepEqual(Object.fromEntries(readinessCalls), {
+    "slot-ready": 1,
+    "slot-login": 1,
+    "slot-limit": 1,
+    "slot-unknown": 1,
+  });
+  assert.ok((supervisor.db.getSlot("slot-limit")?.cooldown_until ?? 0) >= before + 179_000);
+  assert.equal(daemons[4]?.healthCalls, 0);
+  assert.ok(daemons.slice(0, 4).every((daemon) => daemon.healthCalls >= 1));
+});
+
+test("keepalive stops only a managed runtime that it started", async (t) => {
+  const { supervisor, daemons } = await fixture(t, [{
+    id: "slot-a",
+    account: "a",
+    handler: (method) => {
+      if (method === "readiness") return { state: "ready", modelLabel: "Pro" };
+      throw new Error(`unexpected ${method}`);
+    },
+  }]);
+  supervisor.config.slots[0]!.unmanaged = false;
+  const endpoint = {
+    port: daemons[0]!.port,
+    tokenPath: supervisor.docker.paths("slot-a").tokenPath,
+  };
+  let running = false;
+  let stopCalls = 0;
+  supervisor.docker.inspect = async () => ({ exists: running, running, startedAt: null });
+  supervisor.docker.ensure = async () => endpoint;
+  supervisor.docker.stop = async () => { stopCalls += 1; };
+
+  assert.deepEqual((await supervisor.keepalive()).slots[0], {
+    id: "slot-a", state: "idle", probe: "ready",
+  });
+  assert.equal(stopCalls, 1);
+  running = true;
+  assert.deepEqual((await supervisor.keepalive()).slots[0], {
+    id: "slot-a", state: "idle", probe: "ready",
+  });
+  assert.equal(stopCalls, 1);
+  running = false;
+  markSlotNeedsLogin(supervisor.db, "slot-a");
+  supervisor.docker.ensure = async () => { throw new Error("daemon offline"); };
+  assert.deepEqual((await supervisor.keepalive()).slots[0], {
+    id: "slot-a", state: "needs_login", probe: "unreachable",
+  });
+  assert.equal(stopCalls, 2);
+
+  supervisor.docker.inspect = async () => { throw new Error("inspect unavailable"); };
+  assert.deepEqual((await supervisor.keepalive()).slots[0], {
+    id: "slot-a", state: "needs_login", probe: "unreachable",
+  });
+  assert.equal(stopCalls, 2);
+});
+
+test("login polls needs_login to ready and reports the slot noVNC URL", async (t) => {
+  let readinessCalls = 0;
+  const urls: string[] = [];
+  const progress: Array<{ state: string; elapsedMs: number }> = [];
+  const { supervisor, daemons } = await fixture(t, [{
+    id: "slot-a",
+    account: "a",
+    handler: (method) => {
+      if (method !== "readiness") throw new Error(`unexpected ${method}`);
+      readinessCalls += 1;
+      return {
+        state: readinessCalls === 1 ? "needs_login" : "ready",
+        modelLabel: "Pro",
+      };
+    },
+  }]);
+  markSlotNeedsLogin(supervisor.db, "slot-a");
+  const expectedUrl = `http://127.0.0.1:${daemons[0]!.port + 600}/vnc.html`;
+  supervisor.config.slots[0]!.unmanaged = false;
+  const endpoint = {
+    port: daemons[0]!.port,
+    tokenPath: supervisor.docker.paths("slot-a").tokenPath,
+  };
+  let stopCalls = 0;
+  supervisor.docker.ensure = async (_slot, _timeout, options) => {
+    assert.equal(options?.loginMode, true);
+    return endpoint;
+  };
+  supervisor.docker.stop = async (slotId) => {
+    assert.equal(slotId, "slot-a");
+    stopCalls += 1;
+  };
+
+  const result = await supervisor.login("slot-a", {
+    timeoutMs: 1_000,
+    pollIntervalMs: 1,
+    onUrl: (url) => urls.push(url),
+    onProgress: (elapsedMs, state) => progress.push({ elapsedMs, state }),
+  });
+  assert.deepEqual(result, { slotId: "slot-a", state: "ready", url: expectedUrl });
+  assert.deepEqual(urls, [expectedUrl]);
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0]?.state, "needs_login");
+  assert.ok((progress[0]?.elapsedMs ?? -1) >= 0);
+  assert.equal(readinessCalls, 2);
+  assert.equal(supervisor.db.getSlot("slot-a")?.state, "idle");
+  assert.equal(stopCalls, 1);
+});
+
+test("login rejects timeout, interruption, active requests, and unknown slots", async (t) => {
+  const abortReadiness = deferred<void>();
+  let abortPhase = false;
+  let rpcFailure = false;
+  let readinessCalls = 0;
+  const { supervisor, daemons } = await fixture(t, [{
+    id: "slot-a",
+    account: "a",
+    handler: (method) => {
+      if (method !== "readiness") throw new Error(`unexpected ${method}`);
+      readinessCalls += 1;
+      if (rpcFailure) throw new Error("readiness transport failed");
+      if (abortPhase) abortReadiness.resolve();
+      return { state: "needs_login", modelLabel: "Pro" };
+    },
+  }]);
+  supervisor.config.slots[0]!.unmanaged = false;
+  const endpoint = {
+    port: daemons[0]!.port,
+    tokenPath: supervisor.docker.paths("slot-a").tokenPath,
+  };
+  let stopCalls = 0;
+  supervisor.docker.ensure = async () => endpoint;
+  supervisor.docker.stop = async () => { stopCalls += 1; };
+
+  await assert.rejects(
+    supervisor.login("slot-a", { timeoutMs: 0, pollIntervalMs: 1 }),
+    LoginTimeoutError,
+  );
+  assert.equal(supervisor.db.getSlot("slot-a")?.state, "needs_login");
+
+  abortPhase = true;
+  const controller = new AbortController();
+  const interrupted = supervisor.login("slot-a", {
+    timeoutMs: 1_000,
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+  });
+  await abortReadiness.promise;
+  controller.abort();
+  await assert.rejects(interrupted, LoginInterruptedError);
+  assert.equal(stopCalls, 2);
+
+  abortPhase = false;
+  rpcFailure = true;
+  await assert.rejects(
+    supervisor.login("slot-a", { timeoutMs: 1_000, pollIntervalMs: 1 }),
+    /readiness transport failed/,
+  );
+  assert.equal(stopCalls, 3);
+  assert.equal(supervisor.db.getSlot("slot-a")?.state, "needs_login");
+
+  const activeId = "req_5000000000000005";
+  supervisor.db.createRequest(activeId, sha256Text("active login blocker"));
+  supervisor.db.updateRequest(activeId, { slot_id: "slot-a" });
+  const beforeRejectedCalls = readinessCalls;
+  await assert.rejects(supervisor.login("slot-a"), InputError);
+  await assert.rejects(supervisor.login("slot-missing"), InputError);
+  assert.equal(readinessCalls, beforeRejectedCalls);
+  assert.equal(stopCalls, 3);
 });
 
 test("cleanup --apply rechecks needs_login readiness and restores idle", async (t) => {

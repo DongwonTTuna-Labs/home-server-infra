@@ -1,9 +1,15 @@
 import { readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 
 import { errorMessage } from "../shared/errors.js";
 import { isRequestId } from "../shared/ids.js";
 import type { Envelope } from "../shared/types.js";
-import { InputError, Supervisor } from "../supervisor/run.js";
+import {
+  InputError,
+  LoginInterruptedError,
+  LoginTimeoutError,
+  Supervisor,
+} from "../supervisor/run.js";
 import {
   emptyPromptEnvelope,
   failedEnvelope,
@@ -11,54 +17,136 @@ import {
   writeEnvelope,
 } from "./envelope.js";
 
-const COMMANDS = new Set(["run", "resume", "status", "cleanup", "release", "smoke"]);
+const COMMANDS = new Set([
+  "run",
+  "resume",
+  "status",
+  "cleanup",
+  "release",
+  "smoke",
+  "login",
+  "keepalive",
+]);
 
-async function main(argv = process.argv.slice(2)): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   const command = COMMANDS.has(argv[0] ?? "") ? argv.shift()! : "run";
   const requestEnvelopeCommand = command === "run" || command === "resume" || command === "release";
   let supervisor: Supervisor | null = null;
+  const closeBeforeOutput = (): void => {
+    const current = supervisor;
+    supervisor = null;
+    try {
+      current?.close();
+    } catch (error) {
+      // The command result is already determined. Keep stdout machine-readable;
+      // process exit will release the DB handle even if explicit close failed.
+      process.stderr.write(`supervisor close failed: ${errorMessage(error)}\n`);
+    }
+  };
+  const emitEnvelope = (envelope: Envelope, exitCode: number): number => {
+    closeBeforeOutput();
+    writeEnvelope(envelope);
+    return exitCode;
+  };
+  const emitJson = (value: unknown, exitCode: number): number => {
+    closeBeforeOutput();
+    writeJson(value);
+    return exitCode;
+  };
   try {
     if (command === "run") {
       const parsed = await parseRun(argv);
       if (!parsed.prompt.trim()) {
-        writeEnvelope(emptyPromptEnvelope());
-        return 0;
+        return emitEnvelope(emptyPromptEnvelope(), 0);
       }
       supervisor = await Supervisor.open();
       const envelope = await supervisor.run(parsed.prompt, parsed.files, parsed.timeoutSeconds);
-      writeEnvelope(envelope);
-      return envelope.hardFailure ? 1 : 0;
+      return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
     }
 
     if (command === "resume") {
       const parsed = parseSessionCommand(argv, true);
       supervisor = await Supervisor.open();
       const envelope = await supervisor.resume(parsed.session, parsed.timeoutSeconds);
-      writeEnvelope(envelope);
-      return envelope.hardFailure ? 1 : 0;
+      return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
     }
 
     if (command === "status") {
       if (argv.some((item) => item !== "--json")) throw new InputError("status accepts only --json");
       supervisor = await Supervisor.open();
-      writeJson(await supervisor.status());
-      return 0;
+      return emitJson(await supervisor.status(), 0);
     }
 
     if (command === "cleanup") {
       const apply = parseCleanup(argv);
       supervisor = await Supervisor.open();
       const report = await supervisor.cleanup(apply);
-      writeJson(report);
-      return 0;
+      return emitJson(report, 0);
     }
 
     if (command === "release") {
       const parsed = parseSessionCommand(argv, false);
       supervisor = await Supervisor.open();
       const envelope = await supervisor.release(parsed.session);
-      writeEnvelope(envelope);
-      return envelope.hardFailure ? 1 : 0;
+      return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
+    }
+
+    if (command === "login") {
+      const slot = parseLogin(argv);
+      supervisor = await Supervisor.open();
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      process.once("SIGINT", abort);
+      process.once("SIGTERM", abort);
+      try {
+        const result = await supervisor.login(slot, {
+          signal: controller.signal,
+          onUrl: (url) => {
+            process.stderr.write(`noVNC: ${url}\n로그인 대기 중...\n`);
+          },
+          onProgress: (elapsedMs, state) => {
+            const elapsedSeconds = Math.floor(elapsedMs / 1_000);
+            process.stderr.write(
+              `로그인 대기 중... 경과 ${elapsedSeconds}초 (readiness: ${state})\n`,
+            );
+          },
+        });
+        return emitJson({
+          ok: true,
+          slot: result.slotId,
+          state: result.state,
+          novncUrl: result.url,
+        }, 0);
+      } catch (error) {
+        if (error instanceof InputError) throw error;
+        if (controller.signal.aborted || error instanceof LoginInterruptedError) {
+          return emitJson({ ok: false, slot, errorKind: "login_aborted" }, 130);
+        }
+        if (error instanceof LoginTimeoutError) {
+          return emitJson({
+            ok: false,
+            slot,
+            state: "needs_login",
+            errorKind: "login_timeout",
+            message: error.message,
+          }, 0);
+        }
+        return emitJson({
+          ok: false,
+          slot,
+          errorKind: "daemon_unreachable",
+          message: errorMessage(error),
+        }, 0);
+      } finally {
+        process.removeListener("SIGINT", abort);
+        process.removeListener("SIGTERM", abort);
+      }
+    }
+
+    if (command === "keepalive") {
+      if (argv.length > 0) throw new InputError("keepalive accepts no arguments");
+      supervisor = await Supervisor.open();
+      return emitJson(await supervisor.keepalive(), 0);
     }
 
     if (command === "smoke") {
@@ -71,7 +159,7 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
         defaultTimeoutSeconds(),
       );
       const verified = envelope.status === "complete" && envelope.answer?.trim() === "GWP_SMOKE_OK";
-      writeJson(verified ? {
+      return emitJson(verified ? {
         ok: true,
         sessionId: envelope.sessionId,
         answer: envelope.answer,
@@ -83,24 +171,19 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
         status: envelope.status,
         errorKind: envelope.errorKind ?? "internal",
         message: envelope.message ?? "live smoke response did not match GWP_SMOKE_OK",
-      });
-      return envelope.hardFailure ? 1 : 0;
+      }, envelope.hardFailure ? 1 : 0);
     }
 
     throw new InputError(`unknown command: ${command}`);
   } catch (error) {
     const input = error instanceof InputError;
     if (!requestEnvelopeCommand) {
-      writeJson({ ok: false, error: errorMessage(error) });
-      return input ? 2 : 0;
+      return emitJson({ ok: false, error: errorMessage(error) }, input ? 2 : 0);
     }
     const envelope: Envelope = input
       ? makeEnvelope("needs_user_action", { usageError: true, message: error.message })
       : failedEnvelope(null, "internal", errorMessage(error));
-    writeEnvelope(envelope);
-    return input ? 2 : 0;
-  } finally {
-    supervisor?.close();
+    return emitEnvelope(envelope, input ? 2 : 0);
   }
 }
 
@@ -165,6 +248,13 @@ function parseCleanup(argv: string[]): boolean {
   throw new InputError("cleanup accepts exactly one of --dry-run or --apply");
 }
 
+function parseLogin(argv: string[]): string {
+  if (argv.length !== 2 || argv[0] !== "--slot" || !argv[1]) {
+    throw new InputError("login requires exactly --slot <id>");
+  }
+  return argv[1];
+}
+
 function requireValue(argv: string[], index: number, option: string): string {
   const value = argv[index];
   if (!value) throw new InputError(`${option} requires a value`);
@@ -191,13 +281,15 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-main().then((exitCode) => {
-  process.exitCode = exitCode;
-}).catch((error) => {
-  try {
-    writeEnvelope(failedEnvelope(null, "internal", errorMessage(error)));
-    process.exitCode = 0;
-  } catch {
-    process.exitCode = 70;
-  }
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().then((exitCode) => {
+    process.exitCode = exitCode;
+  }).catch((error) => {
+    try {
+      writeEnvelope(failedEnvelope(null, "internal", errorMessage(error)));
+      process.exitCode = 0;
+    } catch {
+      process.exitCode = 70;
+    }
+  });
+}

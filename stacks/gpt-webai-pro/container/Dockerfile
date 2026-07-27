@@ -26,6 +26,9 @@ RUN apt-get update \
       curl \
       dumb-init \
       fonts-liberation \
+      novnc \
+      websockify \
+      x11vnc \
       xvfb \
     && rm -rf /var/lib/apt/lists/*
 

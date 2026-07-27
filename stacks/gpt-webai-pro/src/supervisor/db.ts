@@ -12,6 +12,15 @@ import type {
   SlotRow,
 } from "../shared/types.js";
 
+const SLOTS_DDL = `
+CREATE TABLE slots (
+  id             TEXT PRIMARY KEY,
+  account        TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'idle' CHECK (state IN
+                 ('idle','needs_login','provider_limit')),
+  cooldown_until INTEGER, last_used_at INTEGER
+);`;
+
 const DDL = `
 CREATE TABLE requests (
   id            TEXT PRIMARY KEY,
@@ -41,13 +50,7 @@ CREATE TABLE artifacts (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (request_id, filename)
 );
-CREATE TABLE slots (
-  id             TEXT PRIMARY KEY,
-  account        TEXT NOT NULL,
-  state          TEXT NOT NULL DEFAULT 'idle' CHECK (state IN
-                 ('idle','busy','needs_login','provider_limit')),
-  cooldown_until INTEGER, last_used_at INTEGER
-);
+${SLOTS_DDL}
 `;
 
 type RequestPatch = Partial<Pick<
@@ -74,15 +77,24 @@ export class GwpDatabase {
     connection.pragma("busy_timeout = 5000");
     connection.pragma("foreign_keys = ON");
     const current = Number(connection.pragma("user_version", { simple: true }));
-    if (current > 1) {
+    if (current > 2) {
       connection.close();
       throw new Error(`unsupported database user_version ${current}`);
     }
-    if (current === 0) {
+    if (current < 2) {
       connection.exec("BEGIN IMMEDIATE");
       try {
-        connection.exec(DDL);
-        connection.pragma("user_version = 1");
+        if (current === 0) connection.exec(DDL);
+        else connection.exec(`
+          ALTER TABLE slots RENAME TO slots_v1;
+          ${SLOTS_DDL}
+          INSERT INTO slots (id, account, state, cooldown_until, last_used_at)
+          SELECT id, account, CASE state WHEN 'busy' THEN 'idle' ELSE state END,
+                 cooldown_until, last_used_at
+          FROM slots_v1;
+          DROP TABLE slots_v1;
+        `);
+        connection.pragma("user_version = 2");
         connection.exec("COMMIT");
       } catch (error) {
         connection.exec("ROLLBACK");
@@ -292,6 +304,12 @@ export class GwpDatabase {
     `);
     this.immediate(() => {
       for (const slot of slots) statement.run(slot.id, slot.account);
+      const configured = new Set(slots.map((slot) => slot.id));
+      for (const row of this.listSlots()) {
+        if (!configured.has(row.id) && this.countActiveForSlot(row.id) === 0) {
+          this.connection.prepare("DELETE FROM slots WHERE id = ?").run(row.id);
+        }
+      }
     });
   }
 

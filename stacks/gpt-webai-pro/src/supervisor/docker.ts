@@ -37,6 +37,10 @@ export interface DaemonEndpoint {
   tokenPath: string;
 }
 
+export interface ContainerOptions {
+  loginMode?: boolean;
+}
+
 export class DockerManager {
   constructor(
     readonly stateDir: string,
@@ -58,7 +62,11 @@ export class DockerManager {
     return `gwp-${slotId}`;
   }
 
-  async ensure(slot: SlotConfig, timeoutMs = 60_000): Promise<DaemonEndpoint> {
+  async ensure(
+    slot: SlotConfig,
+    timeoutMs = 60_000,
+    options: ContainerOptions = {},
+  ): Promise<DaemonEndpoint> {
     const paths = this.paths(slot.id);
     const endpoint = { port: slot.port, tokenPath: paths.tokenPath };
     if (slot.unmanaged === true) {
@@ -73,10 +81,16 @@ export class DockerManager {
       mkdirp(paths.outbox),
     ]);
     const state = await this.inspect(slot.id);
-    if (!state.running) {
+    if (options.loginMode === true) {
+      if (state.running) await this.stop(slot.id);
       if (state.exists) await this.remove(slot.id);
       const token = await rotateDaemonToken(paths.tokenPath);
-      await this.create(slot, token, paths);
+      await this.create(slot, token, paths, options);
+      await this.start(slot.id);
+    } else if (!state.running) {
+      if (state.exists) await this.remove(slot.id);
+      const token = await rotateDaemonToken(paths.tokenPath);
+      await this.create(slot, token, paths, options);
       await this.start(slot.id);
     }
     await chmod(paths.tokenPath, 0o600);
@@ -84,13 +98,28 @@ export class DockerManager {
     return endpoint;
   }
 
-  async create(slot: SlotConfig, token: string, paths = this.paths(slot.id)): Promise<void> {
-    await docker(this.createArguments(slot, token, paths));
+  async create(
+    slot: SlotConfig,
+    token: string,
+    paths = this.paths(slot.id),
+    options: ContainerOptions = {},
+  ): Promise<void> {
+    await docker(this.createArguments(slot, token, paths, options));
   }
 
-  createArguments(slot: SlotConfig, token: string, paths = this.paths(slot.id)): string[] {
+  createArguments(
+    slot: SlotConfig,
+    token: string,
+    paths = this.paths(slot.id),
+    options: ContainerOptions = {},
+  ): string[] {
     const uid = process.getuid?.() ?? 1000;
     const gid = process.getgid?.() ?? 1000;
+    const loginMode = options.loginMode === true;
+    const noVncPort = slot.port + 600;
+    if (loginMode && noVncPort > 65_535) {
+      throw new Error(`noVNC port is out of range for ${slot.id}`);
+    }
     return [
       "create",
       "--name", this.containerName(slot.id),
@@ -98,6 +127,9 @@ export class DockerManager {
       "--user", `${uid}:${gid}`,
       "--restart", "no",
       "--publish", `127.0.0.1:${slot.port}:${slot.port}`,
+      ...(loginMode
+        ? ["--publish", `127.0.0.1:${noVncPort}:${noVncPort}`]
+        : []),
       "--mount", `type=bind,src=${paths.profile},dst=/profile`,
       "--mount", `type=bind,src=${paths.inbox},dst=/inbox,readonly`,
       "--mount", `type=bind,src=${paths.outbox},dst=/outbox`,
@@ -106,6 +138,9 @@ export class DockerManager {
       "--env", `GWP_DAEMON_PORT=${slot.port}`,
       "--env", `GWP_DAEMON_TOKEN=${token}`,
       "--env", "GWP_OUTBOX_DIR=/outbox",
+      ...(loginMode
+        ? ["--env", "GWP_LOGIN_MODE=1", "--env", `GWP_NOVNC_PORT=${noVncPort}`]
+        : []),
       this.image,
     ];
   }

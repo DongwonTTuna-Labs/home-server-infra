@@ -41,6 +41,7 @@ docker run -d --name "$container" --network host \
 cd "$root"
 DAEMON_PORT="$daemon_port" DAEMON_TOKEN_PATH="$token_path" node --input-type=module <<'NODE'
 import { RpcClient } from './dist/supervisor/rpc-client.js';
+import { createHash } from 'node:crypto';
 const port = Number(process.env.DAEMON_PORT);
 const deadline = Date.now() + 60000;
 let rpc = null;
@@ -59,9 +60,17 @@ while (Date.now() < deadline) {
 if (!rpc) throw new Error(`daemon did not become healthy on 127.0.0.1:${port}`);
 const ready = await rpc.call('readiness', undefined);
 if (ready.state !== 'ready') throw new Error(JSON.stringify(ready));
-const sent = await rpc.call('send', { prompt: 'container smoke', files: [], newConversation: true });
-const polled = await rpc.call('poll', { conversationUrl: sent.conversationUrl, waitMs: 10000 });
+const prompt = 'container smoke';
+const sent = await rpc.call('send', { prompt, files: [], newConversation: true });
+const polled = await rpc.call('poll', {
+  conversationUrl: sent.conversationUrl,
+  promptSha256: createHash('sha256').update(prompt).digest('hex'),
+  userTurnId: sent.userTurnId,
+  assistantTurnId: sent.assistantTurnId,
+  waitMs: 10000,
+});
 if (polled.state !== 'complete') throw new Error(JSON.stringify(polled));
+await rpc.call('closeConversation', { conversationUrl: polled.currentUrl });
 await rpc.close();
 process.stdout.write(`${JSON.stringify({ ready, sent, polled })}\n`);
 NODE

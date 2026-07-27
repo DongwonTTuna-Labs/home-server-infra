@@ -73,6 +73,22 @@ async function seedCompletedConversation(page: Page, values: {
   }, values);
 }
 
+async function pageWithUserTurn(browser: Browser, userTurnId: string): Promise<Page> {
+  for (const context of browser.contexts()) {
+    for (const page of context.pages()) {
+      if (page.isClosed()) continue;
+      const found = await page.locator('[data-message-author-role="user"]').evaluateAll(
+        (nodes, expected) => nodes.some((node) => (
+          node.getAttribute("data-message-id") === expected
+        )),
+        userTurnId,
+      ).catch(() => false);
+      if (found) return page;
+    }
+  }
+  throw new Error(`browser page for user turn ${userTurnId} was not found`);
+}
+
 async function unauthorizedStatus(port: number, authorization?: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/`, authorization
@@ -152,8 +168,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       assert.match(sent.userTurnId, /^user-/);
       assert.match(sent.assistantTurnId, /^assistant-/);
       assert.equal((await runtime.rpc.call("readiness", undefined)).modelLabel, "Pro");
-      const page = runtime.browser.contexts()[0]?.pages()[0];
-      assert.ok(page);
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       assert.equal(await page.locator("#intelligence-pill").getAttribute("data-open-count"), "1");
       assert.equal(
         await page.locator('[role="menuitemradio"][data-intelligence="Pro"]').getAttribute("aria-checked"),
@@ -175,9 +190,23 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       assert.equal(polled.answerSha256, sha256Text("fake answer"));
       assert.equal((await runtime.rpc.call("open", { conversationUrl: sent.conversationUrl })).ok, true);
       assert.equal((await runtime.rpc.call("health", undefined)).chromeConnected, true);
-      const capture = await runtime.rpc.call("captureFailure", { tag: "test-capture" });
-      await access(capture.screenshotPath);
-      await access(capture.htmlPath);
+      const captures = await Promise.all([
+        runtime.rpc.call("captureFailure", { tag: "test-capture" }),
+        runtime.rpc.call("captureFailure", { tag: "test-capture" }),
+      ]);
+      assert.notEqual(captures[0].screenshotPath, captures[1].screenshotPath);
+      assert.notEqual(captures[0].htmlPath, captures[1].htmlPath);
+      for (const capture of captures) {
+        await access(capture.screenshotPath);
+        await access(capture.htmlPath);
+      }
+      assert.equal(
+        (await runtime.rpc.call("closeConversation", {
+          conversationUrl: polled.currentUrl,
+        })).ok,
+        true,
+      );
+      assert.equal(page.isClosed(), true);
     } finally {
       await runtime.close();
     }
@@ -189,8 +218,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const prompt = "temporary URL promotion";
       const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
       assert.match(sent.conversationUrl, /\/c\/WEB:fake-/);
-      const page = runtime.browser.contexts()[0]?.pages()[0];
-      assert.ok(page);
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       await page.waitForURL(/\/c\/final-/);
       const finalUrl = page.url();
 
@@ -214,8 +242,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
       assert.match(sent.userTurnId, /^user-/);
       assert.match(sent.assistantTurnId, /^request-placeholder-request-WEB:/);
-      const page = runtime.browser.contexts()[0]?.pages()[0];
-      assert.ok(page);
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       await page.waitForFunction((placeholder) => {
         const assistant = document.querySelector('[data-message-author-role="assistant"]');
         const observed = assistant?.getAttribute("data-message-id");
@@ -370,6 +397,86 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     }
   });
 
+  await t.test("two requests share one browser without sharing tabs and close independently", async () => {
+    const runtime = await setup("multi-tab");
+    try {
+      const before = runtime.browser.contexts()[0]?.pages().length;
+      assert.equal(before, 1);
+      const [first, second] = await Promise.all([
+        runtime.rpc.call("send", {
+          prompt: "first multiplexed request",
+          files: [],
+          newConversation: true,
+        }),
+        runtime.rpc.call("send", {
+          prompt: "second multiplexed request",
+          files: [],
+          newConversation: true,
+        }),
+      ]);
+      assert.notEqual(first.conversationUrl, second.conversationUrl);
+      assert.notEqual(first.userTurnId, second.userTurnId);
+      const firstPage = await pageWithUserTurn(runtime.browser, first.userTurnId);
+      const secondPage = await pageWithUserTurn(runtime.browser, second.userTurnId);
+      assert.notEqual(firstPage, secondPage);
+      assert.equal(runtime.browser.contexts()[0]?.pages().length, 3);
+
+      const [firstPoll, secondPoll] = await Promise.all([
+        runtime.rpc.call("poll", pollRequest(first, "first multiplexed request", 7_000)),
+        runtime.rpc.call("poll", pollRequest(second, "second multiplexed request", 7_000)),
+      ]);
+      assert.equal(firstPoll.state, "complete");
+      assert.equal(firstPoll.answerMarkdown, "answer for first multiplexed request");
+      assert.equal(secondPoll.state, "complete");
+      assert.equal(secondPoll.answerMarkdown, "answer for second multiplexed request");
+
+      await runtime.rpc.call("closeConversation", { conversationUrl: firstPoll.currentUrl });
+      assert.equal(firstPage.isClosed(), true);
+      assert.equal(secondPage.isClosed(), false);
+      await runtime.rpc.call("closeConversation", { conversationUrl: secondPoll.currentUrl });
+      assert.equal(secondPage.isClosed(), true);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  await t.test("reconcile is fenced behind send and duplicate prompt candidates fail closed", async () => {
+    const runtime = await setup("multi-tab");
+    try {
+      const prompt = "identical prompt during reconcile";
+      const sending = runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const reconciling = runtime.rpc.call("reconcile", {
+        promptSha256: sha256Text(prompt),
+      });
+      const [first, fenced] = await Promise.all([sending, reconciling]);
+      assert.equal(fenced.found, true);
+      assert.equal(fenced.userTurnId, first.userTurnId);
+
+      const second = await runtime.rpc.call("send", {
+        prompt,
+        files: [],
+        newConversation: true,
+      });
+      const ambiguous = await runtime.rpc.call("reconcile", {
+        promptSha256: sha256Text(prompt),
+      });
+      assert.deepEqual(ambiguous, { found: false, proven: false });
+
+      const firstScoped = await runtime.rpc.call("reconcile", {
+        promptSha256: sha256Text(prompt),
+        conversationUrl: first.conversationUrl,
+      });
+      const secondScoped = await runtime.rpc.call("reconcile", {
+        promptSha256: sha256Text(prompt),
+        conversationUrl: second.conversationUrl,
+      });
+      assert.equal(firstScoped.userTurnId, first.userTurnId);
+      assert.equal(secondScoped.userTurnId, second.userTurnId);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   await t.test("WebSocket handshake requires the exact bearer token", async () => {
     const runtime = await setup("happy");
     try {
@@ -495,8 +602,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     try {
       const prompt = "slow";
       const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
-      const page = runtime.browser.contexts()[0]?.pages()[0];
-      assert.ok(page);
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       assert.equal(await page.locator("#intelligence-pill").innerText(), "Pro");
       assert.equal(await page.locator("#intelligence-pill").getAttribute("data-open-count"), "0");
       const order: string[] = [];
@@ -519,7 +625,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         assistantTurnId: sent.assistantTurnId,
       });
       assert.equal(health.chromeConnected, true);
-      assert.deepEqual(order, ["poll", "health"]);
+      assert.deepEqual(order, ["health", "poll"]);
     } finally {
       await second.close().catch(() => undefined);
       await runtime.close();

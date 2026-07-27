@@ -17,6 +17,7 @@ const STABLE_GAP_MS = 3_000;
 export async function pollConversation(
   session: BrowserSession,
   params: PollParams,
+  openConversation = (url: string) => session.open(url),
 ): Promise<PollResult> {
   if (!Number.isInteger(params.waitMs) || params.waitMs < 0 || params.waitMs > 60_000) {
     throw new Error("poll waitMs must be an integer from 0 through 60000");
@@ -25,7 +26,7 @@ export async function pollConversation(
     throw new Error("poll promptSha256 must be 64 lower-hex characters");
   }
 
-  const page = await bindPollPage(session, params);
+  const page = await bindPollPage(session, params, openConversation);
   const deadline = Date.now() + params.waitMs;
   let stableText = "";
   let stableSince = 0;
@@ -73,20 +74,26 @@ export async function pollConversation(
   };
 }
 
-async function bindPollPage(session: BrowserSession, params: PollParams): Promise<Page> {
-  const current = await session.currentPage();
+async function bindPollPage(
+  session: BrowserSession,
+  params: PollParams,
+  openConversation = (url: string) => session.open(url),
+): Promise<Page> {
+  const current = await session.inspectionPage();
   const relevant = await session.relevantPages();
-  const pages = [current, ...relevant.filter((page) => page !== current)];
+  const pages = current
+    ? [current, ...relevant.filter((page) => page !== current)]
+    : relevant;
 
   const byTurnId = await findPage(pages, (turns) => hasConfirmedTurn(turns, params));
-  if (byTurnId) return session.bindPage(byTurnId);
+  if (byTurnId) return byTurnId;
 
   const storedPage = pages.find((page) => page.url() === params.conversationUrl);
-  if (storedPage) return session.bindPage(storedPage);
+  if (storedPage) return storedPage;
 
   let opened: Page;
   try {
-    opened = await session.open(params.conversationUrl);
+    opened = await openConversation(params.conversationUrl);
   } catch (error) {
     const fallback = await findFallbackPage(session, params);
     if (fallback) return fallback;
@@ -108,27 +115,39 @@ async function findFallbackPage(
   params: PollParams,
 ): Promise<Page | null> {
   const fallbackPages = await session.relevantPages();
-  const fallbackByTurnId = await findPage(
-    fallbackPages,
-    (turns) => hasConfirmedTurn(turns, params),
-  );
-  if (fallbackByTurnId) return session.bindPage(fallbackByTurnId);
-  const fallbackByPrompt = await findPage(
-    fallbackPages,
-    (turns) => Boolean(matchingPromptUser(turns, params)),
-  );
-  return fallbackByPrompt ? session.bindPage(fallbackByPrompt) : null;
+  const fallbackByTurnId = await findPage(fallbackPages, (turns) => (
+    hasConfirmedTurn(turns, params)
+  ));
+  if (fallbackByTurnId) return fallbackByTurnId;
+  const fallbackByPrompt = await findPages(fallbackPages, (turns) => (
+    Boolean(matchingPromptUser(turns, params))
+  ));
+  if (fallbackByPrompt.length > 1) {
+    throw new GwpError(
+      "turn_not_found",
+      "multiple open conversations matched the prompt without a durable turn or URL anchor",
+    );
+  }
+  return fallbackByPrompt[0] ?? null;
 }
 
 async function findPage(
   pages: readonly Page[],
   matches: (turns: TurnObservation[]) => boolean,
 ): Promise<Page | null> {
+  return (await findPages(pages, matches))[0] ?? null;
+}
+
+async function findPages(
+  pages: readonly Page[],
+  matches: (turns: TurnObservation[]) => boolean,
+): Promise<Page[]> {
+  const found: Page[] = [];
   for (const page of pages) {
     const turns = await readTurns(page).catch(() => []);
-    if (matches(turns)) return page;
+    if (matches(turns)) found.push(page);
   }
-  return null;
+  return found;
 }
 
 function hasConfirmedTurn(turns: TurnObservation[], params: PollParams): boolean {

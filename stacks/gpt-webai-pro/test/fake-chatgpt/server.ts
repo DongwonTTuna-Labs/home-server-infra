@@ -71,6 +71,7 @@ const PAGE = String.raw`<!doctype html>
 (() => {
   const query = new URL(location.href).searchParams;
   const scenario = query.get('scenario') || 'happy';
+  const tabId = crypto.randomUUID();
   if (scenario === 'root-redirect' && query.get('redirected') === '1') {
     localStorage.setItem('gwp-root-redirected', String(Date.now()));
   }
@@ -160,25 +161,26 @@ const PAGE = String.raw`<!doctype html>
     const conversation = document.getElementById('conversation');
     const user = document.createElement('div');
     user.setAttribute('data-message-author-role', 'user');
-    user.setAttribute('data-message-id', 'user-' + (++sequence));
+    user.setAttribute('data-message-id', 'user-' + tabId + '-' + (++sequence));
     user.textContent = prompt;
     const assistant = document.createElement('div');
     assistant.setAttribute('data-message-author-role', 'assistant');
     assistant.setAttribute('data-message-id', scenario === 'assistant-id-rebind'
-      ? 'request-placeholder-request-WEB:fake-' + sequence + '-0'
-      : 'assistant-' + sequence);
+      ? 'request-placeholder-request-WEB:fake-' + tabId + '-' + sequence + '-0'
+      : 'assistant-' + tabId + '-' + sequence);
+    assistant.dataset.prompt = prompt;
     // 실 UI처럼 assistant 메시지를 article로 감싼다 — 액션 바(copy)는 메시지 노드의
     // 형제로 붙는다 (2026-07-27 실측 구조).
     const assistantArticle = document.createElement('article');
     assistantArticle.append(assistant);
     conversation.append(user, assistantArticle);
     const conversationPath = scenario === 'url-rebind'
-      ? '/c/WEB:fake-' + sequence
-      : '/c/fake-' + sequence;
+      ? '/c/WEB:fake-' + tabId + '-' + sequence
+      : '/c/fake-' + tabId + '-' + sequence;
     history.pushState({}, '', conversationPath + '?scenario=' + encodeURIComponent(scenario));
     if (scenario === 'url-rebind') {
       setTimeout(() => {
-        history.replaceState({}, '', '/c/final-' + sequence + '?scenario=' + encodeURIComponent(scenario));
+        history.replaceState({}, '', '/c/final-' + tabId + '-' + sequence + '?scenario=' + encodeURIComponent(scenario));
       }, 500);
     }
 
@@ -205,7 +207,11 @@ const PAGE = String.raw`<!doctype html>
   });
 
   function finish(assistant, currentScenario) {
-    assistant.textContent = currentScenario === 'artifacts' ? 'artifact answer' : 'fake answer';
+    assistant.textContent = currentScenario === 'artifacts'
+      ? 'artifact answer'
+      : currentScenario === 'multi-tab'
+        ? 'answer for ' + assistant.dataset.prompt
+        : 'fake answer';
     const copy = document.createElement('button');
     copy.type = 'button';
     copy.className = 'action';

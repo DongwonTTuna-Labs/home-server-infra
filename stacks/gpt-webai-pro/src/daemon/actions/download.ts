@@ -21,12 +21,9 @@ export class ArtifactDownloader {
     const attempt = (this.attempts.get(key) ?? 0) + 1;
     if (attempt > 2) throw new GwpError("artifact_failed", "artifact control exceeded two attempts");
     this.attempts.set(key, attempt);
-    let page = await session.currentPage();
-    let controls = await artifactControlLocators(page);
-    if (!controls[params.controlIndex]) {
-      page = await session.open(params.conversationUrl);
-      controls = await artifactControlLocators(page);
-    }
+    const page = await session.findConversationPage(params.conversationUrl)
+      ?? await session.open(params.conversationUrl);
+    const controls = await artifactControlLocators(page);
     const control = controls[params.controlIndex];
     if (!control) throw new GwpError("artifact_failed", `artifact control ${params.controlIndex} is absent`);
 

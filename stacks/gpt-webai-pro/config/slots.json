@@ -1,15 +1,9 @@
 {
   "image": "home-server/gpt-webai-pro-slot:latest",
+  "maxConcurrent": 3,
   "slots": [
-    {"id":"slot-01","account":"a","port":19301},
-    {"id":"slot-02","account":"a","port":19302},
-    {"id":"slot-03","account":"a","port":19303},
-    {"id":"slot-04","account":"b","port":19304},
-    {"id":"slot-05","account":"b","port":19305},
-    {"id":"slot-06","account":"b","port":19306},
-    {"id":"slot-07","account":"b","port":19307},
-    {"id":"slot-08","account":"c","port":19308},
-    {"id":"slot-09","account":"c","port":19309},
-    {"id":"slot-10","account":"c","port":19310}
+    { "id": "slot-a", "account": "a", "port": 19301 },
+    { "id": "slot-b", "account": "b", "port": 19302 },
+    { "id": "slot-c", "account": "c", "port": 19303 }
   ]
 }

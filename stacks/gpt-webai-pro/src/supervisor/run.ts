@@ -31,11 +31,13 @@ import type {
   Envelope,
   PollResult,
   PublicArtifact,
+  ReadinessResult,
   ReconcileResult,
   RequestRow,
   RpcFile,
   SendResult,
   SlotConfig,
+  SlotState,
   SlotsConfig,
 } from "../shared/types.js";
 import { GwpDatabase } from "./db.js";
@@ -46,8 +48,6 @@ import {
   markSlotIdle,
   markSlotNeedsLogin,
   markSlotProviderLimit,
-  recoverStaleBusySlots,
-  releaseSlotIfUnused,
 } from "./slots.js";
 
 const ACTIVE_STATUSES = new Set(["staged", "sending", "generating", "uncertain"]);
@@ -61,6 +61,24 @@ interface ValidatedFile {
 
 export class InputError extends Error {
   override readonly name = "InputError";
+}
+
+export class LoginTimeoutError extends Error {
+  override readonly name = "LoginTimeoutError";
+}
+
+export class LoginInterruptedError extends Error {
+  override readonly name = "LoginInterruptedError";
+}
+
+export type KeepaliveProbe = ReadinessResult["state"] | "unreachable";
+
+export interface LoginOptions {
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+  onUrl?: (url: string) => void;
+  onProgress?: (elapsedMs: number, state: ReadinessResult["state"]) => void;
 }
 
 export class Supervisor {
@@ -124,6 +142,7 @@ export class Supervisor {
       state: string;
       cooldownUntil: number | null;
       lastUsedAt: number | null;
+      activeRequests: number;
     }>;
     requests: Array<{
       id: string;
@@ -142,6 +161,7 @@ export class Supervisor {
         state: slot.state,
         cooldownUntil: slot.cooldown_until,
         lastUsedAt: slot.last_used_at,
+        activeRequests: this.db.countActiveForSlot(slot.id),
       })),
       requests: this.db.listNonterminalRequests().map((request) => ({
         id: request.id,
@@ -153,23 +173,124 @@ export class Supervisor {
     };
   }
 
+  async keepalive(): Promise<{
+    ok: true;
+    slots: Array<{ id: string; state: SlotState; probe: KeepaliveProbe }>;
+  }> {
+    const slots: Array<{ id: string; state: SlotState; probe: KeepaliveProbe }> = [];
+    for (const slot of this.config.slots) {
+      const current = this.db.getSlot(slot.id);
+      if (!current) throw new Error(`slot ${slot.id} is absent from the database`);
+      if (this.db.countActiveForSlot(slot.id) > 0) {
+        slots.push({ id: slot.id, state: current.state, probe: "unknown" });
+        continue;
+      }
+
+      let wasRunning: boolean | null = null;
+      let client: RpcClient | null = null;
+      let probe: KeepaliveProbe = "unknown";
+      try {
+        if (slot.unmanaged !== true) wasRunning = (await this.docker.inspect(slot.id)).running;
+        client = await this.connectDaemon(slot);
+        const readiness = await client.call("readiness", undefined, 40_000);
+        probe = readiness.state;
+        if (readiness.state === "ready") markSlotIdle(this.db, slot.id);
+        else if (readiness.state === "needs_login") markSlotNeedsLogin(this.db, slot.id);
+        else if (readiness.state === "provider_limit") markSlotProviderLimit(this.db, slot.id);
+      } catch {
+        probe = "unreachable";
+      } finally {
+        if (client) await client.close().catch(() => undefined);
+        // Only stop when inspect proved that this invocation started the runtime.
+        // An inspect failure leaves ownership unknown and must preserve the runtime.
+        if (slot.unmanaged !== true && wasRunning === false) {
+          await this.docker.stop(slot.id).catch(() => undefined);
+        }
+      }
+      slots.push({ id: slot.id, state: this.db.getSlot(slot.id)!.state, probe });
+    }
+    return { ok: true, slots };
+  }
+
+  async login(
+    slotId: string,
+    options: LoginOptions = {},
+  ): Promise<{ slotId: string; state: "ready"; url: string }> {
+    const slot = this.config.slots.find((item) => item.id === slotId);
+    if (!slot) throw new InputError(`unknown slot: ${slotId}`);
+    if (this.db.countActiveForSlot(slot.id) > 0) {
+      throw new InputError(`slot ${slot.id} has active requests`);
+    }
+    const timeoutMs = options.timeoutMs ?? 15 * 60 * 1_000;
+    const pollIntervalMs = options.pollIntervalMs ?? 5_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0
+      || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new InputError("login polling intervals are invalid");
+    }
+
+    const url = `http://127.0.0.1:${slot.port + 600}/vnc.html`;
+    let client: RpcClient | null = null;
+    let readyObserved = false;
+    let timedOut = false;
+    try {
+      throwIfLoginInterrupted(options.signal);
+      const endpoint = await this.docker.ensure(slot, 60_000, { loginMode: true });
+      throwIfLoginInterrupted(options.signal);
+      options.onUrl?.(url);
+      client = await RpcClient.connect(endpoint.port, endpoint.tokenPath);
+      const startedAt = Date.now();
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        throwIfLoginInterrupted(options.signal);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new LoginTimeoutError(`login timed out for ${slot.id}`);
+        let readiness: ReadinessResult;
+        try {
+          readiness = await withLoginAbort(
+            client.call("readiness", undefined, Math.max(1, Math.min(40_000, remaining))),
+            options.signal,
+          );
+        } catch (error) {
+          if (error instanceof LoginInterruptedError) throw error;
+          if (Date.now() >= deadline) throw new LoginTimeoutError(`login timed out for ${slot.id}`);
+          throw error;
+        }
+        if (readiness.state === "ready") {
+          readyObserved = true;
+          return { slotId: slot.id, state: "ready", url };
+        }
+        options.onProgress?.(Date.now() - startedAt, readiness.state);
+        const waitMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
+        if (waitMs === 0) throw new LoginTimeoutError(`login timed out for ${slot.id}`);
+        await loginDelay(waitMs, options.signal);
+      }
+    } catch (error) {
+      if (error instanceof LoginTimeoutError) timedOut = true;
+      throw error;
+    } finally {
+      if (client) await client.close().catch(() => undefined);
+      await this.stopSlot(slot);
+      if (readyObserved) markSlotIdle(this.db, slot.id);
+      else if (timedOut) markSlotNeedsLogin(this.db, slot.id);
+    }
+  }
+
   async cleanup(apply: boolean): Promise<{
     ok: true;
     dryRun: boolean;
     actions: Array<{ kind: string; target: string; detail: string }>;
   }> {
     const actions: Array<{ kind: string; target: string; detail: string }> = [];
-    const staleSlots = recoverStaleBusySlots(this.db, apply);
-    for (const slotId of staleSlots) {
-      actions.push({
-        kind: "recover_busy_slot",
-        target: slotId,
-        detail: apply ? "set idle because no active request owns the slot" : "would set idle because no active request owns the slot",
-      });
-    }
-
     for (const row of this.db.listSlots().filter((slot) => slot.state === "needs_login")) {
       const slot = this.requireSlotConfig(row.id);
+      if (this.db.countActiveForSlot(row.id) > 0) {
+        actions.push({
+          kind: "skip_login_recheck",
+          target: row.id,
+          detail: "slot has active requests",
+        });
+        continue;
+      }
       if (!apply) {
         actions.push({
           kind: "recheck_login",
@@ -279,6 +400,7 @@ export class Supervisor {
         const claim = claimSlotForRequest(
           this.db,
           this.config.slots,
+          this.config.maxConcurrent,
           request.id,
           Date.now(),
           triedSlots,
@@ -287,9 +409,14 @@ export class Supervisor {
         if (request.status !== "staged") continue;
         if (!request.slot_id) {
           const slots = this.db.listSlots();
-          const hasBusy = slots.some((item) => item.state === "busy");
+          const now = Date.now();
+          const hasCapacityBlocked = slots.some((item) => (
+            item.state === "idle"
+              || (item.state === "provider_limit" && item.cooldown_until !== null
+                && item.cooldown_until <= now)
+          ) && this.db.countActiveForSlot(item.id) >= this.config.maxConcurrent);
           const hasProviderLimit = slots.some((item) => item.state === "provider_limit");
-          if ((sawProviderLimit || hasProviderLimit) && !hasBusy) {
+          if ((sawProviderLimit || hasProviderLimit) && !hasCapacityBlocked) {
             return recoveringEnvelope(id, "provider_limit", "all currently usable accounts are cooling down");
           }
           if (sawLogin && slots.every((item) => item.state === "needs_login")) {
@@ -313,7 +440,7 @@ export class Supervisor {
           this.db.updateRequest(id, { slot_id: null });
           await client.close();
           client = null;
-          await this.stopSlot(slot);
+          await this.stopSlotIfUnused(slot);
           continue;
         }
         if (readiness.state === "provider_limit") {
@@ -323,7 +450,7 @@ export class Supervisor {
           this.db.updateRequest(id, { slot_id: null });
           await client.close();
           client = null;
-          await this.stopSlot(slot);
+          await this.stopSlotIfUnused(slot);
           continue;
         }
         if (readiness.state !== "ready") {
@@ -331,6 +458,7 @@ export class Supervisor {
           await this.releaseRuntime(this.requireRequest(id));
           continue;
         }
+        markSlotIdle(this.db, slot.id);
         const outcome = await this.send(request, slot, client);
         client = null;
         if (outcome) return outcome;
@@ -409,14 +537,14 @@ export class Supervisor {
             markSlotNeedsLogin(this.db, slot.id);
             this.db.updateRequest(request.id, { status: "staged", slot_id: null });
             await client.close().catch(() => undefined);
-            await this.stopSlot(slot);
+            await this.stopSlotIfUnused(slot);
             return null;
           }
           if (error instanceof GwpError && error.kind === "provider_limit") {
             markSlotProviderLimit(this.db, slot.id);
             this.db.updateRequest(request.id, { status: "staged", slot_id: null });
             await client.close().catch(() => undefined);
-            await this.stopSlot(slot);
+            await this.stopSlotIfUnused(slot);
             return null;
           }
           const message = errorMessage(error);
@@ -668,10 +796,12 @@ export class Supervisor {
             error_detail = ?, updated_at = ?
         WHERE id = ? AND status = 'generating'
       `).run(result.answerSha256, artifactMessage, Date.now(), request.id);
-      await client.close();
-      if (completed.changes !== 1) return this.envelopeFor(this.requireRequest(request.id));
+      if (completed.changes !== 1) {
+        await client.close();
+        return this.envelopeFor(this.requireRequest(request.id));
+      }
       this.log(request.id, "complete");
-      await this.releaseRuntime(this.requireRequest(request.id));
+      await this.releaseRuntime(this.requireRequest(request.id), client);
       return this.envelopeFor(this.requireRequest(request.id));
     } finally {
       await finalizationLock.release();
@@ -833,11 +963,41 @@ export class Supervisor {
     return recoveringEnvelope(request.id, "pool_busy", "request is waiting for a slot");
   }
 
-  private async releaseRuntime(request: RequestRow): Promise<void> {
+  private async releaseRuntime(request: RequestRow, client: RpcClient | null = null): Promise<void> {
     if (!request.slot_id || ACTIVE_STATUSES.has(request.status)) return;
-    if (this.db.countActiveForSlot(request.slot_id) !== 0) return;
-    await this.stopSlot(this.requireSlotConfig(request.slot_id));
-    releaseSlotIfUnused(this.db, request.slot_id);
+    await this.closeConversationBestEffort(request, client);
+    if (client) await client.close().catch(() => undefined);
+    await this.stopSlotIfUnused(this.requireSlotConfig(request.slot_id));
+  }
+
+  private async closeConversationBestEffort(
+    request: RequestRow,
+    existingClient: RpcClient | null,
+  ): Promise<void> {
+    if (!request.slot_id || !request.conversation_url) return;
+    const slot = this.requireSlotConfig(request.slot_id);
+    let client = existingClient;
+    let ownsClient = false;
+    try {
+      if (!client) {
+        if (slot.unmanaged !== true && !(await this.docker.inspect(slot.id)).running) return;
+        const paths = this.docker.paths(slot.id);
+        client = await RpcClient.connect(slot.port, paths.tokenPath, 2_000);
+        ownsClient = true;
+      }
+      await client.call("closeConversation", {
+        conversationUrl: request.conversation_url,
+      }, 5_000);
+    } catch {
+      // Terminalization is authoritative in SQLite; tab cleanup is intentionally
+      // best-effort and must never turn a completed request back into a failure.
+    } finally {
+      if (ownsClient && client) await client.close().catch(() => undefined);
+    }
+  }
+
+  private async stopSlotIfUnused(slot: SlotConfig): Promise<void> {
+    if (this.db.countActiveForSlot(slot.id) === 0) await this.stopSlot(slot);
   }
 
   private async stopSlot(slot: SlotConfig): Promise<void> {
@@ -1075,16 +1235,20 @@ function isTemporaryConversationPointer(value: string): boolean {
 }
 
 function validateConfig(config: SlotsConfig): SlotsConfig {
-  if (!config || typeof config.image !== "string" || !Array.isArray(config.slots)) {
+  if (!config || typeof config.image !== "string" || !Array.isArray(config.slots)
+    || !Number.isInteger(config.maxConcurrent) || config.maxConcurrent < 1) {
     throw new InputError("invalid slots config");
   }
   const ids = new Set<string>();
+  const accounts = new Set<string>();
   const ports = new Set<number>();
   for (const slot of config.slots) {
-    if (!/^slot-[0-9]{2}$/.test(slot.id) || !slot.account || ids.has(slot.id)) {
+    if (!/^slot-[a-z0-9]+$/.test(slot.id) || !slot.account || ids.has(slot.id)
+      || accounts.has(slot.account)) {
       throw new InputError(`invalid slot config entry: ${JSON.stringify(slot)}`);
     }
     ids.add(slot.id);
+    accounts.add(slot.account);
     if (!Number.isInteger(slot.port) || slot.port < 1 || slot.port > 65_535 || ports.has(slot.port)) {
       throw new InputError(`invalid or duplicate port for slot ${slot.id}`);
     }
@@ -1120,6 +1284,51 @@ function suffixBeforeFirstDot(filename: string, ordinal: number): string {
   return dot > 0
     ? `${filename.slice(0, dot)}-${ordinal}${filename.slice(dot)}`
     : `${filename}-${ordinal}`;
+}
+
+function throwIfLoginInterrupted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new LoginInterruptedError("login interrupted");
+}
+
+async function withLoginAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  throwIfLoginInterrupted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new LoginInterruptedError("login interrupted"));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function loginDelay(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    return;
+  }
+  throwIfLoginInterrupted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let timer: NodeJS.Timeout;
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(new LoginInterruptedError("login interrupted"));
+    };
+    const finish = () => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 export { defaultConfigPath, defaultStateDir, validateConfig };

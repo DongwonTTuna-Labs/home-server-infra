@@ -22,9 +22,7 @@ export async function sendMessage(
 ): Promise<SendResult> {
   let clicked = false;
   try {
-    const page = params.newConversation
-      ? await session.newConversation()
-      : await session.currentPage();
+    const page = await session.newConversation();
     await ensurePro(page, labels);
     await fillComposer(page, params.prompt);
     if (params.files.length > 0) {
