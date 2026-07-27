@@ -183,7 +183,7 @@ export class Supervisor {
       let runtimeStopped = false;
       try {
         client = await this.connectDaemon(slot);
-        const readiness = await client.call("readiness", undefined, 15_000);
+        const readiness = await client.call("readiness", undefined, 40_000);
         if (readiness.state === "ready") {
           readinessReady = true;
         } else {
@@ -305,7 +305,7 @@ export class Supervisor {
       let client: RpcClient | null = null;
       try {
         client = await this.connectDaemon(slot);
-        const readiness = await client.call("readiness", undefined, 15_000);
+        const readiness = await client.call("readiness", undefined, 40_000);
         if (readiness.state === "needs_login") {
           sawLogin = true;
           triedSlots.add(slot.id);
@@ -386,7 +386,7 @@ export class Supervisor {
       this.log(request.id, "sending", `attempt ${attemptNo} armed`);
 
       try {
-        const result = await client.call("send", { prompt, files, newConversation: true }, 45_000);
+        const result = await client.call("send", { prompt, files, newConversation: true }, 180_000);
         const finalState = confirmSendAttempt(this.db, request.id, result);
         this.log(request.id, "generating", `attempt ${attemptNo} ${finalState}`);
         await client.close();
