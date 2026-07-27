@@ -1,0 +1,1125 @@
+import { access, copyFile, readFile, readdir, rm, stat } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  actionEnvelope,
+  completeEnvelope,
+  failedEnvelope,
+  networkFailureEnvelope,
+  recoveringEnvelope,
+  runningEnvelope,
+} from "../cli/envelope.js";
+import {
+  GwpError,
+  errorMessage,
+  isDirectNetworkFailure,
+  type PublicErrorKind,
+} from "../shared/errors.js";
+import {
+  appendJsonLine,
+  atomicWrite,
+  fileSize,
+  mkdirp,
+  moveFile,
+  sha256File,
+  sha256Text,
+  tryAcquireFileLock,
+} from "../shared/fsx.js";
+import { newRequestId } from "../shared/ids.js";
+import type {
+  Envelope,
+  PollResult,
+  PublicArtifact,
+  ReconcileResult,
+  RequestRow,
+  RpcFile,
+  SendResult,
+  SlotConfig,
+  SlotsConfig,
+} from "../shared/types.js";
+import { GwpDatabase } from "./db.js";
+import { DockerManager } from "./docker.js";
+import { RpcClient } from "./rpc-client.js";
+import {
+  claimSlotForRequest,
+  markSlotIdle,
+  markSlotNeedsLogin,
+  markSlotProviderLimit,
+  recoverStaleBusySlots,
+  releaseSlotIfUnused,
+} from "./slots.js";
+
+const ACTIVE_STATUSES = new Set(["staged", "sending", "generating", "uncertain"]);
+const TERMINAL_STATUSES = new Set(["complete", "needs_user_action", "failed"]);
+const SEND_IN_PROGRESS_MESSAGE = "전송 진행 중(소유 프로세스 생존)";
+
+interface ValidatedFile {
+  source: string;
+  name: string;
+}
+
+export class InputError extends Error {
+  override readonly name = "InputError";
+}
+
+export class Supervisor {
+  readonly db: GwpDatabase;
+  readonly docker: DockerManager;
+
+  private constructor(
+    readonly stateDir: string,
+    readonly config: SlotsConfig,
+    db: GwpDatabase,
+  ) {
+    this.db = db;
+    this.docker = new DockerManager(stateDir, config.image);
+  }
+
+  static async open(options: {
+    stateDir?: string;
+    configPath?: string;
+  } = {}): Promise<Supervisor> {
+    const stateDir = options.stateDir ?? defaultStateDir();
+    const configPath = options.configPath ?? defaultConfigPath();
+    const config = validateConfig(JSON.parse(await readFile(configPath, "utf8")) as SlotsConfig);
+    await mkdirp(stateDir);
+    const db = await GwpDatabase.open(path.join(stateDir, "db.sqlite"));
+    db.syncSlots(config.slots);
+    return new Supervisor(stateDir, config, db);
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  async run(prompt: string, files: string[], timeoutSeconds: number): Promise<Envelope> {
+    if (!prompt.trim()) throw new InputError("prompt must not be empty");
+    const validated = await validateFiles(files);
+    const id = newRequestId();
+    const directory = this.requestDir(id);
+    await mkdirp(directory);
+    this.db.createRequest(id, sha256Text(prompt.trim()));
+    this.log(id, "staged");
+    try {
+      await atomicWrite(path.join(directory, "prompt.md"), prompt);
+      await this.persistAttachments(id, validated);
+    } catch (error) {
+      this.db.setRequestStatus(id, "failed", "internal", errorMessage(error));
+      return failedEnvelope(id, "internal", errorMessage(error));
+    }
+    return this.continue(id, timeoutSeconds);
+  }
+
+  async resume(id: string, timeoutSeconds: number): Promise<Envelope> {
+    if (!this.db.getRequest(id)) throw new InputError(`unknown session: ${id}`);
+    return this.continue(id, timeoutSeconds);
+  }
+
+  async status(): Promise<{
+    ok: true;
+    slots: Array<{
+      id: string;
+      account: string;
+      state: string;
+      cooldownUntil: number | null;
+      lastUsedAt: number | null;
+    }>;
+    requests: Array<{
+      id: string;
+      status: string;
+      slotId: string | null;
+      ageSeconds: number;
+      conversationUrl: string | null;
+    }>;
+  }> {
+    const now = Date.now();
+    return {
+      ok: true,
+      slots: this.db.listSlots().map((slot) => ({
+        id: slot.id,
+        account: slot.account,
+        state: slot.state,
+        cooldownUntil: slot.cooldown_until,
+        lastUsedAt: slot.last_used_at,
+      })),
+      requests: this.db.listNonterminalRequests().map((request) => ({
+        id: request.id,
+        status: request.status,
+        slotId: request.slot_id,
+        ageSeconds: Math.floor(Math.max(0, now - request.created_at) / 1_000),
+        conversationUrl: request.conversation_url,
+      })),
+    };
+  }
+
+  async cleanup(apply: boolean): Promise<{
+    ok: true;
+    dryRun: boolean;
+    actions: Array<{ kind: string; target: string; detail: string }>;
+  }> {
+    const actions: Array<{ kind: string; target: string; detail: string }> = [];
+    const staleSlots = recoverStaleBusySlots(this.db, apply);
+    for (const slotId of staleSlots) {
+      actions.push({
+        kind: "recover_busy_slot",
+        target: slotId,
+        detail: apply ? "set idle because no active request owns the slot" : "would set idle because no active request owns the slot",
+      });
+    }
+
+    for (const row of this.db.listSlots().filter((slot) => slot.state === "needs_login")) {
+      const slot = this.requireSlotConfig(row.id);
+      if (!apply) {
+        actions.push({
+          kind: "recheck_login",
+          target: row.id,
+          detail: "would start the slot and recheck daemon readiness",
+        });
+        continue;
+      }
+      let client: RpcClient | null = null;
+      let readinessReady = false;
+      let runtimeStopped = false;
+      try {
+        client = await this.connectDaemon(slot);
+        const readiness = await client.call("readiness", undefined, 15_000);
+        if (readiness.state === "ready") {
+          readinessReady = true;
+        } else {
+          actions.push({
+            kind: "login_still_required",
+            target: row.id,
+            detail: `readiness remained ${readiness.state}`,
+          });
+        }
+      } catch (error) {
+        actions.push({ kind: "login_recheck_failed", target: row.id, detail: errorMessage(error) });
+      } finally {
+        if (client) await client.close().catch(() => undefined);
+        try {
+          await this.stopSlot(slot);
+          runtimeStopped = true;
+        } catch (error) {
+          actions.push({
+            kind: "login_recheck_failed",
+            target: row.id,
+            detail: `runtime stop failed: ${errorMessage(error)}`,
+          });
+        }
+      }
+      if (readinessReady && runtimeStopped) {
+        markSlotIdle(this.db, row.id);
+        actions.push({ kind: "recover_login_slot", target: row.id, detail: "readiness is ready; set idle" });
+      }
+    }
+
+    const cutoff = Date.now() - 30 * 60 * 1_000;
+    for (const slot of this.config.slots) {
+      if (slot.unmanaged === true || this.db.countActiveForSlot(slot.id) > 0) continue;
+      const inspected = await this.docker.inspect(slot.id);
+      if (inspected.running && inspected.startedAt !== null && inspected.startedAt <= cutoff) {
+        actions.push({
+          kind: "stop_orphan_container",
+          target: this.docker.containerName(slot.id),
+          detail: apply ? "stopped container older than 30 minutes with no active request" : "would stop container older than 30 minutes with no active request",
+        });
+        if (apply) await this.docker.stop(slot.id);
+      }
+    }
+    return { ok: true, dryRun: !apply, actions };
+  }
+
+  async release(id: string): Promise<Envelope> {
+    if (!this.db.getRequest(id)) throw new InputError(`unknown session: ${id}`);
+    const sendLock = await tryAcquireFileLock(this.sendLockPath(id));
+    if (!sendLock) return runningEnvelope(id, SEND_IN_PROGRESS_MESSAGE);
+    try {
+      this.db.setRequestStatus(id, "failed", "internal", "released by operator");
+      this.log(id, "failed", "released by operator");
+      await this.releaseRuntime(this.db.getRequest(id)!);
+      return failedEnvelope(id, "internal", "released by operator");
+    } finally {
+      await sendLock.release();
+    }
+  }
+
+  private async continue(
+    id: string,
+    timeoutSeconds: number,
+  ): Promise<Envelope> {
+    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
+      throw new InputError("timeout-seconds must be a non-negative number");
+    }
+    const deadline = Date.now() + Math.floor(timeoutSeconds * 1_000);
+    const triedSlots = new Set<string>();
+    let sawLogin = false;
+    let sawProviderLimit = false;
+
+    for (;;) {
+      let request = this.requireRequest(id);
+      if (TERMINAL_STATUSES.has(request.status)) return this.envelopeFor(request);
+
+      if (request.status === "sending" || request.status === "uncertain") {
+        const outcome = await this.recoverSendState(request, deadline);
+        if (outcome) return outcome;
+        continue;
+      }
+
+      if (request.status === "generating") {
+        return this.pollUntilDeadline(request, deadline);
+      }
+
+      if (request.status !== "staged") {
+        this.db.setRequestStatus(id, "failed", "internal", `unsupported request state ${request.status}`);
+        continue;
+      }
+
+      if (!request.slot_id) {
+        const claim = claimSlotForRequest(
+          this.db,
+          this.config.slots,
+          request.id,
+          Date.now(),
+          triedSlots,
+        );
+        request = claim.request;
+        if (request.status !== "staged") continue;
+        if (!request.slot_id) {
+          const slots = this.db.listSlots();
+          const hasBusy = slots.some((item) => item.state === "busy");
+          const hasProviderLimit = slots.some((item) => item.state === "provider_limit");
+          if ((sawProviderLimit || hasProviderLimit) && !hasBusy) {
+            return recoveringEnvelope(id, "provider_limit", "all currently usable accounts are cooling down");
+          }
+          if (sawLogin && slots.every((item) => item.state === "needs_login")) {
+            this.db.setRequestStatus(id, "needs_user_action", "needs_login", "all slots require login");
+            continue;
+          }
+          return recoveringEnvelope(id, "pool_busy", "no idle slot is currently available");
+        }
+      }
+
+      const slot = this.requireSlotConfig(request.slot_id!);
+      await this.stageFiles(request);
+      let client: RpcClient | null = null;
+      try {
+        client = await this.connectDaemon(slot);
+        const readiness = await client.call("readiness", undefined, 15_000);
+        if (readiness.state === "needs_login") {
+          sawLogin = true;
+          triedSlots.add(slot.id);
+          markSlotNeedsLogin(this.db, slot.id);
+          this.db.updateRequest(id, { slot_id: null });
+          await client.close();
+          client = null;
+          await this.stopSlot(slot);
+          continue;
+        }
+        if (readiness.state === "provider_limit") {
+          sawProviderLimit = true;
+          triedSlots.add(slot.id);
+          markSlotProviderLimit(this.db, slot.id);
+          this.db.updateRequest(id, { slot_id: null });
+          await client.close();
+          client = null;
+          await this.stopSlot(slot);
+          continue;
+        }
+        if (readiness.state !== "ready") {
+          this.db.setRequestStatus(id, "failed", "daemon_unreachable", "daemon readiness is unknown");
+          await this.releaseRuntime(this.requireRequest(id));
+          continue;
+        }
+        const outcome = await this.send(request, slot, client);
+        client = null;
+        if (outcome) return outcome;
+      } catch (error) {
+        if (client) await client.close().catch(() => undefined);
+        const current = this.requireRequest(id);
+        if (current.status === "sending" || current.status === "uncertain") {
+          const outcome = await this.recoverSendState(current, deadline);
+          if (outcome) return outcome;
+          continue;
+        }
+        if (isDirectNetworkFailure(error)) {
+          this.db.setRequestStatus(id, "failed", "network_disconnected", errorMessage(error));
+          await this.releaseRuntime(this.requireRequest(id));
+          return networkFailureEnvelope(id, errorMessage(error));
+        }
+        this.db.setRequestStatus(id, "failed", "daemon_unreachable", errorMessage(error));
+        await this.releaseRuntime(this.requireRequest(id));
+        return failedEnvelope(id, "daemon_unreachable", errorMessage(error));
+      }
+    }
+  }
+
+  private async send(
+    request: RequestRow,
+    slot: SlotConfig,
+    client: RpcClient,
+  ): Promise<Envelope | null> {
+    const prompt = await readFile(path.join(this.requestDir(request.id), "prompt.md"), "utf8");
+    const files = await this.rpcFiles(request.id, slot);
+    let sendLock;
+    try {
+      sendLock = await tryAcquireFileLock(this.sendLockPath(request.id));
+    } catch (error) {
+      const message = errorMessage(error);
+      this.db.setRequestStatus(request.id, "failed", "internal", message);
+      await client.close().catch(() => undefined);
+      await this.releaseRuntime(this.requireRequest(request.id));
+      return failedEnvelope(request.id, "internal", message);
+    }
+    if (!sendLock) {
+      await client.close().catch(() => undefined);
+      return runningEnvelope(request.id, SEND_IN_PROGRESS_MESSAGE);
+    }
+
+    try {
+      const current = this.requireRequest(request.id);
+      if (current.status !== "staged" || current.slot_id !== slot.id) {
+        await client.close().catch(() => undefined);
+        return null;
+      }
+      const attemptNo = armSendAttempt(this.db, request.id);
+      this.log(request.id, "sending", `attempt ${attemptNo} armed`);
+
+      try {
+        const result = await client.call("send", { prompt, files, newConversation: true }, 45_000);
+        const finalState = confirmSendAttempt(this.db, request.id, result);
+        this.log(request.id, "generating", `attempt ${attemptNo} ${finalState}`);
+        await client.close();
+        return null;
+      } catch (error) {
+        const phase = error instanceof GwpError ? error.phase : undefined;
+        if (phase === "pre_click") {
+          const finalState = markPreClickNoSend(this.db, request.id);
+          if (finalState === "confirmed" || finalState === "reconciled") {
+            await client.close().catch(() => undefined);
+            return null;
+          }
+          if (error instanceof GwpError && error.kind === "model_unavailable") {
+            this.db.setRequestStatus(request.id, "needs_user_action", "model_unavailable", error.detail);
+            await client.close().catch(() => undefined);
+            await this.releaseRuntime(this.requireRequest(request.id));
+            return actionEnvelope(request.id, "model_unavailable", error.detail);
+          }
+          if (error instanceof GwpError && error.kind === "needs_login") {
+            markSlotNeedsLogin(this.db, slot.id);
+            this.db.updateRequest(request.id, { status: "staged", slot_id: null });
+            await client.close().catch(() => undefined);
+            await this.stopSlot(slot);
+            return null;
+          }
+          if (error instanceof GwpError && error.kind === "provider_limit") {
+            markSlotProviderLimit(this.db, slot.id);
+            this.db.updateRequest(request.id, { status: "staged", slot_id: null });
+            await client.close().catch(() => undefined);
+            await this.stopSlot(slot);
+            return null;
+          }
+          const message = errorMessage(error);
+          const network = isDirectNetworkFailure(error);
+          this.db.setRequestStatus(
+            request.id,
+            "failed",
+            network ? "network_disconnected" : "internal",
+            message,
+          );
+          await client.close().catch(() => undefined);
+          await this.releaseRuntime(this.requireRequest(request.id));
+          return network
+            ? networkFailureEnvelope(request.id, message)
+            : failedEnvelope(request.id, "internal", message);
+        }
+
+        const finalState = markSendUncertain(this.db, request.id, errorMessage(error));
+        await client.close().catch(() => undefined);
+        if (finalState === "confirmed" || finalState === "reconciled") return null;
+        this.log(request.id, "uncertain", errorMessage(error));
+        return actionEnvelope(request.id, "send_uncertain", errorMessage(error), true);
+      }
+    } finally {
+      await sendLock.release();
+    }
+  }
+
+  private async recoverSendState(
+    request: RequestRow,
+    deadline: number,
+  ): Promise<Envelope | null> {
+    const sendLock = await tryAcquireFileLock(this.sendLockPath(request.id));
+    if (!sendLock) return runningEnvelope(request.id, SEND_IN_PROGRESS_MESSAGE);
+    try {
+      let current = this.requireRequest(request.id);
+      if (current.status === "sending") {
+        const attempt = this.db.latestAttempt(request.id);
+        if (!attempt || attempt.state !== "armed") {
+          if (attempt?.state === "confirmed" || attempt?.state === "reconciled") return null;
+          this.db.setRequestStatus(request.id, "failed", "internal", "sending request has no armed attempt");
+          return null;
+        }
+        const finalState = markSendUncertain(
+          this.db,
+          request.id,
+          "send owner exited after the attempt was armed",
+        );
+        if (finalState === "confirmed" || finalState === "reconciled") return null;
+        this.log(request.id, "uncertain", "armed attempt recovered after send owner exit");
+        current = this.requireRequest(request.id);
+      }
+      if (current.status !== "uncertain") return null;
+      return this.reconcile(current, deadline);
+    } finally {
+      await sendLock.release();
+    }
+  }
+
+  private async reconcile(request: RequestRow, deadline: number): Promise<Envelope | null> {
+    const attempt = this.db.latestAttempt(request.id);
+    if (!attempt || attempt.state !== "uncertain") {
+      this.db.setRequestStatus(request.id, "failed", "internal", "uncertain request has no uncertain attempt");
+      return null;
+    }
+    if (!request.slot_id) {
+      return actionEnvelope(request.id, "send_uncertain", "the original slot is unknown", true);
+    }
+    let client: RpcClient | null = null;
+    try {
+      const slot = this.requireSlotConfig(request.slot_id);
+      client = await this.connectDaemon(slot);
+      const promptSha256 = this.requireRequest(request.id).prompt_sha256;
+      const result = await client.call("reconcile", {
+        promptSha256,
+        ...(request.conversation_url ? { conversationUrl: request.conversation_url } : {}),
+      }, Math.max(5_000, Math.min(65_000, deadline - Date.now() + 5_000)));
+      await client.close();
+      client = null;
+
+      const decision = applyReconcileResult(this.db, request.id, result);
+      if (decision === "found") {
+        this.log(request.id, "generating", "uncertain send reconciled as found");
+        return null;
+      }
+
+      if (decision === "retry_send") {
+        this.log(request.id, "staged", "reconcile proved no send; attempt 2 allowed");
+        return null;
+      }
+      if (decision === "exhausted") {
+        await this.releaseRuntime(this.requireRequest(request.id));
+        return actionEnvelope(request.id, "send_uncertain", "two attempts ended without a confirmed send");
+      }
+
+      return actionEnvelope(
+        request.id,
+        "send_uncertain",
+        "the open ChatGPT tabs cannot prove whether the send occurred",
+        true,
+      );
+    } catch (error) {
+      if (client) await client.close().catch(() => undefined);
+      return actionEnvelope(
+        request.id,
+        "send_uncertain",
+        `reconcile could not prove the send state: ${errorMessage(error)}`,
+        true,
+      );
+    }
+  }
+
+  private async pollUntilDeadline(request: RequestRow, deadline: number): Promise<Envelope> {
+    if (!request.slot_id || !request.conversation_url) {
+      this.db.setRequestStatus(request.id, "failed", "internal", "generating request is missing slot or conversation URL");
+      return failedEnvelope(request.id, "internal", "generating request is missing slot or conversation URL");
+    }
+    let client: RpcClient | null = null;
+    try {
+      const slot = this.requireSlotConfig(request.slot_id);
+      let attempt = this.db.latestAttempt(request.id);
+      if (!attempt || (attempt.state !== "confirmed" && attempt.state !== "reconciled")) {
+        throw new Error("generating request is missing a confirmed or reconciled send attempt");
+      }
+      let current = request;
+      client = await this.connectDaemon(slot);
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          await client.close();
+          return runningEnvelope(request.id);
+        }
+        const result = await client.call("poll", {
+          conversationUrl: current.conversation_url!,
+          promptSha256: current.prompt_sha256,
+          ...(attempt.user_turn_id ? { userTurnId: attempt.user_turn_id } : {}),
+          ...(attempt.assistant_turn_id ? { assistantTurnId: attempt.assistant_turn_id } : {}),
+          waitMs: Math.min(60_000, Math.max(0, remaining)),
+        }, Math.min(65_000, Math.max(5_000, remaining + 5_000)));
+        current = this.updateConversationPointer(current, result.currentUrl);
+        if (result.assistantTurnId && attempt.user_turn_id) {
+          const rebound = this.db.rebindAssistantTurnId(
+            request.id,
+            attempt.attempt_no,
+            attempt.user_turn_id,
+            attempt.assistant_turn_id,
+            result.assistantTurnId,
+          );
+          attempt = rebound.row;
+          if (rebound.changed) this.log(request.id, "generating", "assistant turn id updated");
+        }
+        if (current.status !== "generating") {
+          await client.close();
+          return this.envelopeFor(current);
+        }
+        if (result.state === "generating") {
+          if (Date.now() >= deadline) {
+            await client.close();
+            return runningEnvelope(request.id);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          continue;
+        }
+
+        const envelope = await this.finalizeComplete(current, slot, client, result);
+        client = null;
+        return envelope;
+      }
+    } catch (error) {
+      if (client) await client.close().catch(() => undefined);
+      const message = errorMessage(error);
+      return this.finishGeneratingFailure(
+        request.id,
+        isDirectNetworkFailure(error) ? "network_disconnected" : "internal",
+        message,
+      );
+    }
+  }
+
+  private updateConversationPointer(request: RequestRow, currentUrl: string): RequestRow {
+    let changed = false;
+    const result = this.db.immediate(() => {
+      const persisted = this.requireRequest(request.id);
+      if (currentUrl === persisted.conversation_url || !isValidConversationPointer(currentUrl)) {
+        return persisted;
+      }
+      if (isTemporaryConversationPointer(currentUrl)
+        && persisted.conversation_url
+        && !isTemporaryConversationPointer(persisted.conversation_url)) return persisted;
+      const updated = this.db.connection.prepare(`
+        UPDATE requests
+        SET conversation_url = ?, updated_at = ?
+        WHERE id = ? AND status = 'generating'
+      `).run(currentUrl, Date.now(), request.id);
+      changed = updated.changes === 1;
+      return this.requireRequest(request.id);
+    });
+    if (changed) this.log(request.id, "generating", `conversation URL updated to ${currentUrl}`);
+    return result;
+  }
+
+  private async finalizeComplete(
+    request: RequestRow,
+    slot: SlotConfig,
+    client: RpcClient,
+    result: PollResult,
+  ): Promise<Envelope> {
+    const finalizationLock = await tryAcquireFileLock(this.sendLockPath(request.id));
+    if (!finalizationLock) {
+      await client.close().catch(() => undefined);
+      return runningEnvelope(request.id);
+    }
+    try {
+      const current = this.requireRequest(request.id);
+      if (current.status !== "generating") {
+        await client.close().catch(() => undefined);
+        return this.envelopeFor(current);
+      }
+      if (!result.answerMarkdown || !result.answerSha256
+        || sha256Text(result.answerMarkdown) !== result.answerSha256) {
+        throw new Error("daemon returned an invalid complete answer");
+      }
+      const answerPath = path.join(this.requestDir(request.id), "answer.md");
+      await atomicWrite(answerPath, result.answerMarkdown);
+      const failedControls: string[] = [];
+      for (const control of result.artifactControls ?? []) {
+        let stored = false;
+        let lastFailure = "";
+        for (let attempt = 1; attempt <= 2 && !stored; attempt += 1) {
+          try {
+            const downloaded = await client.call("download", {
+              conversationUrl: this.requireRequest(request.id).conversation_url!,
+              controlIndex: control.index,
+            }, 45_000);
+            await this.storeArtifact(request, slot, downloaded);
+            stored = true;
+          } catch (error) {
+            lastFailure = errorMessage(error);
+          }
+        }
+        if (!stored) failedControls.push(`${control.label}: ${lastFailure}`);
+      }
+      const artifactMessage = failedControls.length > 0
+        ? `${failedControls.length} artifact control(s) failed after two attempts: ${failedControls.join("; ")}`
+        : null;
+      const completed = this.db.connection.prepare(`
+        UPDATE requests
+        SET status = 'complete', answer_sha256 = ?, error_kind = NULL,
+            error_detail = ?, updated_at = ?
+        WHERE id = ? AND status = 'generating'
+      `).run(result.answerSha256, artifactMessage, Date.now(), request.id);
+      await client.close();
+      if (completed.changes !== 1) return this.envelopeFor(this.requireRequest(request.id));
+      this.log(request.id, "complete");
+      await this.releaseRuntime(this.requireRequest(request.id));
+      return this.envelopeFor(this.requireRequest(request.id));
+    } finally {
+      await finalizationLock.release();
+    }
+  }
+
+  private async finishGeneratingFailure(
+    requestId: string,
+    errorKind: PublicErrorKind,
+    detail: string,
+  ): Promise<Envelope> {
+    const failureLock = await tryAcquireFileLock(this.sendLockPath(requestId));
+    if (!failureLock) return runningEnvelope(requestId);
+    try {
+      const current = this.requireRequest(requestId);
+      if (current.status !== "generating") return this.envelopeFor(current);
+      this.db.connection.prepare(`
+        UPDATE requests
+        SET status = 'failed', error_kind = ?, error_detail = ?, updated_at = ?
+        WHERE id = ? AND status = 'generating'
+      `).run(errorKind, detail, Date.now(), requestId);
+      await this.releaseRuntime(this.requireRequest(requestId));
+      return errorKind === "network_disconnected"
+        ? networkFailureEnvelope(requestId, detail)
+        : failedEnvelope(requestId, "internal", detail);
+    } finally {
+      await failureLock.release();
+    }
+  }
+
+  private async storeArtifact(
+    request: RequestRow,
+    slot: SlotConfig,
+    downloaded: { filename: string; outboxPath: string; sha256: string; sizeBytes: number },
+  ): Promise<void> {
+    const filename = path.basename(downloaded.filename);
+    if (!filename || filename !== downloaded.filename || filename === "." || filename === "..") {
+      throw new Error("daemon returned an unsafe artifact filename");
+    }
+    if (slot.unmanaged !== true) {
+      const outbox = path.resolve(this.docker.paths(slot.id).outbox);
+      const source = path.resolve(downloaded.outboxPath);
+      if (!source.startsWith(`${outbox}${path.sep}`)) throw new Error("artifact path is outside slot outbox");
+    }
+    if (await sha256File(downloaded.outboxPath) !== downloaded.sha256
+      || await fileSize(downloaded.outboxPath) !== downloaded.sizeBytes) {
+      throw new Error("artifact metadata does not match outbox bytes");
+    }
+    const target = path.join(this.requestDir(request.id), "artifacts", filename);
+    try {
+      await access(target);
+      const targetSha256 = await sha256File(target);
+      const targetSize = await fileSize(target);
+      if (targetSha256 !== downloaded.sha256 || targetSize !== downloaded.sizeBytes) {
+        throw new Error(`duplicate artifact filename: ${filename}`);
+      }
+      if (path.resolve(downloaded.outboxPath) !== path.resolve(target)) {
+        await rm(downloaded.outboxPath, { force: true });
+      }
+      this.db.addArtifact({
+        request_id: request.id,
+        filename,
+        path: target,
+        sha256: targetSha256,
+        size_bytes: targetSize,
+        created_at: Date.now(),
+      });
+      return;
+    } catch (error) {
+      if (error instanceof Error && !(("code" in error) && error.code === "ENOENT")) throw error;
+    }
+    await moveFile(downloaded.outboxPath, target);
+    const sha256 = await sha256File(target);
+    const sizeBytes = await fileSize(target);
+    if (sha256 !== downloaded.sha256 || sizeBytes !== downloaded.sizeBytes) {
+      throw new Error("stored artifact bytes changed during transfer");
+    }
+    this.db.addArtifact({
+      request_id: request.id,
+      filename,
+      path: target,
+      sha256,
+      size_bytes: sizeBytes,
+      created_at: Date.now(),
+    });
+  }
+
+  private async persistAttachments(requestId: string, files: ValidatedFile[]): Promise<void> {
+    const directory = path.join(this.requestDir(requestId), "attachments");
+    await mkdirp(directory);
+    for (const file of files) await copyFile(file.source, path.join(directory, file.name));
+  }
+
+  private async stageFiles(request: RequestRow): Promise<void> {
+    if (!request.slot_id) return;
+    const attachments = path.join(this.requestDir(request.id), "attachments");
+    const names = (await readdir(attachments)).sort();
+    if (names.length === 0) return;
+    const inbox = path.join(this.docker.paths(request.slot_id).inbox, request.id);
+    await mkdirp(inbox);
+    for (const name of names) {
+      await copyFile(path.join(attachments, name), path.join(inbox, name));
+    }
+  }
+
+  private async rpcFiles(requestId: string, slot: SlotConfig): Promise<RpcFile[]> {
+    const inbox = path.join(this.docker.paths(slot.id).inbox, requestId);
+    let names: string[] = [];
+    try {
+      names = (await readdir(inbox)).sort();
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+    }
+    return names.map((name) => ({
+      name,
+      containerPath: slot.unmanaged === true
+        ? path.join(inbox, name)
+        : path.posix.join("/inbox", requestId, name),
+    }));
+  }
+
+  private async envelopeFor(request: RequestRow): Promise<Envelope> {
+    if (request.status === "complete") {
+      const answerPath = path.join(this.requestDir(request.id), "answer.md");
+      const answer = await readFile(answerPath, "utf8");
+      const artifacts: PublicArtifact[] = this.db.listArtifacts(request.id).map((item) => ({
+        filename: item.filename,
+        path: item.path,
+        sha256: item.sha256,
+        sizeBytes: item.size_bytes,
+      }));
+      return completeEnvelope({
+        sessionId: request.id,
+        answer,
+        answerPath,
+        answerSha256: request.answer_sha256!,
+        artifacts,
+        message: request.error_detail,
+      });
+    }
+    if (request.status === "needs_user_action") {
+      return actionEnvelope(
+        request.id,
+        request.error_kind,
+        request.error_detail ?? "user action is required",
+        request.error_kind === "send_uncertain",
+      );
+    }
+    if (request.status === "failed") {
+      if (request.error_kind === "network_disconnected") {
+        return networkFailureEnvelope(request.id, request.error_detail ?? "network disconnected");
+      }
+      return failedEnvelope(request.id, request.error_kind ?? "internal", request.error_detail ?? "request failed");
+    }
+    if (request.status === "generating") return runningEnvelope(request.id);
+    if (request.status === "uncertain") {
+      return actionEnvelope(request.id, "send_uncertain", request.error_detail ?? "send state is uncertain", true);
+    }
+    return recoveringEnvelope(request.id, "pool_busy", "request is waiting for a slot");
+  }
+
+  private async releaseRuntime(request: RequestRow): Promise<void> {
+    if (!request.slot_id || ACTIVE_STATUSES.has(request.status)) return;
+    if (this.db.countActiveForSlot(request.slot_id) !== 0) return;
+    await this.stopSlot(this.requireSlotConfig(request.slot_id));
+    releaseSlotIfUnused(this.db, request.slot_id);
+  }
+
+  private async stopSlot(slot: SlotConfig): Promise<void> {
+    if (slot.unmanaged !== true) await this.docker.stop(slot.id);
+  }
+
+  private async connectDaemon(slot: SlotConfig): Promise<RpcClient> {
+    const endpoint = await this.docker.ensure(slot);
+    return RpcClient.connect(endpoint.port, endpoint.tokenPath);
+  }
+
+  private requestDir(id: string): string {
+    return path.join(this.stateDir, "requests", id);
+  }
+
+  private sendLockPath(id: string): string {
+    return path.join(this.requestDir(id), "send.lock");
+  }
+
+  private requireRequest(id: string): RequestRow {
+    const request = this.db.getRequest(id);
+    if (!request) throw new InputError(`unknown session: ${id}`);
+    return request;
+  }
+
+  private requireSlotConfig(id: string): SlotConfig {
+    const slot = this.config.slots.find((item) => item.id === id);
+    if (!slot) throw new Error(`slot ${id} is absent from config`);
+    return slot;
+  }
+
+  private log(id: string, status: string, detail?: string): void {
+    void appendJsonLine(path.join(this.requestDir(id), "log.jsonl"), {
+      at: Date.now(),
+      status,
+      ...(detail ? { detail } : {}),
+    }).catch(() => undefined);
+  }
+}
+
+export function armSendAttempt(db: GwpDatabase, requestId: string): number {
+  return db.immediate(() => {
+    const previous = db.latestAttempt(requestId);
+    if (previous && previous.attempt_no >= 2) throw new Error("send attempt limit exceeded");
+    const request = db.getRequest(requestId);
+    if (!request || request.status !== "staged") {
+      throw new Error("send attempt requires a staged request");
+    }
+    let attemptNo: number;
+    if (!previous) attemptNo = 1;
+    else if (previous.attempt_no === 1 && previous.state === "no_send_proven") attemptNo = 2;
+    else throw new Error("attempt 2 requires attempt 1 to be no_send_proven");
+
+    db.createAttempt(requestId, attemptNo);
+    const updated = db.connection.prepare(`
+      UPDATE requests
+      SET status = 'sending', error_kind = NULL, error_detail = NULL, updated_at = ?
+      WHERE id = ? AND status = 'staged'
+    `).run(Date.now(), requestId);
+    if (updated.changes !== 1) throw new Error("send attempt lost its staged request");
+    return attemptNo;
+  });
+}
+
+export function confirmSendAttempt(
+  db: GwpDatabase,
+  requestId: string,
+  result: SendResult,
+): "confirmed" | "reconciled" {
+  return db.immediate(() => {
+    const attempt = db.latestAttempt(requestId);
+    if (!attempt) throw new Error("confirmed send requires an armed attempt");
+    const transition = db.transitionAttempt(requestId, attempt.attempt_no, ["armed"], "confirmed", {
+      userTurnId: result.userTurnId,
+      assistantTurnId: result.assistantTurnId,
+    });
+    if (!transition.changed) {
+      if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {
+        return transition.row.state;
+      }
+      throw new Error("confirmed send requires an armed attempt");
+    }
+    db.connection.prepare(`
+      UPDATE requests
+      SET status = 'generating', conversation_url = ?, error_kind = NULL,
+          error_detail = NULL, updated_at = ?
+      WHERE id = ? AND status = 'sending'
+    `).run(result.conversationUrl, Date.now(), requestId);
+    return "confirmed";
+  });
+}
+
+export function markPreClickNoSend(db: GwpDatabase, requestId: string):
+  "no_send_proven" | "confirmed" | "reconciled" {
+  const attempt = db.latestAttempt(requestId);
+  if (!attempt) throw new Error("pre-click failure requires an armed attempt");
+  const transition = db.transitionAttempt(
+    requestId,
+    attempt.attempt_no,
+    ["armed"],
+    "no_send_proven",
+  );
+  if (transition.changed || transition.row.state === "no_send_proven") return "no_send_proven";
+  if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {
+    return transition.row.state;
+  }
+  throw new Error("pre-click failure requires an armed attempt");
+}
+
+export function markSendUncertain(
+  db: GwpDatabase,
+  requestId: string,
+  detail: string,
+): "uncertain" | "confirmed" | "reconciled" {
+  return db.immediate(() => {
+    const attempt = db.latestAttempt(requestId);
+    if (!attempt) throw new Error("uncertain send requires an armed attempt");
+    const transition = db.transitionAttempt(
+      requestId,
+      attempt.attempt_no,
+      ["armed"],
+      "uncertain",
+    );
+    if (!transition.changed) {
+      if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {
+        return transition.row.state;
+      }
+      if (transition.row.state === "uncertain") return "uncertain";
+      throw new Error("uncertain send requires an armed attempt");
+    }
+    db.connection.prepare(`
+      UPDATE requests
+      SET status = 'uncertain', error_kind = 'send_uncertain', error_detail = ?, updated_at = ?
+      WHERE id = ? AND status = 'sending'
+    `).run(detail, Date.now(), requestId);
+    return "uncertain";
+  });
+}
+
+export function applyReconcileResult(
+  db: GwpDatabase,
+  requestId: string,
+  result: ReconcileResult,
+): "found" | "retry_send" | "exhausted" | "unproven" {
+  const attempt = db.latestAttempt(requestId);
+  if (!attempt) {
+    throw new Error("reconcile requires an uncertain attempt");
+  }
+  if (result.found && result.conversationUrl) {
+    return db.immediate(() => {
+      const transition = db.transitionAttempt(requestId, attempt.attempt_no, ["uncertain"], "reconciled", {
+        userTurnId: result.userTurnId ?? null,
+        assistantTurnId: result.assistantTurnId ?? null,
+      });
+      if (!transition.changed) {
+        if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {
+          return "found";
+        }
+        throw new Error("reconcile requires an uncertain attempt");
+      }
+      db.connection.prepare(`
+        UPDATE requests
+        SET status = 'generating', conversation_url = ?, error_kind = NULL,
+            error_detail = NULL, updated_at = ?
+        WHERE id = ? AND status = 'uncertain'
+      `).run(result.conversationUrl, Date.now(), requestId);
+      return "found";
+    });
+  }
+  if (!result.proven) {
+    if (attempt.state === "confirmed" || attempt.state === "reconciled") return "found";
+    if (attempt.state !== "uncertain") throw new Error("reconcile requires an uncertain attempt");
+    return "unproven";
+  }
+  return db.immediate(() => {
+    const transition = db.transitionAttempt(
+      requestId,
+      attempt.attempt_no,
+      ["uncertain"],
+      "no_send_proven",
+    );
+    if (!transition.changed
+      && (transition.row.state === "confirmed" || transition.row.state === "reconciled")) {
+      return "found";
+    }
+    if (!transition.changed && transition.row.state !== "no_send_proven") {
+      throw new Error("reconcile requires an uncertain attempt");
+    }
+    if (attempt.attempt_no < 2) {
+      db.connection.prepare(`
+        UPDATE requests
+        SET status = 'staged', error_kind = NULL, error_detail = NULL, updated_at = ?
+        WHERE id = ? AND status = 'uncertain'
+      `).run(Date.now(), requestId);
+      return "retry_send";
+    }
+    db.connection.prepare(`
+      UPDATE requests
+      SET status = 'needs_user_action', error_kind = 'send_uncertain',
+          error_detail = 'two attempts ended without a confirmed send', updated_at = ?
+      WHERE id = ? AND status = 'uncertain'
+    `).run(Date.now(), requestId);
+    return "exhausted";
+  });
+}
+
+function defaultStateDir(): string {
+  if (process.env.GPT_WEBAI_PRO_STATE_DIR) return path.resolve(process.env.GPT_WEBAI_PRO_STATE_DIR);
+  const base = process.env.XDG_STATE_HOME
+    ? path.resolve(process.env.XDG_STATE_HOME)
+    : path.join(process.env.HOME ?? ".", ".local", "state");
+  return path.join(base, "gpt-webai-pro");
+}
+
+function defaultConfigPath(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../config/slots.json");
+}
+
+function isValidConversationPointer(value: string): boolean {
+  try {
+    const baseOrigin = new URL(process.env.GWP_BASE_URL ?? "https://chatgpt.com").origin;
+    const url = new URL(value);
+    return url.origin === baseOrigin && /^\/c\/[^/?#]+\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isTemporaryConversationPointer(value: string): boolean {
+  try {
+    return /^\/c\/WEB:/u.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function validateConfig(config: SlotsConfig): SlotsConfig {
+  if (!config || typeof config.image !== "string" || !Array.isArray(config.slots)) {
+    throw new InputError("invalid slots config");
+  }
+  const ids = new Set<string>();
+  const ports = new Set<number>();
+  for (const slot of config.slots) {
+    if (!/^slot-[0-9]{2}$/.test(slot.id) || !slot.account || ids.has(slot.id)) {
+      throw new InputError(`invalid slot config entry: ${JSON.stringify(slot)}`);
+    }
+    ids.add(slot.id);
+    if (!Number.isInteger(slot.port) || slot.port < 1 || slot.port > 65_535 || ports.has(slot.port)) {
+      throw new InputError(`invalid or duplicate port for slot ${slot.id}`);
+    }
+    ports.add(slot.port);
+  }
+  return config;
+}
+
+async function validateFiles(files: string[]): Promise<ValidatedFile[]> {
+  const result: ValidatedFile[] = [];
+  const sourceCounts = new Map<string, number>();
+  const stagedNames = new Set<string>();
+  for (const value of files) {
+    const source = path.resolve(value);
+    const info = await stat(source).catch(() => null);
+    if (!info?.isFile()) throw new InputError(`attachment is not a regular file: ${value}`);
+    const basename = path.basename(source);
+    let ordinal = (sourceCounts.get(basename) ?? 0) + 1;
+    sourceCounts.set(basename, ordinal);
+    let name = ordinal === 1 ? basename : suffixBeforeFirstDot(basename, ordinal);
+    while (stagedNames.has(name)) {
+      ordinal += 1;
+      name = suffixBeforeFirstDot(basename, ordinal);
+    }
+    stagedNames.add(name);
+    result.push({ source, name });
+  }
+  return result;
+}
+
+function suffixBeforeFirstDot(filename: string, ordinal: number): string {
+  const dot = filename.indexOf(".");
+  return dot > 0
+    ? `${filename.slice(0, dot)}-${ordinal}${filename.slice(dot)}`
+    : `${filename}-${ordinal}`;
+}
+
+export { defaultConfigPath, defaultStateDir, validateConfig };

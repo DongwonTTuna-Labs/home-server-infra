@@ -1,0 +1,177 @@
+import type { Page } from "playwright-core";
+
+import { GwpError } from "../../shared/errors.js";
+import { sha256Text } from "../../shared/fsx.js";
+import type { PollParams, PollResult } from "../../shared/types.js";
+import type { BrowserSession } from "../browser.js";
+import {
+  answerActionVisible,
+  artifactControls,
+  generationActive,
+  readTurns,
+  type TurnObservation,
+} from "../selectors.js";
+
+const STABLE_GAP_MS = 3_000;
+
+export async function pollConversation(
+  session: BrowserSession,
+  params: PollParams,
+): Promise<PollResult> {
+  if (!Number.isInteger(params.waitMs) || params.waitMs < 0 || params.waitMs > 60_000) {
+    throw new Error("poll waitMs must be an integer from 0 through 60000");
+  }
+  if (!/^[0-9a-f]{64}$/.test(params.promptSha256)) {
+    throw new Error("poll promptSha256 must be 64 lower-hex characters");
+  }
+
+  const page = await bindPollPage(session, params);
+  const deadline = Date.now() + params.waitMs;
+  let stableText = "";
+  let stableSince = 0;
+  let observedAssistantTurnId: string | undefined;
+
+  do {
+    const turns = await readTurns(page);
+    const user = matchingUser(turns, params);
+    const assistant = matchingAssistant(turns, user, params.assistantTurnId);
+    observedAssistantTurnId = assistant?.dataMessageId;
+    const active = await generationActive(page);
+    const actionsReady = assistant?.text
+      ? await answerActionVisible(page, assistant.dataMessageId)
+      : false;
+
+    if (!active && assistant?.text && actionsReady) {
+      if (assistant.text === stableText) {
+        if (stableSince > 0 && Date.now() - stableSince >= STABLE_GAP_MS) {
+          return {
+            state: "complete",
+            currentUrl: page.url(),
+            assistantTurnId: assistant.dataMessageId,
+            answerMarkdown: assistant.text,
+            answerSha256: sha256Text(assistant.text),
+            artifactControls: await artifactControls(page, assistant.dataMessageId),
+          };
+        }
+      } else {
+        stableText = assistant.text;
+        stableSince = Date.now();
+      }
+    } else {
+      stableText = "";
+      stableSince = 0;
+    }
+
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(Math.min(250, Math.max(1, deadline - Date.now())));
+  } while (Date.now() <= deadline);
+
+  return {
+    state: "generating",
+    currentUrl: page.url(),
+    ...(observedAssistantTurnId ? { assistantTurnId: observedAssistantTurnId } : {}),
+  };
+}
+
+async function bindPollPage(session: BrowserSession, params: PollParams): Promise<Page> {
+  const current = await session.currentPage();
+  const relevant = await session.relevantPages();
+  const pages = [current, ...relevant.filter((page) => page !== current)];
+
+  const byTurnId = await findPage(pages, (turns) => hasConfirmedTurn(turns, params));
+  if (byTurnId) return session.bindPage(byTurnId);
+
+  const storedPage = pages.find((page) => page.url() === params.conversationUrl);
+  if (storedPage) return session.bindPage(storedPage);
+
+  let opened: Page;
+  try {
+    opened = await session.open(params.conversationUrl);
+  } catch (error) {
+    const fallback = await findFallbackPage(session, params);
+    if (fallback) return fallback;
+    throw error;
+  }
+  if (session.isConversationUrl(opened.url())) return opened;
+
+  const fallback = await findFallbackPage(session, params);
+  if (fallback) return fallback;
+
+  throw new GwpError(
+    "turn_not_found",
+    "stored conversation URL redirected outside /c/ and no open tab matched the request",
+  );
+}
+
+async function findFallbackPage(
+  session: BrowserSession,
+  params: PollParams,
+): Promise<Page | null> {
+  const fallbackPages = await session.relevantPages();
+  const fallbackByTurnId = await findPage(
+    fallbackPages,
+    (turns) => hasConfirmedTurn(turns, params),
+  );
+  if (fallbackByTurnId) return session.bindPage(fallbackByTurnId);
+  const fallbackByPrompt = await findPage(
+    fallbackPages,
+    (turns) => Boolean(matchingPromptUser(turns, params)),
+  );
+  return fallbackByPrompt ? session.bindPage(fallbackByPrompt) : null;
+}
+
+async function findPage(
+  pages: readonly Page[],
+  matches: (turns: TurnObservation[]) => boolean,
+): Promise<Page | null> {
+  for (const page of pages) {
+    const turns = await readTurns(page).catch(() => []);
+    if (matches(turns)) return page;
+  }
+  return null;
+}
+
+function hasConfirmedTurn(turns: TurnObservation[], params: PollParams): boolean {
+  return Boolean(params.userTurnId && turns.some((turn) => (
+    turn.role === "user" && turn.dataMessageId === params.userTurnId
+  )));
+}
+
+function matchingPromptUser(
+  turns: TurnObservation[],
+  params: PollParams,
+): TurnObservation | undefined {
+  return [...turns].reverse().find((turn) => (
+    turn.role === "user" && sha256Text(turn.text) === params.promptSha256
+  ));
+}
+
+function matchingUser(
+  turns: TurnObservation[],
+  params: PollParams,
+): TurnObservation | undefined {
+  if (params.userTurnId) {
+    return turns.find((turn) => (
+      turn.role === "user" && turn.dataMessageId === params.userTurnId
+    ));
+  }
+  return matchingPromptUser(turns, params);
+}
+
+function matchingAssistant(
+  turns: TurnObservation[],
+  user: TurnObservation | undefined,
+  assistantTurnId: string | undefined,
+): TurnObservation | undefined {
+  if (!user) return undefined;
+  if (assistantTurnId) {
+    const exact = turns.find((turn) => (
+      turn.role === "assistant" && turn.dataMessageId === assistantTurnId
+      && turn.domIndex > user.domIndex
+    ));
+    if (exact) return exact;
+  }
+  return turns.find((turn) => turn.role === "assistant" && turn.domIndex > user.domIndex);
+}
+
+export { STABLE_GAP_MS };

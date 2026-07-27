@@ -1,0 +1,530 @@
+# gpt-webai-pro — 설계 (v2, from scratch)
+
+ChatGPT **Pro Extended** 웹 위임 자동화의 2세대 구현.
+1세대(`stacks/gpt-webai-slot-pool`, PR #72)의 동작하는 개념(중복 전송 방지, send-reconcile,
+시맨틱 셀렉터, 슬롯 풀)을 유지하되, 그 복잡도의 근원 두 가지 —
+**(a) stateless per-exec 프로바이더가 만든 상태 증명(해시 바인딩) 문제**,
+**(b) 구현자 불신이 만든 봉인 거버넌스** — 를 제거한다.
+
+이 문서가 이 스택의 유일한 설계 문서다. 변경은 git 커밋/PR 리뷰로 관리한다.
+MANIFEST 해시 봉인, 정본 바이트 동결, 결정 addendum 체인은 **의도적으로 없다**.
+
+## 0. 목표 / 비범위
+
+**목표**
+- `gptpro "프롬프트"` (+ `--file` 첨부) → 실제 ChatGPT Pro Extended 세션에 전송 →
+  답변 markdown + ChatGPT가 렌더한 다운로드 파일(artifacts)을 host에 저장 → JSON envelope로 반환.
+- 절대 중복 전송하지 않는다 (전송 불확실 시 fail-closed + resume으로 해소).
+- Pro Extended는 수 시간 걸릴 수 있다: timeout은 실패가 아니라 `running` + `resumeCommand`.
+- 동시 요청 다수(여러 Claude 세션이 동시에 gptpro 호출)를 슬롯 풀로 처리.
+- UI 리디자인에 강한 시맨틱 셀렉터. 셀렉터는 한 파일에 모아 한 곳만 고치면 되게 한다.
+
+**비범위 (구현 금지)**
+- xhigh/Thinking 경로 전체. **Pro Extended 단일 튜플만 존재한다.** (`gptxhigh`는 폐기)
+- 이벤트 소싱, append-only 저널, projection, snapshot, HEAD CAS.
+- content-addressed ID, 해시 파생 바인딩, canonical-JSON 바이트 비교, fencing token, dead-owner proof.
+- Rust. 다른 언어 미러 계약. R12/R13 호환 레이어.
+- 스크롤바 픽셀 증명, PNG 코덱, 3중 증인 방식의 검증.
+- 멀티 호스트, MCP 서버, "미래의 다른 프로바이더"를 위한 추상화.
+
+## 1. 아키텍처 개요
+
+```
+gptpro (thin bash) ──▶ gpt-webai-pro CLI (TypeScript, 단명 프로세스)
+                          │  SQLite (state root, 유일한 진실)
+                          │  docker run/stop (슬롯 컨테이너 on-demand)
+                          ▼  WS JSON-RPC over TCP 127.0.0.1:<슬롯포트> (+bearer 토큰)
+                    slot container (gwp-slot-NN)
+                      ├─ Xvfb :99
+                      ├─ Chromium (CDP 127.0.0.1:9222, 영속 프로필)
+                      └─ slot-daemon (장수 Node 프로세스)
+                           └─ Playwright Page 객체를 메모리에 유지
+```
+
+핵심 원칙:
+
+1. **daemon이 상태를 들고 있다.** 한 요청의 모델 확인→첨부→전송→턴 확인은 daemon 프로세스
+   안에서 같은 `Page` 객체로 일어난다. 프로세스 간 "같은 페이지인가"를 해시로 증명할 필요가
+   원천적으로 없다. v1의 rootBindingHash/PageBindingEcho에 해당하는 것은 **아무것도 없다**.
+2. **supervisor(CLI)가 유일한 기록자다.** daemon은 브라우저 사실을 관찰·수행해 RPC 응답으로
+   돌려줄 뿐, 디스크에 진실을 쓰지 않는다 (evidence 스크린샷 제외). SQLite는 CLI만 쓴다.
+3. **작게.** 의존성 4개(playwright-core, better-sqlite3, ws, typescript+tsx dev). 목표 규모
+   전체 8k 라인 이하 (테스트 포함).
+
+## 2. 디렉토리 레이아웃
+
+```
+stacks/gpt-webai-pro/
+  DESIGN.md                  # 이 문서
+  README.md                  # 운영 런북 (설치, 로그인 시딩, 트러블슈팅)
+  package.json  tsconfig.json  .gitignore
+  bin/gpt-webai-pro          # bash shim: exec node <root>/dist/cli/main.js "$@"
+  config/
+    slots.json               # 슬롯 정의 (아래 §8)
+    labels.json              # 모델 피커 라벨 세트 (아래 §6.3)
+  src/
+    cli/main.ts              # argv 파싱 + 커맨드 디스패치
+    cli/envelope.ts          # 공개 JSON envelope (아래 §9)
+    supervisor/db.ts         # SQLite 스키마 + 쿼리 (아래 §4)
+    supervisor/run.ts        # run/resume 오케스트레이션 + 전송 멱등성 (아래 §5)
+    supervisor/slots.ts      # 슬롯 할당, 쿨다운, 계정 로테이션
+    supervisor/docker.ts     # docker CLI 호출 (create/start/stop/inspect)
+    supervisor/rpc-client.ts # loopback TCP WS JSON-RPC + bearer 클라이언트
+    daemon/main.ts           # WS 서버 + RPC 디스패치 (컨테이너 안에서 실행)
+    daemon/browser.ts        # CDP 접속, Page/탭 관리
+    daemon/selectors.ts      # 모든 DOM 셀렉터 + 라벨 매칭 (단일 파일, §6)
+    daemon/actions/model.ts  #   Pro Extended 보장
+    daemon/actions/send.ts   #   첨부 + 전송 + 턴 시작 확인
+    daemon/actions/poll.ts   #   생성 완료 감시 + 답변 추출
+    daemon/actions/download.ts # artifact 컨트롤 발견 + 다운로드
+    daemon/actions/reconcile.ts # 전송 불확실 복구 (§5.3)
+    shared/types.ts  shared/errors.ts  shared/fsx.ts  shared/ids.ts
+  container/
+    Dockerfile               # node:24-bookworm-slim + chromium + xvfb + dist
+    entrypoint.sh            # xvfb → chromium(CDP) → daemon
+  test/
+    unit/*.test.ts           # db, 멱등성 상태기계, envelope, slots
+    fake-chatgpt/            # ChatGPT 모사 하네스 (§11.2)
+    daemon.e2e.test.ts       # daemon ↔ 실제 chromium ↔ fake-chatgpt
+    supervisor.e2e.test.ts   # supervisor ↔ mock daemon (전송 멱등성 시나리오)
+  scripts/
+    container-smoke.sh       # 이미지 빌드 + 컨테이너 1개로 fake 하네스 왕복
+```
+
+state root: `${GPT_WEBAI_PRO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/gpt-webai-pro}`
+
+```
+<state>/db.sqlite
+<state>/requests/<reqId>/prompt.md
+<state>/requests/<reqId>/attachments/<files>            # run 시작 시 원본 복사 (진실; inbox는 사본)
+<state>/requests/<reqId>/answer.md
+<state>/requests/<reqId>/artifacts/<filename>
+<state>/requests/<reqId>/failure/*.png|*.html      # 실패 시에만
+<state>/requests/<reqId>/log.jsonl                 # 상태 전이 append 로그 (사람용, 진실 아님)
+<state>/slots/<slotId>/profile/                    # Chrome 프로필 (영속)
+<state>/slots/<slotId>/daemon.token               # RPC bearer 토큰 (0600, supervisor 생성)
+<state>/slots/<slotId>/inbox/<reqId>/<files>       # 첨부 스테이징 (ro mount)
+<state>/slots/<slotId>/outbox/                     # daemon 다운로드 착지 (rw mount)
+```
+
+## 3. 컴포넌트 책임
+
+| 컴포넌트 | 책임 | 하지 않는 것 |
+| --- | --- | --- |
+| `gptpro` wrapper | argv/stdin 정규화 후 CLI exec | 로직 없음 |
+| CLI (supervisor) | 요청 수명주기, SQLite 기록, 슬롯 할당, 컨테이너 기동/정지, RPC 호출, envelope 출력 | DOM 접촉 |
+| slot-daemon | 브라우저 조작 전부, 관찰 결과 반환, 실패 시 evidence 캡처 | SQLite 접근, 수명주기 판단 |
+| 컨테이너 | 격리된 Chrome 런타임 | 그 외 전부 |
+
+## 4. 데이터 모델 (SQLite)
+
+better-sqlite3, `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;`
+동시 CLI 호출 간 DB 배타는 SQLite 트랜잭션(`BEGIN IMMEDIATE`)으로 해결한다.
+락 파일은 §5.2의 요청별 `send.lock`(flock 생존 증명) 하나뿐이며, 그 외 락 파일은 없다.
+
+```sql
+CREATE TABLE requests (
+  id            TEXT PRIMARY KEY,          -- 'req_' + 16 lower-hex (crypto random)
+  prompt_sha256 TEXT NOT NULL,
+  status        TEXT NOT NULL CHECK (status IN
+                ('staged','sending','generating','complete',
+                 'uncertain','needs_user_action','failed')),
+  slot_id       TEXT,
+  conversation_url TEXT,                   -- https://chatgpt.com/c/... (non-root만 저장)
+  answer_sha256 TEXT,
+  error_kind    TEXT, error_detail TEXT,
+  created_at    INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE send_attempts (
+  request_id  TEXT NOT NULL REFERENCES requests(id),
+  attempt_no  INTEGER NOT NULL,            -- 1 또는 2. 3 이상 금지.
+  state       TEXT NOT NULL CHECK (state IN
+              ('armed','confirmed','reconciled','no_send_proven','uncertain')),
+  user_turn_id TEXT, assistant_turn_id TEXT,   -- ChatGPT의 data-message-id 원문
+  created_at  INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  PRIMARY KEY (request_id, attempt_no)
+);
+CREATE TABLE artifacts (
+  request_id TEXT NOT NULL REFERENCES requests(id),
+  filename   TEXT NOT NULL, path TEXT NOT NULL,
+  sha256     TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (request_id, filename)
+);
+CREATE TABLE slots (
+  id             TEXT PRIMARY KEY,          -- config/slots.json과 조인
+  account        TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'idle' CHECK (state IN
+                 ('idle','busy','needs_login','provider_limit')),
+  cooldown_until INTEGER, last_used_at INTEGER
+);
+```
+
+`log.jsonl`은 디버깅 편의용 append 로그이고 진실이 아니다. 복구는 항상 SQLite 기준.
+
+## 5. 요청 수명주기와 전송 멱등성 (시스템의 심장)
+
+### 5.1 run 흐름
+
+```
+staged ─▶ sending ─▶ generating ─▶ complete
+   │          │            │
+   │          ├─▶ uncertain (전송 여부 미증명, fail-closed)
+   │          │
+   └──────────┴─▶ needs_user_action | failed
+```
+
+1. `run`: 프롬프트/첨부 검증 → `requests` 행 삽입(staged) → prompt.md +
+   `requests/<id>/attachments/`에 첨부 복사 (슬롯 할당 전 요청 레벨 영속화 — pool-busy 후
+   resume에도 안전. 별도 DDL 불필요, 이 디렉토리가 곧 manifest).
+   동일 basename 충돌은 첫 `.` 앞에 `-2`,`-3` 부가로 해소(복합 확장자 보존:
+   `a.tar.gz`→`a-2.tar.gz`). 이후 RPC `files[].name`은 이 최종 이름.
+   슬롯 할당 시점에 `slots/<slotId>/inbox/<reqId>/`로 복사한다.
+2. 슬롯 할당(§8): `BEGIN IMMEDIATE`로 idle 슬롯 선점 → busy. 없으면 envelope `recovering`
+   + `nextCommand: resume`(대기 재시도는 호출자 몫; 큐잉 데몬은 만들지 않는다).
+3. 컨테이너 보장: 안 돌면 이전 stopped 컨테이너를 교체하고 fresh token으로 create/start,
+   authenticated health 준비 대기(최대 60s).
+4. `daemon.readiness()` → `needs_login`/`provider_limit`이면 슬롯 상태 기록 후 다음 슬롯 시도.
+   전 계정 소진이면 envelope `recovering`(provider_limit) 또는 `needs_user_action`(login).
+5. **전송 (멱등성 프로토콜 §5.2)** → 성공 시 conversation_url + 턴 id 기록, status=generating.
+6. poll 루프(§7): 완료 시 answer.md 저장 → artifacts 다운로드 → status=complete → envelope.
+   timeout 도달 시 status=generating 유지, envelope `running` + resumeCommand.
+7. 종료 처리: 해당 슬롯에 다른 active 요청이 없으면 `docker stop`. 슬롯 idle 복귀.
+
+### 5.2 전송 멱등성 프로토콜
+
+**불변식: ChatGPT에 같은 요청이 두 번 전송되는 일은 없다.** 이를 위해 intent를 클릭 전에
+기록하고, 결과가 불확실하면 절대 재클릭하지 않는다.
+
+```
+supervisor                                daemon
+─────────                                 ──────
+INSERT send_attempts (attempt_no=1, armed)
+        ── rpc send({prompt, files}) ──▶  모델 보장 → 첨부 → 칩 검증
+                                          → [클릭] → 새 user+assistant 턴 확인
+        ◀── ok {conversationUrl, turnIds} 
+UPDATE armed→confirmed, status=generating
+```
+
+**전송 임계구역 (동시성 규칙)**: sender는 attempt 삽입 직전에
+`requests/<id>/send.lock` 파일에 **flock(EX, non-block)**을 잡고, [armed 삽입 → send RPC →
+최종 DB 갱신] 전 구간 동안 유지한다. 이 flock이 곧 생존 증명이다 — 프로세스가 죽으면
+커널이 자동 해제하므로 PID 추적/하트비트/TTL이 필요 없다. 같은 요청을 만지려는 다른
+프로세스(동시 resume 등)는 같은 flock을 non-block으로 시도해서:
+- **실패(다른 프로세스 생존)** → DB/daemon을 일절 변경하지 않고 envelope
+  `status:"running"`, message "전송 진행 중(소유 프로세스 생존)" 반환.
+- **성공(소유자 사망 확정)** → flock을 쥔 채 복구 진행: guarded update로 armed→uncertain
+  후 §5.3 reconcile.
+
+DB의 모든 attempt 상태 전이는 **guarded UPDATE**(`... WHERE state IN (<허용 출발 상태>)`)로
+수행한다. 0행 갱신이면 재조회해서 이미 도달한 종결 상태(confirmed/reconciled)를 그대로
+수용한다 — confirmed/reconciled를 덮어쓰는 전이는 존재하지 않는다. attempt 2 arm은
+"직전 attempt가 no_send_proven일 때만" 조건을 같은 트랜잭션 안에서 검사해 원자 삽입한다.
+
+실패 분기 — daemon의 모든 send 에러는 `phase: 'pre_click' | 'post_click'`을 반드시 포함:
+
+- **pre_click 에러** (모델 못 찾음, 칩 불일치, 컴포저 접근 실패): 클릭 전이므로 안전.
+  attempt → `no_send_proven`. 원인별로 needs_user_action/failed 또는 슬롯 교체 재시도(§8).
+- **post_click 에러 / RPC 타임아웃 / 소켓 단절 / daemon 사망**: attempt → `uncertain`,
+  request → `uncertain`. **여기서 절대 즉시 재전송하지 않는다.** 복구는 §5.3.
+
+### 5.3 uncertain 복구 (reconcile)
+
+`resume --session <id>`가 uncertain 요청(또는 §5.2 flock 획득으로 사망이 확정된
+sending/armed 요청)을 만나면 — 반드시 해당 요청의 `send.lock` flock을 쥔 상태로:
+
+1. 슬롯 컨테이너/daemon 재기동(필요 시).
+2. `daemon.reconcile({promptSha256, conversationUrl?})`:
+   - conversation_url을 알면 그 대화로 이동해 마지막 user 턴 텍스트의 sha256을 비교.
+   - 모르면(신규 대화 전송 중 사망) **열려 있는 chatgpt.com 탭들만** 스캔해 매칭 턴을 찾는다.
+     사이드바/히스토리 클릭 탐색은 하지 않는다 (프라이버시 + v1 금지 계승).
+3. 결과:
+   - 턴 발견 → attempt `uncertain→reconciled`, status=generating, poll 계속. **재클릭 0회.**
+   - 턴 없음이 증명됨(대화 접근 성공 + 매칭 턴 부재) → attempt `no_send_proven`.
+     attempt_no<2이면 새 attempt로 재전송 허용, 아니면 needs_user_action.
+   - 증명 불가(Chrome도 죽어 탭 소실 등) → uncertain 유지, envelope needs_user_action에
+     상황 설명. 사람이 ChatGPT에서 직접 확인하는 것이 최후 수단.
+
+### 5.4 resume 일반 규칙
+
+`resume`은 상태 기반 멱등 재진입이다: staged→전송부터, uncertain→reconcile,
+generating→poll 재개, complete→저장된 envelope 재출력. 어떤 상태에서 몇 번 불러도 안전.
+
+## 6. 브라우저 조작 계약 (daemon)
+
+### 6.1 셀렉터 원칙
+
+- 전 셀렉터는 `daemon/selectors.ts` 한 파일에 상수/함수로 모은다. UI 변경 대응 = 이 파일 수정.
+- 우선순위: `data-testid` > `role`/`aria-*` > 구조적 패턴(예: 파일명 토큰) > 텍스트 라벨.
+  **CSS 클래스명·좌표·boundingBox를 식별에 쓰지 않는다.**
+- v1에서 검증된 셀렉터 지식을 이식한다 (구현 시 원본 참조):
+  - 컴포저: `#prompt-textarea`, `[contenteditable][role="textbox"]`
+    (v1 `provider/chatgpt-playwright/lib/browser-composer.mjs`)
+  - 턴/답변: `[data-message-author-role]` + `data-message-id`. **답변 텍스트와 턴 id는 반드시
+    같은 DOM 노드에서 파생** (v1 hydration 버그의 교훈, `lib/session-rebind.mjs`)
+  - 생성 중 판정: accessible name `/stop generating|stop responding|중지|정지/i` 버튼 존재
+  - 첨부 칩: composer form 스코프에서 파일명 토큰 정규식
+    `/[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu` + remove 버튼 accessible name 앵커,
+    action 라벨(remove|delete|attach|…) 요소는 시드에서 제외 (v1 `lib/commands/upload-only.mjs`
+    최종본 — 이 로직은 라이브 검증 완료본이므로 그대로 이식)
+  - 모델 피커: `[data-testid="model-switcher-dropdown-button"]` 계열 + 라벨 매칭
+
+### 6.2 RPC 프로토콜
+
+JSON-RPC 2.0 over WebSocket over **TCP 127.0.0.1:<슬롯포트>** (슬롯별 고정 포트,
+`slots.json`의 `port`; 컨테이너는 `-p 127.0.0.1:<port>:<port>`로 loopback에만 publish).
+
+> **unix socket을 쓰지 않는 이유 (이 호스트의 실측 제약, 2026-07-27)**: 이 호스트의
+> Claude Code 세션(= gptpro의 주 호출자)은 AppArmor `unprivileged_userns` 프로파일로
+> confine되며, 커널 7.0의 unix socket peer 중재가 컨테이너 리스너로의 connect를
+> EACCES로 거부한다 (권한/uid 완벽 일치·apparmor=unconfined 컨테이너에서도 재현).
+> TCP loopback은 동일 조건에서 정상 동작 확인(codex-lb와 같은 패턴).
+
+loopback publish는 로컬 모든 프로세스에 노출되므로 **bearer 토큰**으로 보강한다:
+supervisor가 슬롯당 32-hex 토큰을 `slots/<slotId>/daemon.token`(0600)에 생성·보관,
+컨테이너에 env `GWP_DAEMON_TOKEN`으로 전달, daemon은 WS 핸드셰이크의
+`Authorization: Bearer <token>` 불일치/부재 시 401로 거부한다. 컨테이너 기동마다
+토큰을 재생성한다(고정 토큰 금지). daemon ready 신호는 소켓 파일이 아니라
+"TCP 연결 + `health` RPC ok"다.
+
+| method | params | result | 비고 |
+| --- | --- | --- | --- |
+| `health` | – | `{ok, chromeConnected, currentUrl}` | |
+| `readiness` | – | `{state:'ready'\|'needs_login'\|'provider_limit'\|'unknown', modelLabel}` | 로그인 UI/rate-limit UI 감지 |
+| `send` | `{prompt, files:[{name,containerPath}], newConversation:true}` | `{conversationUrl, userTurnId, assistantTurnId}` | §5.2. 내부에서 model 보장+첨부+클릭+턴확인 |
+| `reconcile` | `{promptSha256, conversationUrl?}` | `{found, conversationUrl?, userTurnId?, assistantTurnId?, proven:boolean}` | §5.3. 절대 클릭하지 않는 읽기 전용 |
+| `poll` | `{conversationUrl, promptSha256, userTurnId?, assistantTurnId?, waitMs≤60000}` | `{state:'generating'\|'complete', currentUrl, assistantTurnId?, answerMarkdown?, answerSha256?, artifactControls?:[{index,label}]}` | identity/URL §6.5, 완료 판정 §7 |
+| `download` | `{conversationUrl, controlIndex}` | `{filename, outboxPath, sha256, sizeBytes}` | 컨트롤당 1회, outbox에 저장 |
+| `open` | `{conversationUrl}` | `{ok}` | resume용 네비게이션 |
+| `captureFailure` | `{tag}` | `{screenshotPath, htmlPath}` | outbox에 저장, supervisor가 회수 |
+
+**daemon은 모든 RPC를 단일 큐로 직렬 처리한다** (동시 실행 없음). 따라서 reconcile은
+항상 진행 중이던 send가 끝난 뒤에 실행되고, "reconcile이 클릭 직전 상태를 관찰"하는
+인터리빙은 데몬 차원에서 불가능하다. `poll`의 waitMs 대기도 큐를 점유한다 — supervisor는
+같은 슬롯에 요청 하나만 태우므로 문제 없다.
+
+에러: JSON-RPC error, `data: {kind, phase?, detail}`.
+kind 폐쇄 목록: `needs_login, provider_limit, model_unavailable, nav_failed, compose_failed,
+chip_mismatch, click_uncertain, turn_not_found, artifact_failed, internal`.
+
+### 6.3 Pro 보장 (`actions/model.ts`) — 2026-07-27 실측 DOM 기준
+
+현 ChatGPT UI는 model/effort 2단계가 아니라 **단일 "Intelligence" 라디오**다
+(라이브 실측: Instant 5.5 / Medium / High / Extra High / Pro + 기타 menuitem).
+"Pro Extended"는 곧 이 라디오의 `Pro`다. effort 개념은 코드에서 제거한다.
+
+- **피커 트리거**: composer form 안의 pill 버튼 — `form button[aria-haspopup]` 중
+  accessible text가 `labels.json`의 intelligence 라벨 세트(Instant/Medium/High/
+  Extra High/Pro …)에 정규화 일치하는 것. 유일하면 그것. (실측: `__composer-pill`
+  클래스, 텍스트 "Pro" — 클래스는 식별에 쓰지 않는다.)
+- **현재 라벨** = 이 pill의 innerText (readiness의 `modelLabel`도 동일 소스).
+- 절차: pill 라벨이 `Pro`면 즉시 done(already_exact; 메뉴 안 연다). 아니면 pill 클릭 →
+  `[role="menu"] [role="menuitemradio"]`에서 텍스트 `Pro` 클릭 → 500ms 안정화 →
+  `aria-checked="true"` + pill 라벨 재확인.
+- `Pro` menuitemradio가 없으면 `model_unavailable`(pre_click).
+  **다른 intelligence로의 fallback은 어떤 경우에도 금지.**
+- `labels.json`: `{"target": ["Pro"], "intelligence": ["Instant","Medium","High","Extra High","Pro"]}`.
+  라벨 정규화: trim + 공백 축약 + casefold + 부가 배지 텍스트(예: "5.5") 제거
+  (첫 줄만 사용).
+
+### 6.4 전송 확인
+
+클릭 후 30s 내에 다음 셋 모두 관찰되어야 confirmed:
+(a) 전송 프롬프트와 일치하는 **새** user 턴(data-message-id가 클릭 전 스냅샷에 없음),
+(b) 그 뒤의 새 assistant 턴 (생성 중이어도 됨), (c) non-root `/c/...` URL.
+미달 시 `click_uncertain` (post_click) — supervisor가 §5.3으로.
+
+### 6.5 대화 URL·assistant turn id 가변성 (2026-07-27 실측)
+
+ChatGPT는 새 대화 생성 초기에 임시 URL(`/c/WEB:<uuid>`)을 쓰다가 이후 실제 대화 id로
+바꾼다. **assistant turn의 data-message-id도 마찬가지로 가변이다**: 전송 확정 시점에는
+placeholder id(`request-placeholder-request-WEB:...-0`)였다가 완료 후 실제 UUID로
+교체된다(실측). **즉시 안정적인 유일한 anchor는 user turn id다.** 규칙:
+
+- 전송 확정: user turn id가 durable identity. assistant id는 provisional로 기록만 한다.
+- poll의 assistant 매칭: 기록된 assistantTurnId가 DOM에 있으면 사용하되, **없으면 실패가
+  아니라 user turn 뒤(domIndex)의 첫 assistant turn으로 폴백**한다. poll 결과에 현재
+  관찰된 assistant id를 포함하고, supervisor는 placeholder→실 id로 DB를 갱신한다
+  (URL 승격과 동일 패턴).
+- poll은 현재 페이지에 이 요청의 확정 turn id가 보이면 **URL 문자열이 달라도 절대
+  재이동하지 않는다.** 모든 poll 결과에 `currentUrl`을 포함하고, supervisor는 그것이
+  기록값과 다른 유효 `/c/` URL이면 DB `conversation_url`을 갱신한다. 단, 한번 non-`WEB:`
+  URL로 승격된 포인터는 뒤늦은 `WEB:` 관찰로 되돌리지 않는다.
+- `open()`은 진짜 rebind(daemon 재시작 등)에서만 쓴다. 이동 결과가 루트로 리다이렉트되면
+  실패로 끝내지 말고 열린 탭들에서 promptSha 기반 reconcile을 먼저 시도한다.
+
+## 7. 생성 완료 판정 (poll)
+
+complete 판정 조건 (모두 충족):
+1. stop 버튼 부재,
+2. 마지막 assistant 턴의 answerText sha256이 3초 간격 2회 연속 동일,
+3. 답변 액션 바(복사 버튼 등, `[data-testid*="copy"]` 계열) 노출.
+
+주의: 스트림 종료 직후 텍스트 공백 갭이 존재한다 (v1 poll 버그의 교훈,
+`lib/commands/poll.mjs`) — stop 버튼이 사라져도 answerText가 비어 있으면 complete가 아니다.
+답변 추출은 마지막 assistant 턴 노드의 innerText. artifact 컨트롤은 그 턴 내부의
+다운로드 가능 요소(`a[download]`, aria/텍스트 "Download" 계열)만 나열.
+
+다운로드: Playwright download 이벤트로 outbox에 저장 → supervisor가
+`requests/<id>/artifacts/`로 이동 + sha256/size 기록. `.tar.gz` 같은 복합 확장자 보존.
+CDP 이벤트와의 이중 상관은 하지 않는다.
+
+**artifact 실패 정책**: 컨트롤당 최대 2회 시도. 그래도 실패하면 — 성공한 artifact는 전부
+보존(행+파일), 요청은 **complete로 종결**하되 envelope `message`에 실패 컨트롤
+수/라벨을 명기한다(`errorKind`는 null 유지). 수 시간짜리 Pro 답변을 다운로드 플레이크에
+인질 잡지 않는다.
+
+## 8. 슬롯 / 컨테이너 런타임
+
+`config/slots.json`:
+
+```json
+{ "image": "home-server/gpt-webai-pro-slot:latest",
+  "slots": [
+    {"id":"slot-01","account":"a","port":19301}, {"id":"slot-02","account":"a","port":19302},
+    {"id":"slot-03","account":"a","port":19303}, {"id":"slot-04","account":"b","port":19304},
+    {"id":"slot-05","account":"b","port":19305}, {"id":"slot-06","account":"b","port":19306},
+    {"id":"slot-07","account":"b","port":19307}, {"id":"slot-08","account":"c","port":19308},
+    {"id":"slot-09","account":"c","port":19309}, {"id":"slot-10","account":"c","port":19310} ] }
+```
+
+- **할당**: idle & cooldown 지난 슬롯 중, `last_used_at`이 가장 오래된 **계정**의 가장 오래된
+  슬롯 (계정 간 공평 로테이션). v1의 cohort cursor 영속 상태는 두지 않는다 — LRU가 같은 효과.
+- **할당 가능 조건**: `state='idle'` 또는 (`state='provider_limit'` 그리고 `cooldown_until<=now`).
+  `needs_login`/`busy`는 할당 불가. `provider_limit` 슬롯은 run 흐름의 readiness 확인이
+  자연 재검증이 되고, 성공적으로 사용되면 idle로 복귀한다.
+- **needs_login 복귀**: 운영자가 로그인 시딩 후 `cleanup --apply` 실행 →
+  needs_login 슬롯들을 daemon `readiness()`로 재검사해 ready면 idle로 전환.
+- **테스트 심**: 슬롯 항목에 `"unmanaged": true`가 있으면 supervisor는 docker를 일절
+  호출하지 않고 해당 `port`(127.0.0.1)에 바로 접속한다. supervisor e2e는 이 모드로
+  mock daemon에 붙는다. 프로덕션 slots.json에는 사용하지 않는다.
+- **provider_limit**: 슬롯 `cooldown_until = now + 3분` 기록 후 다른 계정 슬롯으로.
+- **컨테이너**: 이름 `gwp-<slotId>`. supervisor가 `docker` CLI로 직접 관리 (compose 없음).
+  create 인자(코드 한 곳에 정의): `--memory 3g --cpus 2 --pids-limit 1024 --shm-size 1g
+  --security-opt no-new-privileges --cap-drop ALL --user <uid>:<gid> --restart no`
+  마운트: `profile→/profile(rw)`, `inbox→/inbox(ro)`, `outbox→/outbox(rw)`.
+  publish는 `-p 127.0.0.1:<port>:<port>` (daemon RPC) 하나뿐. CDP는 컨테이너 내부
+  127.0.0.1 전용으로 publish하지 않는다.
+- **entrypoint**: Xvfb :99 → Chromium(CDP 9222, `--user-data-dir=/profile`,
+  chatgpt.com 오픈) → CDP ready 대기 → daemon 기동(`0.0.0.0:<port>` listen —
+  컨테이너 밖에서는 host 127.0.0.1로만 publish되므로 안전).
+  ready 판정은 supervisor가 TCP 연결 + `health` RPC로 한다.
+- **정지**: run/resume 종료 시 해당 슬롯 active 요청 0이면 `docker stop`.
+- **cleanup**: (a) 고아 컨테이너(비종결 요청 없이 30분↑ 기동) 정지,
+  (b) 비종결(staged/sending/generating/uncertain) 요청이 하나도 없는데 busy인 슬롯을 idle로
+  복구 (CLI 프로세스가 도중 사망한 경우의 자가 치유). `--dry-run`이 기본, `--apply`로 실행.
+- **환경 오버라이드**: `GWP_BASE_URL`(기본 `https://chatgpt.com`, 테스트 하네스용),
+  `GPT_WEBAI_PRO_STATE_DIR`, `GPTPRO_TIMEOUT`(기본 10800s).
+
+## 9. 공개 CLI / envelope 계약
+
+기존 `gptpro` 호출 계약을 그대로 승계한다 (전역 CLAUDE.md의 envelope 불변식 호환).
+
+커맨드: `run | resume | status | cleanup | release | smoke`
+
+```
+gpt-webai-pro run [--prompt-file P | 프롬프트 인자 | stdin] [--file F]... [--timeout-seconds N]
+gpt-webai-pro resume --session req_... [--timeout-seconds N]
+gpt-webai-pro status [--json]   # 슬롯별 state/cooldown + 비종결 요청(id,status,slot,경과시간) 목록
+gpt-webai-pro cleanup [--dry-run|--apply]
+gpt-webai-pro release --session req_...   # 강제 종결(failed 처리) + 컨테이너 정지
+gpt-webai-pro smoke                       # 라이브 1회 왕복. GWP_LIVE=1 필수
+```
+
+§9의 요청 envelope는 **run / resume / release**에 적용된다. `status`/`cleanup`/`smoke`는
+자체 JSON을 출력한다 (status:
+`{"ok":true,"slots":[{"id","account","state","cooldownUntil","lastUsedAt"}],`
+`"requests":[{"id","status","slotId","ageSeconds","conversationUrl"}]}` — 비종결 요청만;
+cleanup: `{"ok":true,"dryRun":bool,"actions":[{"kind","target","detail"}]}`).
+
+run/resume/release의 stdout은 항상 **정확히 하나의 JSON 객체 + LF**:
+
+```json
+{ "ok": true, "hardFailure": false, "networkDisconnected": false, "usageError": false,
+  "status": "complete|running|recovering|needs_user_action|failed",
+  "sessionId": "req_...", "resumeCommand": "gpt-webai-pro resume --session req_...",
+  "nextCommand": null,
+  "answer": "...", "answerPath": "...", "answerSha256": "...",
+  "artifacts": [{"filename":"...","path":"...","sha256":"...","sizeBytes":0}],
+  "errorKind": null, "message": null }
+```
+
+규칙 (전역 계약과 동일):
+- `hardFailure:true` + `networkDisconnected:true`는 **직접 증거로 네트워크 단절이 입증될 때만**
+  (예: chatgpt.com 네비게이션이 DNS/오프라인으로 실패). exit 1은 이 경우뿐.
+- 빈 프롬프트: exit 0, `usageError:true`, `status:"needs_user_action"`. 브라우저 접촉 없음.
+- timeout: exit 0, `status:"running"`, 동일 sessionId의 resumeCommand. 새 요청 생성 금지.
+- 그 외 인풋 오류 exit 2, 내부 오류도 envelope로 감싸 exit 0 (`status:"failed"`) —
+  단 envelope 출력 자체가 불가능한 파국만 exit 70.
+
+## 10. 에러 분류 (전체 폐쇄 목록)
+
+| errorKind | status | 의미 |
+| --- | --- | --- |
+| `needs_login` | needs_user_action | 슬롯 로그인 필요 (어느 슬롯인지 message에) |
+| `provider_limit` | recovering | 전 계정 rate-limit, cooldown 후 resume |
+| `model_unavailable` | needs_user_action | 피커에 Pro/Extended 라벨 부재 |
+| `send_uncertain` | needs_user_action | reconcile로도 증명 불가 (§5.3) |
+| `pool_busy` | recovering | idle 슬롯 없음 |
+| `daemon_unreachable` | failed | 컨테이너/daemon 기동 실패 |
+| `network_disconnected` | (hardFailure) | 직접 증거 있는 네트워크 단절 |
+| `internal` | failed | 그 외 |
+
+이보다 세분화된 kind를 추가하지 않는다. 세부는 `message`/`error_detail`/log.jsonl로.
+
+## 11. 테스트 전략 (3겹)
+
+### 11.1 unit (`test/unit/`)
+db 스키마/쿼리, 멱등성 상태기계(§5 전이표 전체 — 특히 armed에서 죽은 뒤 resume 경로),
+envelope 직렬화(전역 계약 케이스: 빈 프롬프트, timeout, hard failure), 슬롯 LRU/쿨다운.
+
+### 11.2 daemon e2e — fake-chatgpt 하네스 (`test/fake-chatgpt/`)
+node http 서버 + 단일 SPA. **selectors.ts가 쓰는 DOM 계약만** 모사한다
+(data-testid/role/aria/data-message-id 구조). 쿼리 파라미터로 시나리오 선택:
+
+`happy`(스트리밍 답변), `login-wall`, `rate-limit`, `model-missing`,
+`post-stream-gap`(stop 사라진 뒤 1.5s 후 텍스트 등장), `attachments`(칩 + 중복 파일명 리네임),
+`artifacts`(다운로드 2개, `.tar.gz` 포함), `slow`(waitMs 초과용).
+
+실제 chromium(playwright-core, headless)을 `GWP_BASE_URL=http://127.0.0.1:<port>`로 하네스에
+붙여 daemon RPC 전체(send/reconcile/poll/download/readiness)를 검증한다.
+chromium 해석 순서: `$CHROME_BINARY_PATH` → `~/.cache/ms-playwright/chromium-*` →
+`npx playwright install chromium` 안내 후 실패.
+
+### 11.3 supervisor e2e (`test/supervisor.e2e.test.ts`)
+in-process mock daemon(WS 서버)으로 supervisor 오케스트레이션 검증. 필수 시나리오:
+- send 중 소켓 단절 → uncertain → resume → reconcile found → 재클릭 0회로 complete
+- reconcile not-found → attempt 2 재전송 → complete. attempt 2도 실패 → needs_user_action
+- 동시 run 2개 → 서로 다른 슬롯 → 계정 로테이션 확인
+- provider_limit 슬롯 스킵 + 쿨다운
+- timeout → running envelope → resume → complete
+
+### 11.4 게이트
+`npm run build`(tsc strict 통과가 곧 린트) + `npm test`(위 전부). 그 외 게이트 없음.
+`scripts/container-smoke.sh`(이미지 빌드 + `--network host` 컨테이너로 하네스 왕복)는
+릴리스 전 수동 1회. 라이브 스모크(`smoke`)는 컷오버 단계에서 별도 수행.
+
+## 12. v1으로부터의 컷오버 (이 구현의 범위 밖, 참고용)
+
+1. 구현 + 게이트 통과 + container-smoke 후, 운영자가 old 스택 정지.
+2. `<v1 state>/slots/slot-NN/state/browser-profile` → `<v2 state>/slots/slot-NN/profile` 복사
+   (로그인 세션 승계, 재로그인 불필요).
+3. `~/.local/bin/gptpro`를 v2 CLI exec으로 교체. **`gptxhigh`는 폐기(삭제)**.
+4. `gpt-webai-pro smoke`로 라이브 1회 검증 → 이후 실사용.
+5. v1 스택/PR72 처분은 사용자 결정 사항.
+
+## 13. 구현 시 참조할 v1 소스 (읽기 전용)
+
+라이브 검증이 끝난 로직이므로 새로 발명하지 말고 이식한다. 경로는 PR72 워크트리
+`~/Documents/Programming/home-server-infra-gpt-webai-slot-pool-pr/stacks/gpt-webai-slot-pool/`:
+
+- `provider/chatgpt-playwright/lib/commands/upload-only.mjs` — 칩 시맨틱 탐지 (최종본)
+- `provider/chatgpt-playwright/lib/turns.mjs` — 턴/생성중/답변 추출
+- `provider/chatgpt-playwright/lib/send-confirmation.mjs` — 새 턴 증명 + prompt-sha reconcile
+- `provider/chatgpt-playwright/lib/commands/poll.mjs` — post-stream 갭 처리
+- `provider/chatgpt-playwright/lib/browser-composer.mjs` — 컴포저 셀렉터
+- `contracts/ui-labels-r14/model-effort-labels.tsv` — Pro 라벨 세트
+- `Dockerfile` + `scripts/slot-entrypoint.sh` — chromium/xvfb 기동 패턴
+
+**이식 금지 대상**: root-selector/바인딩 해시, contracts/r13.mjs, scroll-proof, artifacts.mjs,
+session-rebind의 hydration 상태기계(→ `open`+`poll`로 충분), R12 일체.
