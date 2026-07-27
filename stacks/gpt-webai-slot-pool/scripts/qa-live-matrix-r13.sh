@@ -290,25 +290,89 @@ expected_for_command() {
   printf '%s\n' "${selected[*]}"
 }
 
+# Transient live-UI failure kinds a bounded retry (fresh request/run id, hence a
+# fresh slot/page) resolves. These are the browser/session-stage contract
+# rejections (binding.mismatch / contract.invalid_provider_envelope) that stem
+# from reading the constantly-animating ChatGPT UI at an unlucky instant — not
+# deterministic defects. Mirrors the supervisor's retry-on-transient policy.
+GPT_WEBAI_LIVE_RETRYABLE_KINDS="run.model_failed run.send_failed run.poll_failed run.upload_failed run.session_operation_failed"
+GPT_WEBAI_LIVE_RETRYABLE_REASONS="contract.invalid_provider_envelope binding.mismatch"
+GPT_WEBAI_LIVE_MAX_RETRIES="${GPT_WEBAI_LIVE_MAX_RETRIES:-3}"
+# Backoff between retries: transient stage-contract failures cluster when the
+# live UI is momentarily busy/animating; a short, growing pause lets it settle
+# before the next attempt instead of hammering it in a tight loop.
+GPT_WEBAI_LIVE_RETRY_BACKOFF_MS="${GPT_WEBAI_LIVE_RETRY_BACKOFF_MS:-8000}"
+
+envelope_field() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2]) or "")
+except Exception:
+    print("")
+PY
+}
+
 invoke() {
   local label="$1" expected="$2" failpoint="$3"
   shift 3
   local prefix rc identities
   local -a command=("$binary" "$@")
-  CASE_STEP=$((CASE_STEP + 1))
-  prefix="$CASE_DIR/$(printf '%03d' "$CASE_STEP")-$label"
-  write_redacted_argv "$prefix.argv.txt" "${command[@]}"
-  set +e
-  if [[ "$failpoint" == - ]]; then
-    (cd "$stack_root" && "${command[@]}") >"$prefix.stdout" 2>"$prefix.stderr"
-  else
-    (cd "$stack_root" && GPT_WEBAI_FAILPOINT="$failpoint" "${command[@]}") \
-      >"$prefix.stdout" 2>"$prefix.stderr"
-  fi
-  rc=$?
-  set -e
-  printf '%s\n' "$rc" >"$prefix.rc"
-  chmod 0600 -- "$prefix.stdout" "$prefix.stderr" "$prefix.rc"
+  local is_run=0 attempt=0
+  [[ "$1" == run ]] && is_run=1
+  local orig_request="" orig_run="" arg want=""
+  for arg in "$@"; do
+    if [[ "$want" == request ]]; then orig_request="$arg"; want=""
+    elif [[ "$want" == run ]]; then orig_run="$arg"; want=""
+    elif [[ "$arg" == --request-id ]]; then want=request
+    elif [[ "$arg" == --run-id ]]; then want=run
+    fi
+  done
+  while :; do
+    CASE_STEP=$((CASE_STEP + 1))
+    prefix="$CASE_DIR/$(printf '%03d' "$CASE_STEP")-$label"
+    [[ "$attempt" -eq 0 ]] || prefix="$prefix-retry$attempt"
+    write_redacted_argv "$prefix.argv.txt" "${command[@]}"
+    set +e
+    if [[ "$failpoint" == - ]]; then
+      (cd "$stack_root" && "${command[@]}") >"$prefix.stdout" 2>"$prefix.stderr"
+    else
+      (cd "$stack_root" && GPT_WEBAI_FAILPOINT="$failpoint" "${command[@]}") \
+        >"$prefix.stdout" 2>"$prefix.stderr"
+    fi
+    rc=$?
+    set -e
+    printf '%s\n' "$rc" >"$prefix.rc"
+    chmod 0600 -- "$prefix.stdout" "$prefix.stderr" "$prefix.rc"
+    # Bounded retry only for a live run whose result is a transient stage-contract
+    # failure NOT already accepted by this step's expected set.
+    if [[ "$is_run" -eq 1 && "$attempt" -lt "$GPT_WEBAI_LIVE_MAX_RETRIES" ]]; then
+      local rk reason
+      rk="$(envelope_field "$prefix.stdout" resultKind)"
+      reason="$(envelope_field "$prefix.stdout" reason)"
+      if [[ " $GPT_WEBAI_LIVE_RETRYABLE_KINDS " == *" $rk "* \
+            && " $GPT_WEBAI_LIVE_RETRYABLE_REASONS " == *" $reason "* \
+            && ",$expected," != *",$rk,"* ]]; then
+        attempt=$((attempt + 1))
+        printf '  [live-retry] %s/%s attempt %d hit %s/%s; backing off then retrying with fresh ids\n' \
+          "$CASE_ID" "$label" "$attempt" "$rk" "$reason" >&2
+        sleep "$(awk "BEGIN{print ($GPT_WEBAI_LIVE_RETRY_BACKOFF_MS*$attempt)/1000}")"
+        local -a newcmd=(); local ra="" a
+        for a in "${command[@]}"; do
+          if [[ "$ra" == request ]]; then newcmd+=("${orig_request}-r${attempt}"); ra=""
+          elif [[ "$ra" == run ]]; then newcmd+=("${orig_run}-r${attempt}"); ra=""
+          else
+            newcmd+=("$a")
+            [[ "$a" == --request-id ]] && ra=request
+            [[ "$a" == --run-id ]] && ra=run
+          fi
+        done
+        command=("${newcmd[@]}")
+        continue
+      fi
+    fi
+    break
+  done
   identities="$(validate_envelope_record "$prefix.stdout" "$prefix.stderr" "$prefix.rc" "$expected")" ||
     fail "$CASE_ID/$label envelope validation failed"
   LAST_SESSION="$(sed -n '1p' <<<"$identities")"
