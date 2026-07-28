@@ -151,7 +151,9 @@ export class DockerManager {
 
   async stop(slotId: string): Promise<void> {
     const state = await this.inspect(slotId);
-    if (state.exists && state.running) await docker(["stop", this.containerName(slotId)]);
+    // -t 40: entrypoint가 SIGTERM을 Chrome까지 전달하고 클린 종료(프로필 flush)를
+    // 기다린다 — 기본 10초 유예로는 SIGKILL로 넘어가 로그인 쿠키가 유실될 수 있다.
+    if (state.exists && state.running) await docker(["stop", "-t", "40", this.containerName(slotId)]);
   }
 
   private async remove(slotId: string): Promise<void> {

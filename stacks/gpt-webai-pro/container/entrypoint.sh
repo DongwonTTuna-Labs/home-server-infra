@@ -92,4 +92,30 @@ if [[ "$cdp_ready" != "1" ]]; then
   exit 1
 fi
 
-exec node /app/dist/daemon/main.js
+# exec 금지: SIGTERM을 Chrome까지 전달해 프로필(쿠키 DB) flush를 보장해야 한다.
+# Chromium은 주기(~30s) flush라 하드킬되면 직전 로그인 쿠키가 유실된다 (2026-07-28 실측).
+node /app/dist/daemon/main.js &
+daemon_pid="$!"
+
+shutdown() {
+  # 순서가 생명이다: daemon이 CDP Browser.close로 Chrome을 클린 종료(쿠키 flush)할 때까지
+  # 기다린 뒤에만 fallback TERM을 보낸다. Chrome에 먼저/동시에 SIGTERM을 보내면
+  # Chromium이 비플러시 경로로 종료해 직전 로그인/회전 쿠키가 유실된다 (실측).
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  for _ in $(seq 1 125); do
+    kill -0 "$daemon_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  chrome_pid="$(cat "$runtime_dir/chromium.pid" 2>/dev/null || true)"
+  if [[ -n "$chrome_pid" ]] && kill -0 "$chrome_pid" 2>/dev/null; then
+    kill -TERM "$chrome_pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+      kill -0 "$chrome_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+  fi
+  exit 0
+}
+trap shutdown TERM INT
+
+wait "$daemon_pid"

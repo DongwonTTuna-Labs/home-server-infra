@@ -31,6 +31,21 @@ export class BrowserSession {
     return this.browser.isConnected();
   }
 
+  /**
+   * CDP Browser.close로 Chromium을 결정적으로 클린 종료시킨다.
+   * Chromium은 SIGTERM에서 쿠키 DB를 flush하지 않는다 (2026-07-28 실측: 주기 flush ~30s
+   * 이전의 로그인/회전 쿠키가 하드킬로 유실됨). 모든 컨테이너 정지는 이 경로를 거쳐야
+   * 세션 쿠키가 보존된다.
+   */
+  async closeBrowserGracefully(timeoutMs = 15_000): Promise<void> {
+    const cdp = await this.browser.newBrowserCDPSession();
+    await cdp.send("Browser.close").catch(() => undefined);
+    const deadline = Date.now() + timeoutMs;
+    while (this.browser.isConnected() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
   async inspectionPage(): Promise<Page | null> {
     return (await this.relevantPages()).at(-1) ?? null;
   }

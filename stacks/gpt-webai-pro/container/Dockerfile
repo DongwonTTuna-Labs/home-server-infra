@@ -42,4 +42,6 @@ RUN chmod 0755 /usr/local/bin/gpt-webai-pro-entrypoint \
     && find /app -type d -exec chmod 0755 {} + \
     && find /app -type f -exec chmod 0644 {} +
 
-ENTRYPOINT ["dumb-init", "--", "gpt-webai-pro-entrypoint"]
+# --single-child: 시그널을 entrypoint에게만 전달한다. 기본(프로세스 그룹 전파)이면
+# Chrome이 TERM을 직접 받아 비플러시 종료 → 세션 쿠키 유실 (entrypoint.sh 주석 참조).
+ENTRYPOINT ["dumb-init", "--single-child", "--", "gpt-webai-pro-entrypoint"]

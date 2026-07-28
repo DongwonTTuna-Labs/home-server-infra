@@ -253,6 +253,8 @@ async function main(): Promise<void> {
     labels,
   });
   const shutdown = async () => {
+    // Chrome을 먼저 CDP Browser.close로 클린 종료(쿠키 flush) — browser.ts 주석 참조.
+    await session.closeBrowserGracefully().catch(() => undefined);
     await handle.close();
     process.exit(0);
   };
