@@ -546,7 +546,6 @@ test("one slot multiplexes two requests with independent conversation identities
     handler: async (method, params) => {
       if (method === "readiness") return { state: "ready", modelLabel: "Pro" };
       if (method === "send") {
-        assert.equal(params?.newConversation, true);
         const prompt = String(params?.prompt);
         const identity = {
           conversationUrl: `https://chatgpt.com/c/${prompt}`,
@@ -776,7 +775,6 @@ test("poll promotes an assistant placeholder id and sends the observed id on the
         }
         return { ...complete("assistant id promoted", conversationUrl), assistantTurnId: observed };
       }
-      if (method === "open") throw new Error("assistant id promotion must not navigate");
       throw new Error(`unexpected ${method}`);
     },
   }]);

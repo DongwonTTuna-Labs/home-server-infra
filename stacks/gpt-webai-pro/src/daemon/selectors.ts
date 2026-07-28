@@ -57,6 +57,12 @@ export interface TurnObservation {
   text: string;
   domIndex: number;
 }
+export function assistantAfter(
+  turns: readonly TurnObservation[],
+  user: Pick<TurnObservation, "domIndex">,
+): TurnObservation | undefined {
+  return turns.find((turn) => turn.role === "assistant" && turn.domIndex > user.domIndex);
+}
 export interface ChipObservation {
   filename: string;
   complete: boolean;
@@ -155,7 +161,7 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
     return { filename: match, complete: !busy, rootPath, seedPath };
   }).filter(Boolean);
 })()`;
-export function normalizeLabel(value: string): string {
+function normalizeLabel(value: string): string {
   return value.normalize("NFC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
 }
 export function normalizeIntelligenceLabel(value: string): string {

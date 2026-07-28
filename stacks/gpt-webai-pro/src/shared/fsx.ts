@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { appendFile, copyFile, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-export interface FileLock {
+interface FileLock {
   release(): Promise<void>;
 }
 export async function mkdirp(directory: string, mode = 0o700): Promise<void> {

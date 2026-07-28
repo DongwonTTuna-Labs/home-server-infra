@@ -1,19 +1,14 @@
-import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { Page } from "playwright-core";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { GwpError, errorMessage } from "../shared/errors.js";
-import { atomicWrite, mkdirp } from "../shared/fsx.js";
 import type {
-  CaptureFailureParams,
   CloseConversationParams,
   DownloadParams,
   LabelConfig,
-  OpenParams,
   PollParams,
   ReconcileParams,
   RpcMethod,
@@ -85,7 +80,6 @@ async function handleMessage(
   raw: RawData,
   options: {
     session: BrowserSession;
-    outboxDir: string;
     labels: LabelConfig;
   },
   downloader: ArtifactDownloader,
@@ -134,7 +128,6 @@ async function dispatch(
   request: JsonRpcRequest,
   options: {
     session: BrowserSession;
-    outboxDir: string;
     labels: LabelConfig;
   },
   downloader: ArtifactDownloader,
@@ -175,12 +168,6 @@ async function dispatch(
       return enqueueMutation(() => (
         downloader.download(options.session, request.params as DownloadParams)
       ));
-    case "open": {
-      await enqueueMutation(() => (
-        options.session.open((request.params as OpenParams).conversationUrl)
-      ));
-      return { ok: true };
-    }
     case "closeConversation": {
       await enqueueMutation(() => (
         options.session.closeConversation(
@@ -189,28 +176,9 @@ async function dispatch(
       ));
       return { ok: true };
     }
-    case "captureFailure": {
-      const page = await options.session.inspectionPage();
-      if (!page) throw new GwpError("internal", "no browser page is available to capture");
-      return captureFailure(page, options.outboxDir, request.params as CaptureFailureParams);
-    }
     default:
       throw new GwpError("internal", `unknown RPC method: ${String(request.method)}`);
   }
-}
-async function captureFailure(
-  page: Page,
-  outboxDir: string,
-  params: CaptureFailureParams,
-): Promise<{ screenshotPath: string; htmlPath: string }> {
-  const tag = params.tag.replace(/[^a-z0-9._-]+/giu, "-").slice(0, 80) || "failure";
-  const stamp = `${Date.now()}-${process.pid}-${randomBytes(6).toString("hex")}`;
-  await mkdirp(outboxDir);
-  const screenshotPath = path.join(outboxDir, `${stamp}-${tag}.png`);
-  const htmlPath = path.join(outboxDir, `${stamp}-${tag}.html`);
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  await atomicWrite(htmlPath, await page.content());
-  return { screenshotPath, htmlPath };
 }
 function createMutationQueue(): EnqueueMutation {
   let tail: Promise<void> = Promise.resolve();

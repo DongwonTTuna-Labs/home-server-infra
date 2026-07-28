@@ -6,6 +6,7 @@ import {
   FILE_INPUT_SELECTOR,
   SEND_BUTTON_SELECTORS,
   UPLOAD_BUTTON_SELECTORS,
+  type ChipObservation,
   normalizeChipStem,
   renderedTurnMatchesPrompt,
   observeAttachmentChips,
@@ -124,7 +125,7 @@ async function waitForExpectedChips(
 ): Promise<void> {
   const expected = counts(expectedNames.map(normalizeChipStem));
   const deadline = Date.now() + timeoutMs;
-  let latest = await observeAttachmentChips(page);
+  let latest: ChipObservation[] = [];
   while (Date.now() < deadline) {
     latest = await observeAttachmentChips(page);
     const observed = counts(latest.map((chip) => normalizeChipStem(chip.filename)));

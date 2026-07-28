@@ -80,7 +80,6 @@ export interface ReadinessResult {
 export interface SendParams {
   prompt: string;
   files: RpcFile[];
-  newConversation: true;
 }
 export interface SendResult {
   conversationUrl: string;
@@ -131,18 +130,8 @@ export interface DownloadResult {
   sha256: string;
   sizeBytes: number;
 }
-export interface OpenParams {
-  conversationUrl: string;
-}
 export interface CloseConversationParams {
   conversationUrl: string;
-}
-export interface CaptureFailureParams {
-  tag: string;
-}
-export interface CaptureFailureResult {
-  screenshotPath: string;
-  htmlPath: string;
 }
 export interface RpcMethods {
   health: { params: undefined; result: HealthResult };
@@ -151,9 +140,7 @@ export interface RpcMethods {
   reconcile: { params: ReconcileParams; result: ReconcileResult };
   poll: { params: PollParams; result: PollResult };
   download: { params: DownloadParams; result: DownloadResult };
-  open: { params: OpenParams; result: { ok: boolean } };
   closeConversation: { params: CloseConversationParams; result: { ok: boolean } };
-  captureFailure: { params: CaptureFailureParams; result: CaptureFailureResult };
 }
 export type RpcMethod = keyof RpcMethods;
 export interface PublicArtifact {

@@ -1,4 +1,4 @@
-export const PUBLIC_ERROR_KINDS = [
+const PUBLIC_ERROR_KINDS = [
   "needs_login",
   "provider_limit",
   "model_unavailable",

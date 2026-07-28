@@ -1,7 +1,7 @@
 import type { Page } from "playwright-core";
 import type { ReconcileParams, ReconcileResult } from "../../shared/types.js";
 import type { BrowserSession } from "../browser.js";
-import { readTurns, renderedTurnMatchesPrompt } from "../selectors.js";
+import { assistantAfter, readTurns, renderedTurnMatchesPrompt } from "../selectors.js";
 export async function reconcileSend(
   session: BrowserSession,
   params: ReconcileParams,
@@ -83,9 +83,7 @@ async function scanPages(
       unboundMatch = true;
       continue;
     }
-    const assistant = turns.find((turn) => (
-      turn.role === "assistant" && turn.domIndex > user.domIndex
-    ));
+    const assistant = assistantAfter(turns, user);
     matches.push({
       found: true,
       conversationUrl,
@@ -124,9 +122,7 @@ async function scanUserTurnAnchor(
   const match = matches[0]!;
   const conversationUrl = match.page.url();
   if (!session.isConversationUrl(conversationUrl)) return { found: false, proven: false };
-  const assistant = match.turns.find((turn) => (
-    turn.role === "assistant" && turn.domIndex > match.domIndex
-  ));
+  const assistant = assistantAfter(match.turns, match);
   return {
     found: true,
     conversationUrl,

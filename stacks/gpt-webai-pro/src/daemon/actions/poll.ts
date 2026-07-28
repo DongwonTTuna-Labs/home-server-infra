@@ -4,6 +4,7 @@ import { sha256Text } from "../../shared/fsx.js";
 import type { PollParams, PollResult } from "../../shared/types.js";
 import type { BrowserSession } from "../browser.js";
 import {
+  assistantAfter,
   answerActionVisible,
   artifactControls,
   FILENAME_PATTERN,
@@ -100,7 +101,7 @@ function stripArtifactActionLines(answer: string): string {
 async function bindPollPage(
   session: BrowserSession,
   params: PollParams,
-  openConversation = (url: string) => session.open(url),
+  openConversation: (url: string) => Promise<Page>,
 ): Promise<Page> {
   const current = await session.inspectionPage();
   const relevant = await session.relevantPages();
@@ -201,6 +202,5 @@ function matchingAssistant(
     ));
     if (exact) return exact;
   }
-  return turns.find((turn) => turn.role === "assistant" && turn.domIndex > user.domIndex);
+  return assistantAfter(turns, user);
 }
-export { STABLE_GAP_MS };

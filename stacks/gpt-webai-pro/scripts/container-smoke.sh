@@ -61,7 +61,7 @@ if (!rpc) throw new Error(`daemon did not become healthy on 127.0.0.1:${port}`);
 const ready = await rpc.call('readiness', undefined);
 if (ready.state !== 'ready') throw new Error(JSON.stringify(ready));
 const prompt = 'container smoke';
-const sent = await rpc.call('send', { prompt, files: [], newConversation: true });
+const sent = await rpc.call('send', { prompt, files: [] });
 const polled = await rpc.call('poll', {
   conversationUrl: sent.conversationUrl,
   promptSha256: createHash('sha256').update(prompt).digest('hex'),

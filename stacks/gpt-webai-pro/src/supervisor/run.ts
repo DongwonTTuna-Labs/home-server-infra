@@ -444,7 +444,7 @@ export class Supervisor {
       const attemptNo = armSendAttempt(this.db, request.id);
       this.log(request.id, "sending", `attempt ${attemptNo} armed`);
       try {
-        const result = await client.call("send", { prompt, files, newConversation: true }, 180_000);
+        const result = await client.call("send", { prompt, files }, 180_000);
         const finalState = confirmSendAttempt(this.db, request.id, result);
         this.log(request.id, "generating", `attempt ${attemptNo} ${finalState}`);
         await client.close();

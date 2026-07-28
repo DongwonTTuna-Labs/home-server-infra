@@ -351,17 +351,15 @@ supervisor가 슬롯당 32-hex 토큰을 `slots/<slotId>/daemon.token`(0600)에 
 | --- | --- | --- | --- |
 | `health` | – | `{ok, chromeConnected, currentUrl}` | |
 | `readiness` | – | `{state:'ready'\|'needs_login'\|'provider_limit'\|'unknown', modelLabel}` | 로그인 UI/rate-limit UI 감지 |
-| `send` | `{prompt, files:[{name,containerPath}], newConversation:true}` | `{conversationUrl, userTurnId, assistantTurnId}` | §5.2. 내부에서 model 보장+첨부+클릭+턴확인 |
+| `send` | `{prompt, files:[{name,containerPath}]}` | `{conversationUrl, userTurnId, assistantTurnId}` | §5.2. 내부에서 model 보장+첨부+클릭+턴확인 |
 | `reconcile` | `{promptSha256, conversationUrl?}` | `{found, conversationUrl?, userTurnId?, assistantTurnId?, proven:boolean}` | §5.3. 절대 클릭하지 않는 읽기 전용 |
 | `poll` | `{conversationUrl, promptSha256, userTurnId?, assistantTurnId?, waitMs≤60000}` | `{state:'generating'\|'complete', currentUrl, assistantTurnId?, answerMarkdown?, answerSha256?, artifactControls?:[{index,label}]}` | identity/URL §6.5, 완료 판정 §7 |
 | `download` | `{conversationUrl, controlIndex}` | `{filename, outboxPath, sha256, sizeBytes}` | 컨트롤당 1회, outbox에 저장 |
-| `open` | `{conversationUrl}` | `{ok}` | resume용 네비게이션 |
-| `captureFailure` | `{tag}` | `{screenshotPath, htmlPath}` | outbox에 저장, supervisor가 회수 |
 
 **daemon 동시성 규칙 (탭 멀티플렉싱)**: 브라우저를 **변경**하는 RPC(send, reconcile의
-네비게이션 구간, open, download, closeConversation)는 단일 **mutation 큐**로 직렬
+네비게이션 구간, download, closeConversation)는 단일 **mutation 큐**로 직렬
 처리한다 — reconcile 판정이 진행 중 send와 인터리빙되지 않는 보장은 유지된다.
-읽기 전용 RPC(poll의 관찰 루프, readiness, health, captureFailure)는 큐 밖에서 동시
+읽기 전용 RPC(poll의 관찰 루프, readiness, health)는 큐 밖에서 동시
 실행한다(서로 다른 탭에 대한 동시 poll이 서로를 막지 않아야 한다). 단 poll이 탭
 바인딩을 위해 네비게이션이 필요해지면 그 네비게이션만 mutation 큐를 거친다.
 
@@ -420,7 +418,7 @@ placeholder id(`request-placeholder-request-WEB:...-0`)였다가 완료 후 실�
   재이동하지 않는다.** 모든 poll 결과에 `currentUrl`을 포함하고, supervisor는 그것이
   기록값과 다른 유효 `/c/` URL이면 DB `conversation_url`을 갱신한다. 단, 한번 non-`WEB:`
   URL로 승격된 포인터는 뒤늦은 `WEB:` 관찰로 되돌리지 않는다.
-- `open()`은 진짜 rebind(daemon 재시작 등)에서만 쓴다. 이동 결과가 루트로 리다이렉트되면
+- 내부 `session.open()`은 진짜 rebind(daemon 재시작 등)에서만 쓴다. 이동 결과가 루트로 리다이렉트되면
   실패로 끝내지 말고 열린 탭들에서 promptSha 기반 reconcile을 먼저 시도한다.
 
 ## 7. 생성 완료 판정 (poll)
@@ -665,4 +663,4 @@ in-process mock daemon(WS 서버)으로 supervisor 오케스트레이션 검증.
 - `Dockerfile` + `scripts/slot-entrypoint.sh` — chromium/xvfb 기동 패턴
 
 **이식 금지 대상**: root-selector/바인딩 해시, contracts/r13.mjs, scroll-proof, artifacts.mjs,
-session-rebind의 hydration 상태기계(→ `open`+`poll`로 충분), R12 일체.
+session-rebind의 hydration 상태기계(→ 내부 `session.open()`+`poll`로 충분), R12 일체.

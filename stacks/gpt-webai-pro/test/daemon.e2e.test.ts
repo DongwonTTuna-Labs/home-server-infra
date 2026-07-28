@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -154,7 +154,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       },
     };
   }
-  await t.test("happy: readiness, send, reconcile, poll, open, health, capture", async () => {
+  await t.test("happy: readiness, send, reconcile, poll, health", async () => {
     const runtime = await setup("happy");
     try {
       const initialReadiness = await runtime.rpc.call("readiness", undefined);
@@ -165,7 +165,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         { found: false, proven: false },
       );
       const prompt = "hello from daemon e2e";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       assert.match(sent.conversationUrl, /\/c\/fake-/);
       assert.match(sent.userTurnId, /^user-/);
       assert.match(sent.assistantTurnId, /^assistant-/);
@@ -188,18 +188,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       assert.equal(polled.state, "complete");
       assert.equal(polled.answerMarkdown, "fake answer");
       assert.equal(polled.answerSha256, sha256Text("fake answer"));
-      assert.equal((await runtime.rpc.call("open", { conversationUrl: sent.conversationUrl })).ok, true);
       assert.equal((await runtime.rpc.call("health", undefined)).chromeConnected, true);
-      const captures = await Promise.all([
-        runtime.rpc.call("captureFailure", { tag: "test-capture" }),
-        runtime.rpc.call("captureFailure", { tag: "test-capture" }),
-      ]);
-      assert.notEqual(captures[0].screenshotPath, captures[1].screenshotPath);
-      assert.notEqual(captures[0].htmlPath, captures[1].htmlPath);
-      for (const capture of captures) {
-        await access(capture.screenshotPath);
-        await access(capture.htmlPath);
-      }
       assert.equal(
         (await runtime.rpc.call("closeConversation", {
           conversationUrl: polled.currentUrl,
@@ -213,7 +202,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("url-rebind");
     try {
       const prompt = "temporary URL promotion";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       assert.match(sent.conversationUrl, /\/c\/WEB:fake-/);
       const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       await page.waitForURL(/\/c\/final-/);
@@ -231,7 +220,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("assistant-id-rebind");
     try {
       const prompt = "assistant id promotion";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       assert.match(sent.userTurnId, /^user-/);
       assert.match(sent.assistantTurnId, /^request-placeholder-request-WEB:/);
       const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
@@ -395,12 +384,10 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         runtime.rpc.call("send", {
           prompt: "first multiplexed request",
           files: [],
-          newConversation: true,
         }),
         runtime.rpc.call("send", {
           prompt: "second multiplexed request",
           files: [],
-          newConversation: true,
         }),
       ]);
       assert.notEqual(first.conversationUrl, second.conversationUrl);
@@ -430,7 +417,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("multi-tab");
     try {
       const prompt = "identical prompt during reconcile";
-      const first = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const first = await runtime.rpc.call("send", { prompt, files: [] });
       const recovered = await runtime.rpc.call("reconcile", reconcileRequest(prompt));
       assert.equal(recovered.found, true);
       assert.equal(recovered.userTurnId, first.userTurnId);
@@ -439,7 +426,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const second = await runtime.rpc.call("send", {
         prompt,
         files: [],
-        newConversation: true,
       });
       const ambiguous = await runtime.rpc.call("reconcile", reconcileRequest(prompt));
       assert.deepEqual(ambiguous, { found: false, proven: false });
@@ -524,7 +510,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("model-missing");
     try {
       await assert.rejects(
-        runtime.rpc.call("send", { prompt: "must not send", files: [], newConversation: true }),
+        runtime.rpc.call("send", { prompt: "must not send", files: [] }),
         (error: unknown) => error instanceof GwpError
           && error.kind === "model_unavailable"
           && error.phase === "pre_click",
@@ -537,7 +523,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("model-check-fails");
     try {
       await assert.rejects(
-        runtime.rpc.call("send", { prompt: "must not send", files: [], newConversation: true }),
+        runtime.rpc.call("send", { prompt: "must not send", files: [] }),
         (error: unknown) => error instanceof GwpError
           && error.kind === "model_unavailable"
           && error.phase === "pre_click",
@@ -554,7 +540,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const sending = runtime.rpc.call("send", {
         prompt: "landed before confirmation failed",
         files: [],
-        newConversation: true,
       });
       const page = await newPage;
       const user = page.locator('[data-message-author-role="user"]').first();
@@ -574,7 +559,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("markdown-normalization");
     try {
       const prompt = "파이썬 실행\r\n```python\r\n  print(\"안녕 🧪\")  \r\n```\r\n완료";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       const rendered = await page.locator(`[data-message-id="${sent.userTurnId}"]`).innerText();
       assert.doesNotMatch(rendered, /```/u);
@@ -592,7 +577,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("post-stream-gap");
     try {
       const prompt = "gap";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       const early = await runtime.rpc.call("poll", pollRequest(sent, prompt, 1_000));
       assert.equal(early.state, "generating");
       const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 6_000));
@@ -618,7 +603,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
           { name: "same.txt", containerPath: path.join(left, "same.txt") },
           { name: "same.txt", containerPath: path.join(right, "same.txt") },
         ],
-        newConversation: true,
       });
       assert.match(sent.conversationUrl, /\/c\//);
       const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
@@ -639,7 +623,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const runtime = await setup(scenario);
       try {
         const prompt = scenario;
-        const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+        const sent = await runtime.rpc.call("send", { prompt, files: [] });
         const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
         assert.equal(terminal.state, "complete");
         assert.deepEqual(terminal.artifactControls?.map((control) => control.label), [
@@ -660,7 +644,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const runtime = await setup(scenario);
       try {
         const prompt = scenario;
-        const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+        const sent = await runtime.rpc.call("send", { prompt, files: [] });
         const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, waitMs));
         assert.equal(terminal.state, "complete");
         assert.equal(terminal.answerMarkdown, answer);
@@ -678,7 +662,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const runtime = await setup("artifacts-no-hint");
     try {
       const prompt = "ordinary answer only";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 12_000));
       assert.equal(terminal.state, "complete");
       assert.equal(terminal.answerMarkdown, "ordinary answer");
@@ -692,7 +676,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
     const second = await RpcClient.connect(runtime.daemon.port, runtime.tokenPath);
     try {
       const prompt = "slow";
-      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
       const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       assert.equal(await page.locator("#intelligence-pill").innerText(), "Pro");
       assert.equal(await page.locator("#intelligence-pill").getAttribute("data-open-count"), "0");
