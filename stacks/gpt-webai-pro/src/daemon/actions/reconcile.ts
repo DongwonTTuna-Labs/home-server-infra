@@ -1,67 +1,64 @@
 import type { Page } from "playwright-core";
-
-import { sha256Text } from "../../shared/fsx.js";
 import type { ReconcileParams, ReconcileResult } from "../../shared/types.js";
 import type { BrowserSession } from "../browser.js";
-import { readTurns } from "../selectors.js";
-
-interface ScanOutcome {
-  result: ReconcileResult;
-  page: Page | null;
-}
-
+import { readTurns, renderedTurnMatchesPrompt } from "../selectors.js";
 export async function reconcileSend(
   session: BrowserSession,
   params: ReconcileParams,
 ): Promise<ReconcileResult> {
   const openPages = await session.relevantPages();
-  if (!params.conversationUrl) {
-    // URL/turn identity가 아직 없는 창구간에는 prompt sha만 권위가 있다. send와 이
-    // 전체 판정은 daemon mutation 큐가 직렬화하므로 클릭 전 DOM을 관찰할 수 없다.
-    // 큐를 지난 뒤 같은 prompt가 둘 이상이면 어느 요청인지 증명할 수 없으므로 닫힌다.
-    return (await scanPages(session, openPages, params.promptSha256)).result;
+  const anchors = uniqueStrings([
+    params.pendingConversationUrl,
+    params.conversationUrl,
+  ]);
+  if (params.pendingUserTurnId) {
+    const observed = await scanUserTurnAnchor(session, openPages, params.pendingUserTurnId);
+    if (observed.found) return observed;
+    for (const anchor of anchors.filter((url) => session.isConversationUrl(url))) {
+      await session.open(anchor).catch(() => undefined);
+      const rebound = await scanUserTurnAnchor(
+        session,
+        await session.relevantPages(),
+        params.pendingUserTurnId,
+      );
+      if (rebound.found) return rebound;
+    }
+    return { found: false, proven: false };
   }
-
-  const alreadyOpen = openPages.filter((page) => page.url() === params.conversationUrl);
-  if (alreadyOpen.length > 0) {
-    return (await scanPages(session, alreadyOpen, params.promptSha256)).result;
+  for (const anchor of anchors) {
+    const exact = openPages.filter((page) => page.url() === anchor);
+    if (exact.length > 0 && session.isConversationUrl(anchor)) {
+      return scanPages(session, exact, params, true);
+    }
   }
-
-  let opened: Page;
-  try {
-    opened = await session.open(params.conversationUrl);
-  } catch {
-    const fallback = await scanPages(
-      session,
-      await session.relevantPages(),
-      params.promptSha256,
-    );
-    const result = fallback.result;
-    return result.found ? result : { found: false, proven: false };
+  const navigationUrl = anchors.find((url) => session.isConversationUrl(url));
+  if (navigationUrl) {
+    try {
+      const opened = await session.open(navigationUrl);
+      if (session.isConversationUrl(opened.url())) {
+        return scanPages(session, [opened], params, true);
+      }
+    } catch {
+      // Losing an anchor cannot authorize either text-only binding or retry.
+    }
   }
-
-  if (!session.isConversationUrl(opened.url())) {
-    const fallback = await scanPages(
-      session,
-      await session.relevantPages(),
-      params.promptSha256,
-    );
-    const result = fallback.result;
-    return result.found ? result : { found: false, proven: false };
-  }
-
-  return (await scanPages(session, [opened], params.promptSha256)).result;
+  const fallbackPages = await session.relevantPages();
+  // Without a durable anchor, an empty surviving tab cannot prove that a
+  // post-click send did not land in a tab lost with the daemon/browser.
+  return scanPages(session, fallbackPages, params, false);
 }
-
 async function scanPages(
   session: BrowserSession,
   pages: readonly Page[],
-  promptSha256: string,
-): Promise<ScanOutcome> {
-  let observedConversation = false;
+  params: ReconcileParams,
+  canProveAbsence: boolean,
+): Promise<ReconcileResult> {
+  const baseline = new Set(params.preClickBaseline ?? []);
   let unreadable = false;
+  let ambiguous = false;
   let unboundMatch = false;
-  const matches: Array<{ page: Page; result: ReconcileResult }> = [];
+  let readable = 0;
+  const matches: ReconcileResult[] = [];
   for (const page of pages) {
     const conversationUrl = page.url();
     const turns = await readTurns(page).catch(() => null);
@@ -69,32 +66,75 @@ async function scanPages(
       unreadable = true;
       continue;
     }
-    const user = [...turns].reverse().find((turn) => (
-      turn.role === "user" && sha256Text(turn.text) === promptSha256
+    readable += 1;
+    const newUsers = turns.filter((turn) => (
+      turn.role === "user" && !baseline.has(turn.dataMessageId)
     ));
-    if (!session.isConversationUrl(conversationUrl)) {
-      if (user) unboundMatch = true;
+    const promptMatches = newUsers.filter((turn) => (
+      renderedTurnMatchesPrompt(turn.text, params.prompt)
+    ));
+    if (promptMatches.length > 1) {
+      ambiguous = true;
       continue;
     }
-    observedConversation = true;
+    const user = promptMatches[0];
     if (!user) continue;
+    if (!session.isConversationUrl(conversationUrl)) {
+      unboundMatch = true;
+      continue;
+    }
     const assistant = turns.find((turn) => (
       turn.role === "assistant" && turn.domIndex > user.domIndex
     ));
     matches.push({
-      result: {
-        found: true,
-        conversationUrl,
-        userTurnId: user.dataMessageId,
-        ...(assistant ? { assistantTurnId: assistant.dataMessageId } : {}),
-        proven: true,
-      },
-      page,
+      found: true,
+      conversationUrl,
+      userTurnId: user.dataMessageId,
+      ...(assistant ? { assistantTurnId: assistant.dataMessageId } : {}),
+      proven: true,
     });
   }
-  if (matches.length === 1 && !unreadable && !unboundMatch) return matches[0]!;
-  if (matches.length > 1 || unreadable || unboundMatch) {
-    return { result: { found: false, proven: false }, page: null };
+  if (matches.length === 1 && !ambiguous && !unboundMatch) return matches[0]!;
+  if (matches.length > 1 || unreadable || ambiguous || unboundMatch) {
+    return { found: false, proven: false };
   }
-  return { result: { found: false, proven: observedConversation }, page: null };
+  return {
+    found: false,
+    proven: canProveAbsence && pages.length > 0 && readable === pages.length,
+  };
+}
+async function scanUserTurnAnchor(
+  session: BrowserSession,
+  pages: readonly Page[],
+  pendingUserTurnId: string,
+): Promise<ReconcileResult> {
+  let unreadable = false;
+  const matches: Array<{ page: Page; turns: Awaited<ReturnType<typeof readTurns>>; domIndex: number }> = [];
+  for (const page of pages) {
+    const turns = await readTurns(page).catch(() => null);
+    if (!turns) {
+      unreadable = true;
+      continue;
+    }
+    for (const user of turns.filter((turn) => (
+      turn.role === "user" && turn.dataMessageId === pendingUserTurnId
+    ))) matches.push({ page, turns, domIndex: user.domIndex });
+  }
+  if (unreadable || matches.length !== 1) return { found: false, proven: false };
+  const match = matches[0]!;
+  const conversationUrl = match.page.url();
+  if (!session.isConversationUrl(conversationUrl)) return { found: false, proven: false };
+  const assistant = match.turns.find((turn) => (
+    turn.role === "assistant" && turn.domIndex > match.domIndex
+  ));
+  return {
+    found: true,
+    conversationUrl,
+    userTurnId: pendingUserTurnId,
+    ...(assistant ? { assistantTurnId: assistant.dataMessageId } : {}),
+    proven: true,
+  };
+}
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }

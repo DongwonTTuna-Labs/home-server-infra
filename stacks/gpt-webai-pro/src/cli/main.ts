@@ -1,6 +1,5 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-
 import { errorMessage } from "../shared/errors.js";
 import { isRequestId } from "../shared/ids.js";
 import type { Envelope } from "../shared/types.js";
@@ -16,7 +15,6 @@ import {
   makeEnvelope,
   writeEnvelope,
 } from "./envelope.js";
-
 const COMMANDS = new Set([
   "run",
   "resume",
@@ -27,7 +25,6 @@ const COMMANDS = new Set([
   "login",
   "keepalive",
 ]);
-
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const command = COMMANDS.has(argv[0] ?? "") ? argv.shift()! : "run";
   const requestEnvelopeCommand = command === "run" || command === "resume" || command === "release";
@@ -63,34 +60,29 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       const envelope = await supervisor.run(parsed.prompt, parsed.files, parsed.timeoutSeconds);
       return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
     }
-
     if (command === "resume") {
       const parsed = parseSessionCommand(argv, true);
       supervisor = await Supervisor.open();
       const envelope = await supervisor.resume(parsed.session, parsed.timeoutSeconds);
       return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
     }
-
     if (command === "status") {
       if (argv.some((item) => item !== "--json")) throw new InputError("status accepts only --json");
       supervisor = await Supervisor.open();
       return emitJson(await supervisor.status(), 0);
     }
-
     if (command === "cleanup") {
       const apply = parseCleanup(argv);
       supervisor = await Supervisor.open();
       const report = await supervisor.cleanup(apply);
       return emitJson(report, 0);
     }
-
     if (command === "release") {
       const parsed = parseSessionCommand(argv, false);
       supervisor = await Supervisor.open();
       const envelope = await supervisor.release(parsed.session);
       return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
     }
-
     if (command === "login") {
       const slot = parseLogin(argv);
       supervisor = await Supervisor.open();
@@ -142,13 +134,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         process.removeListener("SIGTERM", abort);
       }
     }
-
     if (command === "keepalive") {
       if (argv.length > 0) throw new InputError("keepalive accepts no arguments");
       supervisor = await Supervisor.open();
       return emitJson(await supervisor.keepalive(), 0);
     }
-
     if (command === "smoke") {
       if (argv.length > 0) throw new InputError("smoke accepts no arguments");
       if (process.env.GWP_LIVE !== "1") throw new InputError("smoke requires GWP_LIVE=1");
@@ -173,7 +163,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         message: envelope.message ?? "live smoke response did not match GWP_SMOKE_OK",
       }, envelope.hardFailure ? 1 : 0);
     }
-
     throw new InputError(`unknown command: ${command}`);
   } catch (error) {
     const input = error instanceof InputError;
@@ -186,11 +175,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return emitEnvelope(envelope, input ? 2 : 0);
   }
 }
-
 function writeJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
-
 async function parseRun(argv: string[]): Promise<{
   prompt: string;
   files: string[];
@@ -224,7 +211,6 @@ async function parseRun(argv: string[]): Promise<{
   else prompt = "";
   return { prompt, files, timeoutSeconds };
 }
-
 function parseSessionCommand(
   argv: string[],
   allowTimeout: boolean,
@@ -241,30 +227,25 @@ function parseSessionCommand(
   if (!session || !isRequestId(session)) throw new InputError("--session req_... is required");
   return { session, timeoutSeconds };
 }
-
 function parseCleanup(argv: string[]): boolean {
   if (argv.length === 0 || (argv.length === 1 && argv[0] === "--dry-run")) return false;
   if (argv.length === 1 && argv[0] === "--apply") return true;
   throw new InputError("cleanup accepts exactly one of --dry-run or --apply");
 }
-
 function parseLogin(argv: string[]): string {
   if (argv.length !== 2 || argv[0] !== "--slot" || !argv[1]) {
     throw new InputError("login requires exactly --slot <id>");
   }
   return argv[1];
 }
-
 function requireValue(argv: string[], index: number, option: string): string {
   const value = argv[index];
   if (!value) throw new InputError(`${option} requires a value`);
   return value;
 }
-
 function defaultTimeoutSeconds(): number {
   return parseTimeout(process.env.GPTPRO_TIMEOUT ?? "10800");
 }
-
 function parseTimeout(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -272,7 +253,6 @@ function parseTimeout(value: string): number {
   }
   return parsed;
 }
-
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) {
@@ -280,7 +260,6 @@ async function readStdin(): Promise<string> {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   main().then((exitCode) => {
     process.exitCode = exitCode;

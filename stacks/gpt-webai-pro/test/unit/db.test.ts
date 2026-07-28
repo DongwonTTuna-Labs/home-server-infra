@@ -3,11 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-
 import Database from "better-sqlite3";
-
 import { GwpDatabase } from "../../src/supervisor/db.js";
-
 const V1_DDL = `
 CREATE TABLE requests (
   id TEXT PRIMARY KEY,
@@ -52,13 +49,11 @@ CREATE TABLE slots (
 );
 PRAGMA user_version = 1;
 `;
-
 test("new databases use the v2 schema, pragmas, constraints, and helpers", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-db-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const db = await GwpDatabase.open(path.join(directory, "db.sqlite"));
   t.after(() => db.close());
-
   assert.equal(db.connection.pragma("user_version", { simple: true }), 2);
   assert.equal(db.connection.pragma("journal_mode", { simple: true }), "wal");
   assert.equal(db.connection.pragma("busy_timeout", { simple: true }), 5000);
@@ -67,19 +62,16 @@ test("new databases use the v2 schema, pragmas, constraints, and helpers", async
     SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name
   `).all().map((row) => (row as { name: string }).name);
   assert.deepEqual(tables, ["artifacts", "requests", "send_attempts", "slots"]);
-
   db.syncSlots([{ id: "slot-a", account: "a", port: 19301 }]);
   assert.equal(db.getSlot("slot-a")?.state, "idle");
   assert.throws(
     () => db.connection.prepare("UPDATE slots SET state = 'busy' WHERE id = 'slot-a'").run(),
     /CHECK constraint/,
   );
-
   const request = db.createRequest("req_0000000000000001", "a".repeat(64), 10);
   assert.equal(request.status, "staged");
   assert.equal(request.created_at, 10);
   assert.throws(() => db.setRequestStatus(request.id, "bogus" as never), /CHECK constraint/);
-
   assert.equal(db.createAttempt(request.id, 1, 11).state, "armed");
   assert.equal(
     db.transitionAttempt(request.id, 1, ["armed"], "no_send_proven", {}, 12).changed,
@@ -91,7 +83,6 @@ test("new databases use the v2 schema, pragmas, constraints, and helpers", async
   );
   assert.equal(db.createAttempt(request.id, 2, 13).attempt_no, 2);
   assert.throws(() => db.createAttempt(request.id, 3), /must be 1 or 2/);
-
   db.addArtifact({
     request_id: request.id,
     filename: "answer.tar.gz",
@@ -102,7 +93,6 @@ test("new databases use the v2 schema, pragmas, constraints, and helpers", async
   });
   assert.equal(db.listArtifacts(request.id)[0]?.filename, "answer.tar.gz");
 });
-
 test("v1 busy slots migrate to v2 idle without losing request data", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-db-v1-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -130,7 +120,6 @@ test("v1 busy slots migrate to v2 idle without losing request data", async (t) =
            ('slot-b', 'b', 'needs_login', NULL, 789)
   `).run();
   v1.close();
-
   const migrated = await GwpDatabase.open(filename);
   assert.equal(migrated.connection.pragma("user_version", { simple: true }), 2);
   assert.equal(migrated.getRequest("req_0000000000000002")?.conversation_url,
@@ -156,14 +145,12 @@ test("v1 busy slots migrate to v2 idle without losing request data", async (t) =
     /CHECK constraint/,
   );
   migrated.close();
-
   const reopened = await GwpDatabase.open(filename);
   t.after(() => reopened.close());
   assert.equal(reopened.connection.pragma("user_version", { simple: true }), 2);
   assert.equal(reopened.getSlot("slot-a")?.state, "idle");
   assert.equal(reopened.listAttempts("req_0000000000000002").length, 1);
 });
-
 test("slot config sync preserves active orphans and removes inactive ones", async () => {
   const db = await GwpDatabase.open(":memory:");
   const original = [
@@ -172,17 +159,14 @@ test("slot config sync preserves active orphans and removes inactive ones", asyn
     { id: "slot-c", account: "c", port: 19303 },
   ];
   db.syncSlots(original);
-
   db.createRequest("req_0000000000000003", "e".repeat(64), 1);
   db.updateRequest("req_0000000000000003", { slot_id: "slot-b" }, 2);
   db.createRequest("req_0000000000000004", "f".repeat(64), 3);
   db.updateRequest("req_0000000000000004", { slot_id: "slot-c", status: "complete" }, 4);
-
   db.syncSlots([{ id: "slot-a", account: "new-a", port: 19301 }]);
   assert.deepEqual(db.listSlots().map((slot) => slot.id), ["slot-a", "slot-b"]);
   assert.equal(db.getSlot("slot-a")?.account, "new-a");
   assert.equal(db.getRequest("req_0000000000000004")?.slot_id, "slot-c");
-
   db.setRequestStatus("req_0000000000000003", "failed");
   db.syncSlots([{ id: "slot-a", account: "new-a", port: 19301 }]);
   assert.deepEqual(db.listSlots().map((slot) => slot.id), ["slot-a"]);

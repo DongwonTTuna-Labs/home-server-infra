@@ -1,12 +1,10 @@
 import { createServer, type Server } from "node:http";
 import { pathToFileURL } from "node:url";
-
 export interface FakeChatGpt {
   port: number;
   baseUrl(scenario: string): string;
   close(): Promise<void>;
 }
-
 export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -15,11 +13,12 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
       response.writeHead(302, { location: "/?scenario=root-redirect&redirected=1" }).end();
       return;
     }
-    if (url.pathname === "/download/report.txt") {
+    if (url.pathname === "/download/report.txt" || url.pathname === "/download/numbers.txt") {
+      const filename = url.pathname.endsWith("numbers.txt") ? "numbers.txt" : "report.txt";
       response.writeHead(200, {
         "content-type": "text/plain",
-        "content-disposition": 'attachment; filename="report.txt"',
-      }).end("report from fake ChatGPT\n");
+        "content-disposition": `attachment; filename="${filename}"`,
+      }).end(filename === "numbers.txt" ? "1\n2\n3\n" : "report from fake ChatGPT\n");
       return;
     }
     if (url.pathname === "/download/archive.tar.gz") {
@@ -45,13 +44,11 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
     close: () => closeServer(server),
   };
 }
-
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
 }
-
 const PAGE = String.raw`<!doctype html>
 <html lang="en">
 <head>
@@ -61,7 +58,7 @@ const PAGE = String.raw`<!doctype html>
     body { font-family: sans-serif; margin: 24px; }
     button, a { min-width: 32px; min-height: 24px; }
     #prompt-textarea { min-height: 48px; min-width: 480px; border: 1px solid #888; }
-    [data-message-author-role] { min-height: 24px; margin: 8px 0; }
+    [data-message-author-role] { min-height: 24px; margin: 8px 0; white-space: pre-wrap; }
     .chip { display: inline-flex; gap: 6px; min-width: 80px; min-height: 24px; }
     .action { display: inline-block; width: 32px; height: 24px; }
   </style>
@@ -84,7 +81,6 @@ const PAGE = String.raw`<!doctype html>
     app.innerHTML = '<section role="alert" data-testid="rate-limit">Too many requests. Try again later.</section>';
     return;
   }
-
   const initialIntelligence = scenario === 'slow' ? 'Pro' : 'Instant';
   const intelligenceLabels = scenario === 'model-missing'
     ? ['Instant', 'Medium', 'High', 'Extra High']
@@ -96,7 +92,6 @@ const PAGE = String.raw`<!doctype html>
     '<button type="button" role="menuitemradio" data-intelligence="' + label + '" aria-checked="' +
       String(label === initialIntelligence) + '">' + intelligenceMarkup(label) + '</button>'
   )).join('');
-
   app.innerHTML =
     '<section id="conversation"></section>' +
     '<form id="composer-form" onsubmit="return false">' +
@@ -113,7 +108,6 @@ const PAGE = String.raw`<!doctype html>
         '</div>' +
       '</div>' +
     '</div>';
-
   const intelligencePill = document.getElementById('intelligence-pill');
   const intelligencePopper = document.getElementById('intelligence-popper');
   const intelligenceItems = Array.from(app.querySelectorAll('[role="menu"] [role="menuitemradio"]'));
@@ -132,7 +126,6 @@ const PAGE = String.raw`<!doctype html>
       intelligencePopper.hidden = true;
     });
   }
-
   const input = app.querySelector('input[type=file]');
   const chips = document.getElementById('chips');
   input.addEventListener('change', () => {
@@ -154,15 +147,24 @@ const PAGE = String.raw`<!doctype html>
       chips.append(root);
     }
   });
-
   let sequence = 0;
   app.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
     const prompt = document.getElementById('prompt-textarea').innerText.trim();
+    const renderedPrompt = scenario === 'markdown-normalization'
+      ? prompt.split('\n').flatMap((raw) => {
+        const line = raw.trim();
+        const fence = line.match(/^\x60{3}([A-Za-z0-9_.+-]+)?$/);
+        return fence ? (fence[1] ? [fence[1]] : []) : [line];
+      }).join('\n')
+      : prompt;
     const conversation = document.getElementById('conversation');
     const user = document.createElement('div');
     user.setAttribute('data-message-author-role', 'user');
     user.setAttribute('data-message-id', 'user-' + tabId + '-' + (++sequence));
-    user.textContent = prompt;
+    const attachmentPrefix = scenario === 'attachments'
+      ? Array.from(chips.querySelectorAll('span')).map((node) => node.textContent + '\nFile').join('\n')
+      : '';
+    user.textContent = attachmentPrefix ? attachmentPrefix + '\n' + renderedPrompt : renderedPrompt;
     const assistant = document.createElement('div');
     assistant.setAttribute('data-message-author-role', 'assistant');
     assistant.setAttribute('data-message-id', scenario === 'assistant-id-rebind'
@@ -173,23 +175,23 @@ const PAGE = String.raw`<!doctype html>
     // 형제로 붙는다 (2026-07-27 실측 구조).
     const assistantArticle = document.createElement('article');
     assistantArticle.append(assistant);
-    conversation.append(user, assistantArticle);
+    conversation.append(user);
+    if (scenario !== 'confirmation-miss') conversation.append(assistantArticle);
     const conversationPath = scenario === 'url-rebind'
       ? '/c/WEB:fake-' + tabId + '-' + sequence
       : '/c/fake-' + tabId + '-' + sequence;
     history.pushState({}, '', conversationPath + '?scenario=' + encodeURIComponent(scenario));
+    if (scenario === 'confirmation-miss') return;
     if (scenario === 'url-rebind') {
       setTimeout(() => {
         history.replaceState({}, '', '/c/final-' + tabId + '-' + sequence + '?scenario=' + encodeURIComponent(scenario));
       }, 500);
     }
-
     const stop = document.createElement('button');
     stop.type = 'button';
     stop.setAttribute('aria-label', 'Stop generating');
     stop.textContent = 'Stop';
     app.append(stop);
-
     if (scenario === 'slow') {
       assistant.textContent = 'still generating';
       return;
@@ -205,10 +207,15 @@ const PAGE = String.raw`<!doctype html>
       finish(assistant, scenario);
     }, 300);
   });
-
   function finish(assistant, currentScenario) {
-    assistant.textContent = currentScenario === 'artifacts'
-      ? 'artifact answer'
+    assistant.textContent = currentScenario === 'artifacts-delayed'
+      ? 'numbers.txt.'
+      : currentScenario === 'artifacts-empty'
+        ? ''
+      : currentScenario === 'artifacts-no-hint'
+        ? 'ordinary answer'
+        : currentScenario === 'artifacts' || currentScenario === 'artifacts-inline'
+          ? 'artifact answer'
       : currentScenario === 'multi-tab'
         ? 'answer for ' + assistant.dataset.prompt
         : 'fake answer';
@@ -227,11 +234,49 @@ const PAGE = String.raw`<!doctype html>
       );
     }
     if (currentScenario === 'artifacts') {
+      assistant.append(fileEntity('/download/report.txt', 'report.txt'));
+      assistant.append(fileEntity('/download/archive.tar.gz', 'archive.tar.gz'));
+    }
+    if (currentScenario === 'artifacts-inline') {
       assistant.append(download('/download/report.txt', 'report.txt'));
       assistant.append(download('/download/archive.tar.gz', 'archive.tar.gz'));
     }
+    if (currentScenario === 'artifacts-delayed' || currentScenario === 'artifacts-empty') {
+      setTimeout(() => assistant.append(fileEntity('/download/numbers.txt', 'numbers.txt', true)), 4000);
+    }
+    if (currentScenario === 'artifacts-no-hint') {
+      setTimeout(() => assistant.append(fileEntity('/download/report.txt', 'report.txt')), 5000);
+    }
   }
-
+  function fileEntity(href, filename, polluting = false) {
+    const entity = document.createElement('button');
+    entity.type = 'button';
+    entity.className = 'behavior-btn';
+    entity.setAttribute('aria-label', filename);
+    entity.textContent = filename;
+    entity.addEventListener('click', () => {
+      const panel = document.createElement('section');
+      panel.dataset.filePreview = filename;
+      const downloadButton = document.createElement('button');
+      downloadButton.type = 'button';
+      downloadButton.setAttribute('aria-label', 'Download');
+      downloadButton.textContent = 'Download';
+      downloadButton.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = filename;
+        document.body.append(link);
+        link.click();
+        link.remove();
+      });
+      panel.append(downloadButton);
+      app.append(panel);
+    });
+    if (!polluting) return entity;
+    const block = document.createElement('div');
+    block.append('Download', entity, '.');
+    return block;
+  }
   function download(href, filename) {
     const link = document.createElement('a');
     link.className = 'action';
@@ -240,7 +285,6 @@ const PAGE = String.raw`<!doctype html>
     link.setAttribute('aria-label', 'Download ' + filename);
     return link;
   }
-
   function duplicateName(name, count) {
     const index = name.lastIndexOf('.');
     return index > 0
@@ -249,14 +293,12 @@ const PAGE = String.raw`<!doctype html>
   }
 })();
 </script></body></html>`;
-
 async function cli(): Promise<void> {
   const index = process.argv.indexOf("--port");
   const port = index >= 0 ? Number(process.argv[index + 1]) : 0;
   const fake = await startFakeChatGpt(port);
   process.stdout.write(`${fake.port}\n`);
 }
-
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   cli().catch((error) => {
     process.stderr.write(`${String(error)}\n`);

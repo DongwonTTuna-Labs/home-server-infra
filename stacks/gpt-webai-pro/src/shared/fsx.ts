@@ -3,15 +3,12 @@ import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { appendFile, copyFile, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-
 export interface FileLock {
   release(): Promise<void>;
 }
-
 export async function mkdirp(directory: string, mode = 0o700): Promise<void> {
   await mkdir(directory, { recursive: true, mode });
 }
-
 export async function atomicWrite(
   target: string,
   data: string | Uint8Array,
@@ -26,17 +23,14 @@ export async function atomicWrite(
     await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
-
 export function sha256Text(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
-
 export async function sha256File(filename: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(filename)) hash.update(chunk);
   return hash.digest("hex");
 }
-
 export async function moveFile(source: string, target: string): Promise<void> {
   await mkdirp(path.dirname(target));
   try {
@@ -47,16 +41,13 @@ export async function moveFile(source: string, target: string): Promise<void> {
     await rm(source);
   }
 }
-
 export async function fileSize(filename: string): Promise<number> {
   return (await stat(filename)).size;
 }
-
 export async function appendJsonLine(filename: string, value: unknown): Promise<void> {
   await mkdirp(path.dirname(filename));
   await appendFile(filename, `${JSON.stringify(value)}\n`, { mode: 0o600 });
 }
-
 export async function tryAcquireFileLock(filename: string): Promise<FileLock | null> {
   await mkdirp(path.dirname(filename));
   const handle = await open(filename, "a", 0o600);
@@ -92,7 +83,6 @@ export async function tryAcquireFileLock(filename: string): Promise<FileLock | n
     await handle.close().catch(() => undefined);
     throw error;
   }
-
   let released = false;
   return {
     async release() {

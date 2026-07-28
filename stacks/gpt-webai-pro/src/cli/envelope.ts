@@ -1,5 +1,4 @@
 import type { Envelope, EnvelopeStatus, PublicArtifact } from "../shared/types.js";
-
 export function makeEnvelope(
   status: EnvelopeStatus,
   values: Partial<Envelope> = {},
@@ -22,11 +21,9 @@ export function makeEnvelope(
     ...values,
   };
 }
-
 export function resumeCommand(sessionId: string): string {
   return `gpt-webai-pro resume --session ${sessionId}`;
 }
-
 export function runningEnvelope(sessionId: string, message: string | null = null): Envelope {
   return makeEnvelope("running", {
     sessionId,
@@ -34,7 +31,6 @@ export function runningEnvelope(sessionId: string, message: string | null = null
     message,
   });
 }
-
 export function recoveringEnvelope(
   sessionId: string,
   errorKind: "provider_limit" | "pool_busy",
@@ -49,7 +45,6 @@ export function recoveringEnvelope(
     message,
   });
 }
-
 export function actionEnvelope(
   sessionId: string | null,
   errorKind: string | null,
@@ -63,7 +58,6 @@ export function actionEnvelope(
     message,
   });
 }
-
 export function failedEnvelope(
   sessionId: string | null,
   errorKind: string,
@@ -71,7 +65,6 @@ export function failedEnvelope(
 ): Envelope {
   return makeEnvelope("failed", { sessionId, errorKind, message });
 }
-
 export function networkFailureEnvelope(
   sessionId: string | null,
   message: string,
@@ -85,7 +78,6 @@ export function networkFailureEnvelope(
     message,
   });
 }
-
 export function completeEnvelope(values: {
   sessionId: string;
   answer: string;
@@ -103,14 +95,12 @@ export function completeEnvelope(values: {
     message: values.message ?? null,
   });
 }
-
 export function emptyPromptEnvelope(): Envelope {
   return makeEnvelope("needs_user_action", {
     usageError: true,
     message: "prompt must not be empty",
   });
 }
-
 export function writeEnvelope(envelope: Envelope): void {
   process.stdout.write(`${JSON.stringify(envelope)}\n`);
 }

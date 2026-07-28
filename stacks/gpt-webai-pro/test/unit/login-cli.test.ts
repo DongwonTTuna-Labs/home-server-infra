@@ -3,7 +3,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-
 const root = path.resolve(import.meta.dirname, "../..");
 const mainUrl = pathToFileURL(path.join(root, "src/cli/main.ts")).href;
 const runUrl = pathToFileURL(path.join(root, "src/supervisor/run.ts")).href;
@@ -50,14 +49,12 @@ const source = `
     ? ["keepalive"]
     : ["login", "--slot", "slot-a"]);
 `;
-
 interface Completion {
   code: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
 }
-
 function start(mode: string): {
   child: ChildProcessWithoutNullStreams;
   completion: Promise<Completion>;
@@ -84,12 +81,10 @@ function start(mode: string): {
   });
   return { child, completion, stderr: () => stderr };
 }
-
 function jsonLine(output: string): unknown {
   assert.equal(output.split("\n").filter(Boolean).length, 1);
   return JSON.parse(output);
 }
-
 test("login CLI emits one stdout JSON object for terminal outcomes", async (t) => {
   await t.test("success keeps progress on stderr", async () => {
     const process = start("success");
@@ -105,7 +100,6 @@ test("login CLI emits one stdout JSON object for terminal outcomes", async (t) =
     assert.match(result.stderr, /로그인 대기 중/);
     assert.match(result.stderr, /경과 5초/);
   });
-
   await t.test("close failure cannot append a second stdout object", async () => {
     const result = await start("close_error").completion;
     assert.equal(result.code, 0, result.stderr);
@@ -117,7 +111,6 @@ test("login CLI emits one stdout JSON object for terminal outcomes", async (t) =
     });
     assert.match(result.stderr, /supervisor close failed: close failed/);
   });
-
   await t.test("timeout is an exit-zero observation", async () => {
     const result = await start("timeout").completion;
     assert.equal(result.code, 0, result.stderr);
@@ -129,7 +122,6 @@ test("login CLI emits one stdout JSON object for terminal outcomes", async (t) =
       message: "login timed out for slot-a",
     });
   });
-
   await t.test("daemon failure is exit zero", async () => {
     const result = await start("daemon").completion;
     assert.equal(result.code, 0, result.stderr);
@@ -140,7 +132,6 @@ test("login CLI emits one stdout JSON object for terminal outcomes", async (t) =
       message: "daemon offline",
     });
   });
-
   await t.test("usage failure is exit two", async () => {
     const result = await start("usage").completion;
     assert.equal(result.code, 2, result.stderr);
@@ -150,7 +141,6 @@ test("login CLI emits one stdout JSON object for terminal outcomes", async (t) =
     });
   });
 });
-
 test("keepalive CLI preserves one JSON object when supervisor close fails", async () => {
   const result = await start("keepalive_close_error").completion;
   assert.equal(result.code, 0, result.stderr);
@@ -160,7 +150,6 @@ test("keepalive CLI preserves one JSON object when supervisor close fails", asyn
   });
   assert.match(result.stderr, /supervisor close failed: close failed/);
 });
-
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   test(`login CLI handles ${signal} after cleanup with exit 130`, async () => {
     const running = start("abort");

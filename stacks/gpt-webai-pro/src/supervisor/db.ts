@@ -1,6 +1,5 @@
 import Database from "better-sqlite3";
 import path from "node:path";
-
 import { mkdirp } from "../shared/fsx.js";
 import type {
   ArtifactRow,
@@ -11,7 +10,6 @@ import type {
   SlotConfig,
   SlotRow,
 } from "../shared/types.js";
-
 const SLOTS_DDL = `
 CREATE TABLE slots (
   id             TEXT PRIMARY KEY,
@@ -20,7 +18,6 @@ CREATE TABLE slots (
                  ('idle','needs_login','provider_limit')),
   cooldown_until INTEGER, last_used_at INTEGER
 );`;
-
 const DDL = `
 CREATE TABLE requests (
   id            TEXT PRIMARY KEY,
@@ -52,7 +49,6 @@ CREATE TABLE artifacts (
 );
 ${SLOTS_DDL}
 `;
-
 type RequestPatch = Partial<Pick<
   RequestRow,
   | "status"
@@ -62,14 +58,11 @@ type RequestPatch = Partial<Pick<
   | "error_kind"
   | "error_detail"
 >>;
-
 export class GwpDatabase {
   readonly connection: Database.Database;
-
   private constructor(connection: Database.Database) {
     this.connection = connection;
   }
-
   static async open(filename: string): Promise<GwpDatabase> {
     if (filename !== ":memory:") await mkdirp(path.dirname(filename));
     const connection = new Database(filename);
@@ -104,11 +97,9 @@ export class GwpDatabase {
     }
     return new GwpDatabase(connection);
   }
-
   close(): void {
     this.connection.close();
   }
-
   immediate<T>(operation: () => T): T {
     this.connection.exec("BEGIN IMMEDIATE");
     try {
@@ -120,7 +111,6 @@ export class GwpDatabase {
       throw error;
     }
   }
-
   createRequest(id: string, promptSha256: string, now = Date.now()): RequestRow {
     this.connection.prepare(`
       INSERT INTO requests
@@ -129,12 +119,10 @@ export class GwpDatabase {
     `).run(id, promptSha256, now, now);
     return this.getRequest(id)!;
   }
-
   getRequest(id: string): RequestRow | undefined {
     return this.connection.prepare("SELECT * FROM requests WHERE id = ?")
       .get(id) as RequestRow | undefined;
   }
-
   updateRequest(id: string, patch: RequestPatch, now = Date.now()): RequestRow {
     const allowed = [
       "status",
@@ -153,7 +141,6 @@ export class GwpDatabase {
       .run(...entries.map(([, value]) => value), now, id);
     return this.requireRequest(id);
   }
-
   setRequestStatus(
     id: string,
     status: RequestStatus,
@@ -167,7 +154,6 @@ export class GwpDatabase {
       error_detail: errorDetail,
     }, now);
   }
-
   createAttempt(requestId: string, attemptNo: number, now = Date.now()): SendAttemptRow {
     if (attemptNo !== 1 && attemptNo !== 2) throw new Error("send attempt must be 1 or 2");
     this.connection.prepare(`
@@ -177,25 +163,21 @@ export class GwpDatabase {
     `).run(requestId, attemptNo, now, now);
     return this.getAttempt(requestId, attemptNo)!;
   }
-
   getAttempt(requestId: string, attemptNo: number): SendAttemptRow | undefined {
     return this.connection.prepare(`
       SELECT * FROM send_attempts WHERE request_id = ? AND attempt_no = ?
     `).get(requestId, attemptNo) as SendAttemptRow | undefined;
   }
-
   latestAttempt(requestId: string): SendAttemptRow | undefined {
     return this.connection.prepare(`
       SELECT * FROM send_attempts WHERE request_id = ? ORDER BY attempt_no DESC LIMIT 1
     `).get(requestId) as SendAttemptRow | undefined;
   }
-
   listAttempts(requestId: string): SendAttemptRow[] {
     return this.connection.prepare(`
       SELECT * FROM send_attempts WHERE request_id = ? ORDER BY attempt_no
     `).all(requestId) as SendAttemptRow[];
   }
-
   transitionAttempt(
     requestId: string,
     attemptNo: number,
@@ -225,7 +207,6 @@ export class GwpDatabase {
     if (!row) throw new Error(`missing send attempt ${requestId}/${attemptNo}`);
     return { changed: result.changes === 1, row };
   }
-
   rebindAssistantTurnId(
     requestId: string,
     attemptNo: number,
@@ -245,7 +226,6 @@ export class GwpDatabase {
         || current.assistant_turn_id === observedAssistantTurnId) {
         return { changed: false, row: current };
       }
-
       const result = this.connection.prepare(`
         UPDATE send_attempts
         SET assistant_turn_id = ?, updated_at = ?
@@ -270,7 +250,6 @@ export class GwpDatabase {
       return { changed: result.changes === 1, row };
     });
   }
-
   addArtifact(row: ArtifactRow): void {
     this.connection.prepare(`
       INSERT INTO artifacts
@@ -290,13 +269,11 @@ export class GwpDatabase {
       row.created_at,
     );
   }
-
   listArtifacts(requestId: string): ArtifactRow[] {
     return this.connection.prepare(`
       SELECT * FROM artifacts WHERE request_id = ? ORDER BY filename
     `).all(requestId) as ArtifactRow[];
   }
-
   syncSlots(slots: SlotConfig[]): void {
     const statement = this.connection.prepare(`
       INSERT INTO slots (id, account) VALUES (?, ?)
@@ -312,16 +289,13 @@ export class GwpDatabase {
       }
     });
   }
-
   getSlot(id: string): SlotRow | undefined {
     return this.connection.prepare("SELECT * FROM slots WHERE id = ?")
       .get(id) as SlotRow | undefined;
   }
-
   listSlots(): SlotRow[] {
     return this.connection.prepare("SELECT * FROM slots ORDER BY id").all() as SlotRow[];
   }
-
   listNonterminalRequests(): RequestRow[] {
     return this.connection.prepare(`
       SELECT * FROM requests
@@ -329,7 +303,6 @@ export class GwpDatabase {
       ORDER BY created_at
     `).all() as RequestRow[];
   }
-
   countActiveForSlot(slotId: string, excludingRequestId?: string): number {
     const suffix = excludingRequestId ? " AND id <> ?" : "";
     const parameters = excludingRequestId ? [slotId, excludingRequestId] : [slotId];
@@ -340,12 +313,10 @@ export class GwpDatabase {
     `).get(...parameters) as { count: number };
     return Number(row.count);
   }
-
   private requireRequest(id: string): RequestRow {
     const row = this.getRequest(id);
     if (!row) throw new Error(`unknown request ${id}`);
     return row;
   }
 }
-
 export { DDL };

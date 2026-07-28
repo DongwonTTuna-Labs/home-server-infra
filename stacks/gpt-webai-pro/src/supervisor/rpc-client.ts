@@ -1,7 +1,5 @@
 import { readFile } from "node:fs/promises";
-
 import WebSocket, { type RawData } from "ws";
-
 import {
   DAEMON_ERROR_KINDS,
   GwpError,
@@ -9,13 +7,11 @@ import {
   type SendPhase,
 } from "../shared/errors.js";
 import type { RpcMethod, RpcMethods } from "../shared/types.js";
-
 interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
   timer: NodeJS.Timeout;
 }
-
 interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: number;
@@ -23,20 +19,24 @@ interface JsonRpcResponse {
   error?: {
     code: number;
     message: string;
-    data?: { kind?: string; phase?: SendPhase; detail?: string };
+    data?: {
+      kind?: string;
+      phase?: SendPhase;
+      detail?: string;
+      pendingUserTurnId?: string;
+      pendingConversationUrl?: string;
+      preClickBaseline?: string[];
+    };
   };
 }
-
 export class RpcClient {
   private nextId = 1;
   private readonly pending = new Map<number, PendingCall>();
-
   private constructor(private readonly socket: WebSocket) {
     socket.on("message", (data) => this.onMessage(data));
     socket.on("close", () => this.rejectAll(new Error("daemon connection closed")));
     socket.on("error", (error) => this.rejectAll(error));
   }
-
   static async connect(port: number, tokenPath: string, timeoutMs = 10_000): Promise<RpcClient> {
     const token = (await readFile(tokenPath, "utf8")).trim();
     if (!/^[0-9a-f]{32}$/.test(token)) {
@@ -77,7 +77,6 @@ export class RpcClient {
     });
     return new RpcClient(socket);
   }
-
   call<M extends RpcMethod>(
     method: M,
     params: RpcMethods[M]["params"],
@@ -105,7 +104,6 @@ export class RpcClient {
       });
     });
   }
-
   async close(): Promise<void> {
     if (this.socket.readyState === WebSocket.CLOSED) return;
     await new Promise<void>((resolve) => {
@@ -117,7 +115,6 @@ export class RpcClient {
       }, 1_000).unref();
     });
   }
-
   private onMessage(data: RawData): void {
     let response: JsonRpcResponse;
     try {
@@ -136,15 +133,25 @@ export class RpcClient {
         ? rawKind as DaemonErrorKind
         : "internal";
       const detail = response.error.data?.detail ?? response.error.message;
-      const options = response.error.data?.phase
-        ? { phase: response.error.data.phase }
-        : {};
-      pending.reject(new GwpError(kind, detail, options));
+      const phase = response.error.data?.phase;
+      const pendingUserTurnId = response.error.data?.pendingUserTurnId;
+      const pendingConversationUrl = response.error.data?.pendingConversationUrl;
+      const preClickBaseline = response.error.data?.preClickBaseline;
+      pending.reject(new GwpError(kind, detail, {
+        ...(phase === "pre_click" || phase === "post_click" ? { phase } : {}),
+        ...(typeof pendingUserTurnId === "string" && pendingUserTurnId
+          ? { pendingUserTurnId }
+          : {}),
+        ...(typeof pendingConversationUrl === "string" ? { pendingConversationUrl } : {}),
+        ...(Array.isArray(preClickBaseline)
+          && preClickBaseline.every((item) => typeof item === "string")
+          ? { preClickBaseline }
+          : {}),
+      }));
       return;
     }
     pending.resolve(response.result);
   }
-
   private rejectAll(error: unknown): void {
     for (const call of this.pending.values()) {
       clearTimeout(call.timer);

@@ -4,38 +4,32 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-
 import {
   emptyPromptEnvelope,
   networkFailureEnvelope,
   recoveringEnvelope,
   runningEnvelope,
 } from "../../src/cli/envelope.js";
-
 test("envelope contract cases are closed and stable", () => {
   const empty = emptyPromptEnvelope();
   assert.equal(empty.ok, true);
   assert.equal(empty.usageError, true);
   assert.equal(empty.status, "needs_user_action");
   assert.equal(empty.hardFailure, false);
-
   const running = runningEnvelope("req_aaaaaaaaaaaaaaaa");
   assert.equal(running.status, "running");
   assert.equal(running.sessionId, "req_aaaaaaaaaaaaaaaa");
   assert.equal(running.resumeCommand, "gpt-webai-pro resume --session req_aaaaaaaaaaaaaaaa");
   assert.equal(running.nextCommand, null);
-
   const busy = recoveringEnvelope("req_bbbbbbbbbbbbbbbb", "pool_busy", "busy");
   assert.equal(busy.status, "recovering");
   assert.equal(busy.nextCommand, busy.resumeCommand);
-
   const network = networkFailureEnvelope("req_cccccccccccccccc", "offline proof");
   assert.equal(network.ok, false);
   assert.equal(network.hardFailure, true);
   assert.equal(network.networkDisconnected, true);
   assert.equal(network.errorKind, "network_disconnected");
 });
-
 test("empty prompt exits zero, emits one JSON line, and creates no state", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-empty-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -50,7 +44,6 @@ test("empty prompt exits zero, emits one JSON line, and creates no state", async
   assert.equal(JSON.parse(result.stdout).usageError, true);
   await assert.rejects(access(stateDir));
 });
-
 test("other input errors use exit 2 and an envelope", () => {
   const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli/main.ts", "run", "--bogus"], {
     cwd: path.resolve(import.meta.dirname, "../.."),
@@ -61,7 +54,6 @@ test("other input errors use exit 2 and an envelope", () => {
   assert.equal(envelope.usageError, true);
   assert.equal(envelope.status, "needs_user_action");
 });
-
 test("status uses its own exact JSON shape rather than a request envelope", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-status-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

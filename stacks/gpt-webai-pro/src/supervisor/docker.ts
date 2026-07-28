@@ -3,13 +3,11 @@ import { execFile } from "node:child_process";
 import { chmod } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-
 import { atomicWrite, mkdirp } from "../shared/fsx.js";
 import type { SlotConfig } from "../shared/types.js";
 import { RpcClient } from "./rpc-client.js";
-
 const execFileAsync = promisify(execFile);
-
+export const CONTAINER_OUTBOX = "/outbox";
 export const CREATE_LIMIT_ARGS = [
   "--memory", "3g",
   "--cpus", "2",
@@ -18,36 +16,30 @@ export const CREATE_LIMIT_ARGS = [
   "--security-opt", "no-new-privileges",
   "--cap-drop", "ALL",
 ] as const;
-
 export interface ContainerState {
   exists: boolean;
   running: boolean;
   startedAt: number | null;
 }
-
 export interface SlotPaths {
   profile: string;
   tokenPath: string;
   inbox: string;
   outbox: string;
 }
-
 export interface DaemonEndpoint {
   port: number;
   tokenPath: string;
 }
-
 export interface ContainerOptions {
   loginMode?: boolean;
 }
-
 export class DockerManager {
   constructor(
     readonly stateDir: string,
     readonly image: string,
     readonly baseUrl = process.env.GWP_BASE_URL ?? "https://chatgpt.com",
   ) {}
-
   paths(slotId: string): SlotPaths {
     const root = path.join(this.stateDir, "slots", slotId);
     return {
@@ -57,11 +49,9 @@ export class DockerManager {
       outbox: path.join(root, "outbox"),
     };
   }
-
   containerName(slotId: string): string {
     return `gwp-${slotId}`;
   }
-
   async ensure(
     slot: SlotConfig,
     timeoutMs = 60_000,
@@ -74,7 +64,6 @@ export class DockerManager {
       await waitForDaemon(endpoint, timeoutMs);
       return endpoint;
     }
-
     await Promise.all([
       mkdirp(paths.profile),
       mkdirp(paths.inbox),
@@ -97,7 +86,6 @@ export class DockerManager {
     await waitForDaemon(endpoint, timeoutMs);
     return endpoint;
   }
-
   async create(
     slot: SlotConfig,
     token: string,
@@ -106,7 +94,6 @@ export class DockerManager {
   ): Promise<void> {
     await docker(this.createArguments(slot, token, paths, options));
   }
-
   createArguments(
     slot: SlotConfig,
     token: string,
@@ -132,34 +119,30 @@ export class DockerManager {
         : []),
       "--mount", `type=bind,src=${paths.profile},dst=/profile`,
       "--mount", `type=bind,src=${paths.inbox},dst=/inbox,readonly`,
-      "--mount", `type=bind,src=${paths.outbox},dst=/outbox`,
+      "--mount", `type=bind,src=${paths.outbox},dst=${CONTAINER_OUTBOX}`,
       "--env", `GWP_BASE_URL=${this.baseUrl}`,
       "--env", "GWP_CDP_URL=http://127.0.0.1:9222",
       "--env", `GWP_DAEMON_PORT=${slot.port}`,
       "--env", `GWP_DAEMON_TOKEN=${token}`,
-      "--env", "GWP_OUTBOX_DIR=/outbox",
+      "--env", `GWP_OUTBOX_DIR=${CONTAINER_OUTBOX}`,
       ...(loginMode
         ? ["--env", "GWP_LOGIN_MODE=1", "--env", `GWP_NOVNC_PORT=${noVncPort}`]
         : []),
       this.image,
     ];
   }
-
   async start(slotId: string): Promise<void> {
     await docker(["start", this.containerName(slotId)]);
   }
-
   async stop(slotId: string): Promise<void> {
     const state = await this.inspect(slotId);
     // -t 40: entrypoint가 SIGTERM을 Chrome까지 전달하고 클린 종료(프로필 flush)를
     // 기다린다 — 기본 10초 유예로는 SIGKILL로 넘어가 로그인 쿠키가 유실될 수 있다.
     if (state.exists && state.running) await docker(["stop", "-t", "40", this.containerName(slotId)]);
   }
-
   private async remove(slotId: string): Promise<void> {
     await docker(["rm", this.containerName(slotId)]);
   }
-
   async inspect(slotId: string): Promise<ContainerState> {
     try {
       const output = await docker(["inspect", this.containerName(slotId)]);
@@ -180,14 +163,21 @@ export class DockerManager {
     }
   }
 }
-
+export function mapContainerOutboxPath(containerPath: string, hostOutbox: string): string {
+  if (!containerPath.startsWith(`${CONTAINER_OUTBOX}${path.sep}`)) {
+    throw new Error("artifact path is outside slot outbox");
+  }
+  const outbox = path.resolve(hostOutbox);
+  const source = path.resolve(path.join(outbox, path.relative(CONTAINER_OUTBOX, containerPath)));
+  if (!source.startsWith(`${outbox}${path.sep}`)) throw new Error("artifact path is outside slot outbox");
+  return source;
+}
 export async function rotateDaemonToken(tokenPath: string): Promise<string> {
   const token = randomBytes(16).toString("hex");
   await atomicWrite(tokenPath, `${token}\n`, 0o600);
   await chmod(tokenPath, 0o600);
   return token;
 }
-
 async function docker(args: string[]): Promise<string> {
   try {
     const result = await execFileAsync("docker", args, {
@@ -207,7 +197,6 @@ async function docker(args: string[]): Promise<string> {
     throw error;
   }
 }
-
 async function waitForDaemon(endpoint: DaemonEndpoint, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

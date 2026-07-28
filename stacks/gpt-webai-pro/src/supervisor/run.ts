@@ -1,78 +1,32 @@
 import { access, copyFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
-import {
-  actionEnvelope,
-  completeEnvelope,
-  failedEnvelope,
-  networkFailureEnvelope,
-  recoveringEnvelope,
-  runningEnvelope,
-} from "../cli/envelope.js";
-import {
-  GwpError,
-  errorMessage,
-  isDirectNetworkFailure,
-  type PublicErrorKind,
-} from "../shared/errors.js";
-import {
-  appendJsonLine,
-  atomicWrite,
-  fileSize,
-  mkdirp,
-  moveFile,
-  sha256File,
-  sha256Text,
-  tryAcquireFileLock,
-} from "../shared/fsx.js";
+import { actionEnvelope, completeEnvelope, failedEnvelope, networkFailureEnvelope, recoveringEnvelope, runningEnvelope } from "../cli/envelope.js";
+import { GwpError, errorMessage, isDirectNetworkFailure, type PublicErrorKind } from "../shared/errors.js";
+import { appendJsonLine, atomicWrite, fileSize, mkdirp, moveFile, sha256File, sha256Text, tryAcquireFileLock } from "../shared/fsx.js";
 import { newRequestId } from "../shared/ids.js";
-import type {
-  Envelope,
-  PollResult,
-  PublicArtifact,
-  ReadinessResult,
-  ReconcileResult,
-  RequestRow,
-  RpcFile,
-  SendResult,
-  SlotConfig,
-  SlotState,
-  SlotsConfig,
-} from "../shared/types.js";
+import type { Envelope, PollResult, PublicArtifact, ReadinessResult, ReconcileResult, RequestRow, RpcFile, SendResult, SlotConfig, SlotState, SlotsConfig } from "../shared/types.js";
 import { GwpDatabase } from "./db.js";
-import { DockerManager } from "./docker.js";
+import { DockerManager, mapContainerOutboxPath } from "./docker.js";
 import { RpcClient } from "./rpc-client.js";
-import {
-  claimSlotForRequest,
-  markSlotIdle,
-  markSlotNeedsLogin,
-  markSlotProviderLimit,
-} from "./slots.js";
-
+import { claimSlotForRequest, markSlotIdle, markSlotNeedsLogin, markSlotProviderLimit } from "./slots.js";
 const ACTIVE_STATUSES = new Set(["staged", "sending", "generating", "uncertain"]);
 const TERMINAL_STATUSES = new Set(["complete", "needs_user_action", "failed"]);
 const SEND_IN_PROGRESS_MESSAGE = "전송 진행 중(소유 프로세스 생존)";
-
 interface ValidatedFile {
   source: string;
   name: string;
 }
-
 export class InputError extends Error {
   override readonly name = "InputError";
 }
-
 export class LoginTimeoutError extends Error {
   override readonly name = "LoginTimeoutError";
 }
-
 export class LoginInterruptedError extends Error {
   override readonly name = "LoginInterruptedError";
 }
-
 export type KeepaliveProbe = ReadinessResult["state"] | "unreachable";
-
 export interface LoginOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -80,11 +34,9 @@ export interface LoginOptions {
   onUrl?: (url: string) => void;
   onProgress?: (elapsedMs: number, state: ReadinessResult["state"]) => void;
 }
-
 export class Supervisor {
   readonly db: GwpDatabase;
   readonly docker: DockerManager;
-
   private constructor(
     readonly stateDir: string,
     readonly config: SlotsConfig,
@@ -93,7 +45,6 @@ export class Supervisor {
     this.db = db;
     this.docker = new DockerManager(stateDir, config.image);
   }
-
   static async open(options: {
     stateDir?: string;
     configPath?: string;
@@ -106,11 +57,9 @@ export class Supervisor {
     db.syncSlots(config.slots);
     return new Supervisor(stateDir, config, db);
   }
-
   close(): void {
     this.db.close();
   }
-
   async run(prompt: string, files: string[], timeoutSeconds: number): Promise<Envelope> {
     if (!prompt.trim()) throw new InputError("prompt must not be empty");
     const validated = await validateFiles(files);
@@ -128,12 +77,10 @@ export class Supervisor {
     }
     return this.continue(id, timeoutSeconds);
   }
-
   async resume(id: string, timeoutSeconds: number): Promise<Envelope> {
     if (!this.db.getRequest(id)) throw new InputError(`unknown session: ${id}`);
     return this.continue(id, timeoutSeconds);
   }
-
   async status(): Promise<{
     ok: true;
     slots: Array<{
@@ -172,7 +119,6 @@ export class Supervisor {
       })),
     };
   }
-
   async keepalive(): Promise<{
     ok: true;
     slots: Array<{ id: string; state: SlotState; probe: KeepaliveProbe }>;
@@ -185,7 +131,6 @@ export class Supervisor {
         slots.push({ id: slot.id, state: current.state, probe: "unknown" });
         continue;
       }
-
       let wasRunning: boolean | null = null;
       let client: RpcClient | null = null;
       let probe: KeepaliveProbe = "unknown";
@@ -211,7 +156,6 @@ export class Supervisor {
     }
     return { ok: true, slots };
   }
-
   async login(
     slotId: string,
     options: LoginOptions = {},
@@ -227,7 +171,6 @@ export class Supervisor {
       || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
       throw new InputError("login polling intervals are invalid");
     }
-
     const url = `http://127.0.0.1:${slot.port + 600}/vnc.html`;
     let client: RpcClient | null = null;
     let readyObserved = false;
@@ -274,7 +217,6 @@ export class Supervisor {
       else if (timedOut) markSlotNeedsLogin(this.db, slot.id);
     }
   }
-
   async cleanup(apply: boolean): Promise<{
     ok: true;
     dryRun: boolean;
@@ -334,7 +276,6 @@ export class Supervisor {
         actions.push({ kind: "recover_login_slot", target: row.id, detail: "readiness is ready; set idle" });
       }
     }
-
     const cutoff = Date.now() - 30 * 60 * 1_000;
     for (const slot of this.config.slots) {
       if (slot.unmanaged === true || this.db.countActiveForSlot(slot.id) > 0) continue;
@@ -350,7 +291,6 @@ export class Supervisor {
     }
     return { ok: true, dryRun: !apply, actions };
   }
-
   async release(id: string): Promise<Envelope> {
     if (!this.db.getRequest(id)) throw new InputError(`unknown session: ${id}`);
     const sendLock = await tryAcquireFileLock(this.sendLockPath(id));
@@ -364,7 +304,6 @@ export class Supervisor {
       await sendLock.release();
     }
   }
-
   private async continue(
     id: string,
     timeoutSeconds: number,
@@ -376,26 +315,21 @@ export class Supervisor {
     const triedSlots = new Set<string>();
     let sawLogin = false;
     let sawProviderLimit = false;
-
     for (;;) {
       let request = this.requireRequest(id);
       if (TERMINAL_STATUSES.has(request.status)) return this.envelopeFor(request);
-
       if (request.status === "sending" || request.status === "uncertain") {
         const outcome = await this.recoverSendState(request, deadline);
         if (outcome) return outcome;
         continue;
       }
-
       if (request.status === "generating") {
         return this.pollUntilDeadline(request, deadline);
       }
-
       if (request.status !== "staged") {
         this.db.setRequestStatus(id, "failed", "internal", `unsupported request state ${request.status}`);
         continue;
       }
-
       if (!request.slot_id) {
         const claim = claimSlotForRequest(
           this.db,
@@ -426,7 +360,6 @@ export class Supervisor {
           return recoveringEnvelope(id, "pool_busy", "no idle slot is currently available");
         }
       }
-
       const slot = this.requireSlotConfig(request.slot_id!);
       await this.stageFiles(request);
       let client: RpcClient | null = null;
@@ -481,7 +414,6 @@ export class Supervisor {
       }
     }
   }
-
   private async send(
     request: RequestRow,
     slot: SlotConfig,
@@ -503,7 +435,6 @@ export class Supervisor {
       await client.close().catch(() => undefined);
       return runningEnvelope(request.id, SEND_IN_PROGRESS_MESSAGE);
     }
-
     try {
       const current = this.requireRequest(request.id);
       if (current.status !== "staged" || current.slot_id !== slot.id) {
@@ -512,7 +443,6 @@ export class Supervisor {
       }
       const attemptNo = armSendAttempt(this.db, request.id);
       this.log(request.id, "sending", `attempt ${attemptNo} armed`);
-
       try {
         const result = await client.call("send", { prompt, files, newConversation: true }, 180_000);
         const finalState = confirmSendAttempt(this.db, request.id, result);
@@ -561,8 +491,24 @@ export class Supervisor {
             ? networkFailureEnvelope(request.id, message)
             : failedEnvelope(request.id, "internal", message);
         }
-
-        const finalState = markSendUncertain(this.db, request.id, errorMessage(error));
+        const finalState = markSendUncertain(
+          this.db,
+          request.id,
+          errorMessage(error),
+          error instanceof GwpError
+            ? {
+                ...(error.pendingUserTurnId
+                  ? { pendingUserTurnId: error.pendingUserTurnId }
+                  : {}),
+                ...(error.pendingConversationUrl
+                  ? { pendingConversationUrl: error.pendingConversationUrl }
+                  : {}),
+                ...(error.preClickBaseline
+                  ? { preClickBaseline: error.preClickBaseline }
+                  : {}),
+              }
+            : undefined,
+        );
         await client.close().catch(() => undefined);
         if (finalState === "confirmed" || finalState === "reconciled") return null;
         this.log(request.id, "uncertain", errorMessage(error));
@@ -572,7 +518,6 @@ export class Supervisor {
       await sendLock.release();
     }
   }
-
   private async recoverSendState(
     request: RequestRow,
     deadline: number,
@@ -603,7 +548,6 @@ export class Supervisor {
       await sendLock.release();
     }
   }
-
   private async reconcile(request: RequestRow, deadline: number): Promise<Envelope | null> {
     const attempt = this.db.latestAttempt(request.id);
     if (!attempt || attempt.state !== "uncertain") {
@@ -617,20 +561,29 @@ export class Supervisor {
     try {
       const slot = this.requireSlotConfig(request.slot_id);
       client = await this.connectDaemon(slot);
+      const prompt = await readFile(path.join(this.requestDir(request.id), "prompt.md"), "utf8");
       const promptSha256 = this.requireRequest(request.id).prompt_sha256;
+      const anchor = decodeSendAnchor(request.error_detail);
+      const pendingConversationUrl = anchor?.pendingConversationUrl
+        ?? request.conversation_url
+        ?? undefined;
       const result = await client.call("reconcile", {
+        prompt,
         promptSha256,
-        ...(request.conversation_url ? { conversationUrl: request.conversation_url } : {}),
+        ...(attempt.user_turn_id ? { pendingUserTurnId: attempt.user_turn_id } : {}),
+        ...(request.conversation_url && isValidConversationPointer(request.conversation_url)
+          ? { conversationUrl: request.conversation_url }
+          : {}),
+        ...(pendingConversationUrl ? { pendingConversationUrl } : {}),
+        ...(anchor?.preClickBaseline ? { preClickBaseline: anchor.preClickBaseline } : {}),
       }, Math.max(5_000, Math.min(65_000, deadline - Date.now() + 5_000)));
       await client.close();
       client = null;
-
       const decision = applyReconcileResult(this.db, request.id, result);
       if (decision === "found") {
         this.log(request.id, "generating", "uncertain send reconciled as found");
         return null;
       }
-
       if (decision === "retry_send") {
         this.log(request.id, "staged", "reconcile proved no send; attempt 2 allowed");
         return null;
@@ -639,7 +592,6 @@ export class Supervisor {
         await this.releaseRuntime(this.requireRequest(request.id));
         return actionEnvelope(request.id, "send_uncertain", "two attempts ended without a confirmed send");
       }
-
       return actionEnvelope(
         request.id,
         "send_uncertain",
@@ -656,7 +608,6 @@ export class Supervisor {
       );
     }
   }
-
   private async pollUntilDeadline(request: RequestRow, deadline: number): Promise<Envelope> {
     if (!request.slot_id || !request.conversation_url) {
       this.db.setRequestStatus(request.id, "failed", "internal", "generating request is missing slot or conversation URL");
@@ -708,7 +659,6 @@ export class Supervisor {
           await new Promise((resolve) => setTimeout(resolve, 25));
           continue;
         }
-
         const envelope = await this.finalizeComplete(current, slot, client, result);
         client = null;
         return envelope;
@@ -723,7 +673,6 @@ export class Supervisor {
       );
     }
   }
-
   private updateConversationPointer(request: RequestRow, currentUrl: string): RequestRow {
     let changed = false;
     const result = this.db.immediate(() => {
@@ -745,7 +694,6 @@ export class Supervisor {
     if (changed) this.log(request.id, "generating", `conversation URL updated to ${currentUrl}`);
     return result;
   }
-
   private async finalizeComplete(
     request: RequestRow,
     slot: SlotConfig,
@@ -763,8 +711,8 @@ export class Supervisor {
         await client.close().catch(() => undefined);
         return this.envelopeFor(current);
       }
-      if (!result.answerMarkdown || !result.answerSha256
-        || sha256Text(result.answerMarkdown) !== result.answerSha256) {
+      if (result.answerMarkdown === undefined || !result.answerSha256
+        || sha256Text(result.answerMarkdown) !== result.answerSha256 || (!result.answerMarkdown && !result.artifactControls?.length)) {
         throw new Error("daemon returned an invalid complete answer");
       }
       const answerPath = path.join(this.requestDir(request.id), "answer.md");
@@ -807,7 +755,6 @@ export class Supervisor {
       await finalizationLock.release();
     }
   }
-
   private async finishGeneratingFailure(
     requestId: string,
     errorKind: PublicErrorKind,
@@ -831,70 +778,68 @@ export class Supervisor {
       await failureLock.release();
     }
   }
-
   private async storeArtifact(
     request: RequestRow,
     slot: SlotConfig,
     downloaded: { filename: string; outboxPath: string; sha256: string; sizeBytes: number },
   ): Promise<void> {
-    const filename = path.basename(downloaded.filename);
-    if (!filename || filename !== downloaded.filename || filename === "." || filename === "..") {
-      throw new Error("daemon returned an unsafe artifact filename");
-    }
-    if (slot.unmanaged !== true) {
-      const outbox = path.resolve(this.docker.paths(slot.id).outbox);
-      const source = path.resolve(downloaded.outboxPath);
-      if (!source.startsWith(`${outbox}${path.sep}`)) throw new Error("artifact path is outside slot outbox");
-    }
-    if (await sha256File(downloaded.outboxPath) !== downloaded.sha256
-      || await fileSize(downloaded.outboxPath) !== downloaded.sizeBytes) {
-      throw new Error("artifact metadata does not match outbox bytes");
-    }
-    const target = path.join(this.requestDir(request.id), "artifacts", filename);
+    const managed = slot.unmanaged !== true;
+    const source = managed
+      ? mapContainerOutboxPath(downloaded.outboxPath, this.docker.paths(slot.id).outbox)
+      : downloaded.outboxPath;
     try {
-      await access(target);
-      const targetSha256 = await sha256File(target);
-      const targetSize = await fileSize(target);
-      if (targetSha256 !== downloaded.sha256 || targetSize !== downloaded.sizeBytes) {
-        throw new Error(`duplicate artifact filename: ${filename}`);
+      const filename = path.basename(downloaded.filename);
+      if (!filename || filename !== downloaded.filename || filename === "." || filename === "..") {
+        throw new Error("daemon returned an unsafe artifact filename");
       }
-      if (path.resolve(downloaded.outboxPath) !== path.resolve(target)) {
-        await rm(downloaded.outboxPath, { force: true });
+      if (await sha256File(source) !== downloaded.sha256
+        || await fileSize(source) !== downloaded.sizeBytes) {
+        throw new Error("artifact metadata does not match outbox bytes");
+      }
+      const target = path.join(this.requestDir(request.id), "artifacts", filename);
+      try {
+        await access(target);
+        const targetSha256 = await sha256File(target);
+        const targetSize = await fileSize(target);
+        if (targetSha256 !== downloaded.sha256 || targetSize !== downloaded.sizeBytes) {
+          throw new Error(`duplicate artifact filename: ${filename}`);
+        }
+        if (path.resolve(source) !== path.resolve(target)) await rm(source, { force: true });
+        this.db.addArtifact({
+          request_id: request.id,
+          filename,
+          path: target,
+          sha256: targetSha256,
+          size_bytes: targetSize,
+          created_at: Date.now(),
+        });
+        return;
+      } catch (error) {
+        if (error instanceof Error && !("code" in error && error.code === "ENOENT")) throw error;
+      }
+      await moveFile(source, target);
+      const sha256 = await sha256File(target);
+      const sizeBytes = await fileSize(target);
+      if (sha256 !== downloaded.sha256 || sizeBytes !== downloaded.sizeBytes) {
+        throw new Error("stored artifact bytes changed during transfer");
       }
       this.db.addArtifact({
         request_id: request.id,
         filename,
         path: target,
-        sha256: targetSha256,
-        size_bytes: targetSize,
+        sha256,
+        size_bytes: sizeBytes,
         created_at: Date.now(),
       });
-      return;
-    } catch (error) {
-      if (error instanceof Error && !(("code" in error) && error.code === "ENOENT")) throw error;
+    } finally {
+      if (managed) await rm(source, { force: true });
     }
-    await moveFile(downloaded.outboxPath, target);
-    const sha256 = await sha256File(target);
-    const sizeBytes = await fileSize(target);
-    if (sha256 !== downloaded.sha256 || sizeBytes !== downloaded.sizeBytes) {
-      throw new Error("stored artifact bytes changed during transfer");
-    }
-    this.db.addArtifact({
-      request_id: request.id,
-      filename,
-      path: target,
-      sha256,
-      size_bytes: sizeBytes,
-      created_at: Date.now(),
-    });
   }
-
   private async persistAttachments(requestId: string, files: ValidatedFile[]): Promise<void> {
     const directory = path.join(this.requestDir(requestId), "attachments");
     await mkdirp(directory);
     for (const file of files) await copyFile(file.source, path.join(directory, file.name));
   }
-
   private async stageFiles(request: RequestRow): Promise<void> {
     if (!request.slot_id) return;
     const attachments = path.join(this.requestDir(request.id), "attachments");
@@ -906,7 +851,6 @@ export class Supervisor {
       await copyFile(path.join(attachments, name), path.join(inbox, name));
     }
   }
-
   private async rpcFiles(requestId: string, slot: SlotConfig): Promise<RpcFile[]> {
     const inbox = path.join(this.docker.paths(slot.id).inbox, requestId);
     let names: string[] = [];
@@ -922,7 +866,6 @@ export class Supervisor {
         : path.posix.join("/inbox", requestId, name),
     }));
   }
-
   private async envelopeFor(request: RequestRow): Promise<Envelope> {
     if (request.status === "complete") {
       const answerPath = path.join(this.requestDir(request.id), "answer.md");
@@ -962,14 +905,12 @@ export class Supervisor {
     }
     return recoveringEnvelope(request.id, "pool_busy", "request is waiting for a slot");
   }
-
   private async releaseRuntime(request: RequestRow, client: RpcClient | null = null): Promise<void> {
     if (!request.slot_id || ACTIVE_STATUSES.has(request.status)) return;
     await this.closeConversationBestEffort(request, client);
     if (client) await client.close().catch(() => undefined);
     await this.stopSlotIfUnused(this.requireSlotConfig(request.slot_id));
   }
-
   private async closeConversationBestEffort(
     request: RequestRow,
     existingClient: RpcClient | null,
@@ -995,40 +936,32 @@ export class Supervisor {
       if (ownsClient && client) await client.close().catch(() => undefined);
     }
   }
-
   private async stopSlotIfUnused(slot: SlotConfig): Promise<void> {
     if (this.db.countActiveForSlot(slot.id) === 0) await this.stopSlot(slot);
   }
-
   private async stopSlot(slot: SlotConfig): Promise<void> {
     if (slot.unmanaged !== true) await this.docker.stop(slot.id);
   }
-
   private async connectDaemon(slot: SlotConfig): Promise<RpcClient> {
     const endpoint = await this.docker.ensure(slot);
     return RpcClient.connect(endpoint.port, endpoint.tokenPath);
   }
-
   private requestDir(id: string): string {
     return path.join(this.stateDir, "requests", id);
   }
-
   private sendLockPath(id: string): string {
     return path.join(this.requestDir(id), "send.lock");
   }
-
   private requireRequest(id: string): RequestRow {
     const request = this.db.getRequest(id);
     if (!request) throw new InputError(`unknown session: ${id}`);
     return request;
   }
-
   private requireSlotConfig(id: string): SlotConfig {
     const slot = this.config.slots.find((item) => item.id === id);
     if (!slot) throw new Error(`slot ${id} is absent from config`);
     return slot;
   }
-
   private log(id: string, status: string, detail?: string): void {
     void appendJsonLine(path.join(this.requestDir(id), "log.jsonl"), {
       at: Date.now(),
@@ -1037,7 +970,6 @@ export class Supervisor {
     }).catch(() => undefined);
   }
 }
-
 export function armSendAttempt(db: GwpDatabase, requestId: string): number {
   return db.immediate(() => {
     const previous = db.latestAttempt(requestId);
@@ -1050,7 +982,6 @@ export function armSendAttempt(db: GwpDatabase, requestId: string): number {
     if (!previous) attemptNo = 1;
     else if (previous.attempt_no === 1 && previous.state === "no_send_proven") attemptNo = 2;
     else throw new Error("attempt 2 requires attempt 1 to be no_send_proven");
-
     db.createAttempt(requestId, attemptNo);
     const updated = db.connection.prepare(`
       UPDATE requests
@@ -1061,7 +992,6 @@ export function armSendAttempt(db: GwpDatabase, requestId: string): number {
     return attemptNo;
   });
 }
-
 export function confirmSendAttempt(
   db: GwpDatabase,
   requestId: string,
@@ -1089,7 +1019,6 @@ export function confirmSendAttempt(
     return "confirmed";
   });
 }
-
 export function markPreClickNoSend(db: GwpDatabase, requestId: string):
   "no_send_proven" | "confirmed" | "reconciled" {
   const attempt = db.latestAttempt(requestId);
@@ -1106,11 +1035,15 @@ export function markPreClickNoSend(db: GwpDatabase, requestId: string):
   }
   throw new Error("pre-click failure requires an armed attempt");
 }
-
 export function markSendUncertain(
   db: GwpDatabase,
   requestId: string,
   detail: string,
+  anchor?: {
+    pendingUserTurnId?: string;
+    pendingConversationUrl?: string;
+    preClickBaseline?: string[];
+  },
 ): "uncertain" | "confirmed" | "reconciled" {
   return db.immediate(() => {
     const attempt = db.latestAttempt(requestId);
@@ -1120,6 +1053,7 @@ export function markSendUncertain(
       attempt.attempt_no,
       ["armed"],
       "uncertain",
+      anchor?.pendingUserTurnId ? { userTurnId: anchor.pendingUserTurnId } : {},
     );
     if (!transition.changed) {
       if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {
@@ -1128,15 +1062,60 @@ export function markSendUncertain(
       if (transition.row.state === "uncertain") return "uncertain";
       throw new Error("uncertain send requires an armed attempt");
     }
-    db.connection.prepare(`
+    const storedDetail = encodeSendAnchor(detail, anchor);
+    const requestUpdate = db.connection.prepare(`
       UPDATE requests
-      SET status = 'uncertain', error_kind = 'send_uncertain', error_detail = ?, updated_at = ?
+      SET status = 'uncertain', error_kind = 'send_uncertain', error_detail = ?,
+          conversation_url = CASE
+            WHEN (conversation_url IS NULL OR conversation_url = '') AND ? IS NOT NULL THEN ?
+            ELSE conversation_url
+          END,
+          updated_at = ?
       WHERE id = ? AND status = 'sending'
-    `).run(detail, Date.now(), requestId);
+    `).run(
+      storedDetail,
+      anchor?.pendingConversationUrl ?? null,
+      anchor?.pendingConversationUrl ?? null,
+      Date.now(),
+      requestId,
+    );
+    if (requestUpdate.changes !== 1) throw new Error("uncertain send lost its sending request");
     return "uncertain";
   });
 }
-
+interface StoredSendAnchor {
+  detail: string;
+  pendingConversationUrl?: string;
+  preClickBaseline?: string[];
+}
+function encodeSendAnchor(
+  detail: string,
+  anchor: { pendingConversationUrl?: string; preClickBaseline?: string[] } | undefined,
+): string {
+  if (!anchor?.pendingConversationUrl && !anchor?.preClickBaseline) return detail;
+  return JSON.stringify({
+    detail,
+    ...(anchor.pendingConversationUrl
+      ? { pendingConversationUrl: anchor.pendingConversationUrl }
+      : {}),
+    ...(anchor.preClickBaseline ? { preClickBaseline: anchor.preClickBaseline } : {}),
+  } satisfies StoredSendAnchor);
+}
+function decodeSendAnchor(value: string | null): StoredSendAnchor | null {
+  if (!value?.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<StoredSendAnchor>;
+    if (typeof parsed.detail !== "string") return null;
+    if (parsed.pendingConversationUrl !== undefined
+      && typeof parsed.pendingConversationUrl !== "string") return null;
+    if (parsed.preClickBaseline !== undefined
+      && (!Array.isArray(parsed.preClickBaseline)
+        || !parsed.preClickBaseline.every((item) => typeof item === "string"))) return null;
+    return parsed as StoredSendAnchor;
+  } catch {
+    return null;
+  }
+}
 export function applyReconcileResult(
   db: GwpDatabase,
   requestId: string,
@@ -1146,7 +1125,12 @@ export function applyReconcileResult(
   if (!attempt) {
     throw new Error("reconcile requires an uncertain attempt");
   }
-  if (result.found && result.conversationUrl) {
+  if (attempt.user_turn_id
+    && (!result.found || result.userTurnId !== attempt.user_turn_id)) return "unproven";
+  if (result.found
+    && (!result.conversationUrl || !result.userTurnId
+      || !isValidConversationPointer(result.conversationUrl))) return "unproven";
+  if (result.found && result.conversationUrl && result.userTurnId) {
     return db.immediate(() => {
       const transition = db.transitionAttempt(requestId, attempt.attempt_no, ["uncertain"], "reconciled", {
         userTurnId: result.userTurnId ?? null,
@@ -1203,7 +1187,6 @@ export function applyReconcileResult(
     return "exhausted";
   });
 }
-
 function defaultStateDir(): string {
   if (process.env.GPT_WEBAI_PRO_STATE_DIR) return path.resolve(process.env.GPT_WEBAI_PRO_STATE_DIR);
   const base = process.env.XDG_STATE_HOME
@@ -1211,11 +1194,9 @@ function defaultStateDir(): string {
     : path.join(process.env.HOME ?? ".", ".local", "state");
   return path.join(base, "gpt-webai-pro");
 }
-
 function defaultConfigPath(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../config/slots.json");
 }
-
 function isValidConversationPointer(value: string): boolean {
   try {
     const baseOrigin = new URL(process.env.GWP_BASE_URL ?? "https://chatgpt.com").origin;
@@ -1225,7 +1206,6 @@ function isValidConversationPointer(value: string): boolean {
     return false;
   }
 }
-
 function isTemporaryConversationPointer(value: string): boolean {
   try {
     return /^\/c\/WEB:/u.test(new URL(value).pathname);
@@ -1233,7 +1213,6 @@ function isTemporaryConversationPointer(value: string): boolean {
     return false;
   }
 }
-
 function validateConfig(config: SlotsConfig): SlotsConfig {
   if (!config || typeof config.image !== "string" || !Array.isArray(config.slots)
     || !Number.isInteger(config.maxConcurrent) || config.maxConcurrent < 1) {
@@ -1256,7 +1235,6 @@ function validateConfig(config: SlotsConfig): SlotsConfig {
   }
   return config;
 }
-
 async function validateFiles(files: string[]): Promise<ValidatedFile[]> {
   const result: ValidatedFile[] = [];
   const sourceCounts = new Map<string, number>();
@@ -1278,18 +1256,15 @@ async function validateFiles(files: string[]): Promise<ValidatedFile[]> {
   }
   return result;
 }
-
 function suffixBeforeFirstDot(filename: string, ordinal: number): string {
   const dot = filename.indexOf(".");
   return dot > 0
     ? `${filename.slice(0, dot)}-${ordinal}${filename.slice(dot)}`
     : `${filename}-${ordinal}`;
 }
-
 function throwIfLoginInterrupted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new LoginInterruptedError("login interrupted");
 }
-
 async function withLoginAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
   throwIfLoginInterrupted(signal);
@@ -1308,7 +1283,6 @@ async function withLoginAbort<T>(promise: Promise<T>, signal: AbortSignal | unde
     );
   });
 }
-
 async function loginDelay(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
   if (!signal) {
     await new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1330,5 +1304,4 @@ async function loginDelay(milliseconds: number, signal: AbortSignal | undefined)
     signal.addEventListener("abort", abort, { once: true });
   });
 }
-
 export { defaultConfigPath, defaultStateDir, validateConfig };

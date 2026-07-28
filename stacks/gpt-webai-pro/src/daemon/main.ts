@@ -6,7 +6,6 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Page } from "playwright-core";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
-
 import { GwpError, errorMessage } from "../shared/errors.js";
 import { atomicWrite, mkdirp } from "../shared/fsx.js";
 import type {
@@ -26,21 +25,17 @@ import { reconcileSend } from "./actions/reconcile.js";
 import { sendMessage } from "./actions/send.js";
 import { BrowserSession } from "./browser.js";
 import { readinessObservation } from "./selectors.js";
-
 interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: number;
   method: RpcMethod;
   params?: unknown;
 }
-
 type EnqueueMutation = <T>(operation: () => Promise<T>) => Promise<T>;
-
 export interface DaemonHandle {
   port: number;
   close(): Promise<void>;
 }
-
 export async function startDaemon(options: {
   session: BrowserSession;
   port: number;
@@ -54,7 +49,6 @@ export async function startDaemon(options: {
   if (!/^[0-9a-f]{32}$/.test(options.token)) {
     throw new Error("GWP_DAEMON_TOKEN must be exactly 32 lower-hex characters");
   }
-
   const server = createServer((_request, response) => {
     response.writeHead(426).end();
   });
@@ -77,7 +71,6 @@ export async function startDaemon(options: {
     });
   });
   const port = await listen(server, options.port);
-
   return {
     port,
     async close() {
@@ -87,7 +80,6 @@ export async function startDaemon(options: {
     },
   };
 }
-
 async function handleMessage(
   socket: WebSocket,
   raw: RawData,
@@ -124,12 +116,20 @@ async function handleMessage(
           kind: gwp.kind,
           ...(phase ? { phase } : {}),
           detail: gwp.detail,
+          ...(gwp.pendingUserTurnId
+            ? { pendingUserTurnId: gwp.pendingUserTurnId }
+            : {}),
+          ...(gwp.pendingConversationUrl
+            ? { pendingConversationUrl: gwp.pendingConversationUrl }
+            : {}),
+          ...(gwp.preClickBaseline
+            ? { preClickBaseline: gwp.preClickBaseline }
+            : {}),
         },
       },
     }));
   }
 }
-
 async function dispatch(
   request: JsonRpcRequest,
   options: {
@@ -198,7 +198,6 @@ async function dispatch(
       throw new GwpError("internal", `unknown RPC method: ${String(request.method)}`);
   }
 }
-
 async function captureFailure(
   page: Page,
   outboxDir: string,
@@ -213,7 +212,6 @@ async function captureFailure(
   await atomicWrite(htmlPath, await page.content());
   return { screenshotPath, htmlPath };
 }
-
 function createMutationQueue(): EnqueueMutation {
   let tail: Promise<void> = Promise.resolve();
   return <T>(operation: () => Promise<T>): Promise<T> => {
@@ -222,7 +220,6 @@ function createMutationQueue(): EnqueueMutation {
     return result;
   };
 }
-
 function listen(server: Server, port: number): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -232,7 +229,6 @@ function listen(server: Server, port: number): Promise<number> {
     });
   });
 }
-
 async function main(): Promise<void> {
   const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const labelsPath = process.env.GWP_LABELS_PATH ?? path.join(sourceRoot, "config", "labels.json");
@@ -261,7 +257,6 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => void shutdown());
   process.once("SIGINT", () => void shutdown());
 }
-
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   main().catch((error) => {
     process.stderr.write(`${errorMessage(error)}\n`);

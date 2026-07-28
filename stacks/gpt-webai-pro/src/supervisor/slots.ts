@@ -1,12 +1,9 @@
 import type { GwpDatabase } from "./db.js";
 import type { RequestRow, SlotConfig, SlotRow } from "../shared/types.js";
-
 const PROVIDER_COOLDOWN_MS = 3 * 60 * 1_000;
-
 function age(value: number | null): number {
   return value === null ? Number.NEGATIVE_INFINITY : value;
 }
-
 export function claimSlotForRequest(
   db: GwpDatabase,
   config: SlotConfig[],
@@ -25,7 +22,6 @@ export function claimSlotForRequest(
       };
     }
     if (request.status !== "staged") return { request, slot: null };
-
     const selected = selectSlot(db, db.listSlots(), config, maxConcurrent, now, excluded);
     if (!selected) return { request, slot: null };
     db.connection.prepare("UPDATE slots SET last_used_at = ? WHERE id = ?").run(now, selected.id);
@@ -37,7 +33,6 @@ export function claimSlotForRequest(
     return { request: db.getRequest(requestId)!, slot: selected };
   });
 }
-
 function selectSlot(
   db: GwpDatabase,
   rows: SlotRow[],
@@ -58,13 +53,11 @@ function selectSlot(
     || left.slot.id.localeCompare(right.slot.id))[0]!.slot;
   return configured.get(selected.id)!;
 }
-
 export function markSlotNeedsLogin(db: GwpDatabase, slotId: string): void {
   db.connection.prepare(`
     UPDATE slots SET state = 'needs_login', cooldown_until = NULL WHERE id = ?
   `).run(slotId);
 }
-
 export function markSlotProviderLimit(
   db: GwpDatabase,
   slotId: string,
@@ -76,11 +69,9 @@ export function markSlotProviderLimit(
   `).run(cooldownUntil, slotId);
   return cooldownUntil;
 }
-
 export function markSlotIdle(db: GwpDatabase, slotId: string): void {
   db.connection.prepare(`
     UPDATE slots SET state = 'idle', cooldown_until = NULL WHERE id = ?
   `).run(slotId);
 }
-
 export { PROVIDER_COOLDOWN_MS };

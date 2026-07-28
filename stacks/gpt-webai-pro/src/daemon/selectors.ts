@@ -1,23 +1,18 @@
 import type { Locator, Page } from "playwright-core";
-
 import type { ArtifactControl } from "../shared/types.js";
-
 export const COMPOSER_SELECTORS = [
   "#prompt-textarea",
   '[contenteditable="true"][role="textbox"]',
   'textarea[placeholder*="Message" i]',
   'textarea[placeholder*="메시지" i]',
 ] as const;
-
 export const INTELLIGENCE_PILL_SELECTOR = "form button[aria-haspopup]";
 export const INTELLIGENCE_OPTION_SELECTOR = '[role="menu"] [role="menuitemradio"]';
-
 export const SEND_BUTTON_SELECTORS = [
   'button[data-testid*="send" i]',
   'button[aria-label*="send" i]',
   'button[aria-label*="보내" i]',
 ] as const;
-
 export const UPLOAD_BUTTON_SELECTORS = [
   'button[aria-label*="attach" i]',
   'button[aria-label*="upload" i]',
@@ -25,57 +20,84 @@ export const UPLOAD_BUTTON_SELECTORS = [
   'button[aria-label*="첨부" i]',
   'button[data-testid*="upload" i]',
 ] as const;
-
 export const FILE_INPUT_SELECTOR = 'input[type="file"]';
 export const TURN_SELECTOR = "[data-message-author-role]";
 export const ASSISTANT_TURN_SELECTOR = '[data-message-author-role="assistant"]';
+export const PANEL_DOWNLOAD_SELECTOR = [
+  'button[aria-label="Download" i]',
+  '[role="button"][aria-label="Download" i]',
+].join(",");
 export const STOP_PATTERN = /stop generating|stop responding|stop answering|stop-button|중지|정지/i;
 export const FILENAME_PATTERN = /[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu;
-
-const ACTION_CONTROL_SELECTOR = [
+const ARTIFACT_CONTROL_SELECTOR = [
   "a[download]",
-  'a[aria-label*="download" i]',
-  'button[aria-label*="download" i]',
-  '[role="button"][aria-label*="download" i]',
-  "a",
   "button",
   '[role="button"]',
 ].join(",");
-
 const COPY_CONTROL_SELECTOR = [
   '[data-testid*="copy" i]',
   '[aria-label*="copy" i]',
   '[aria-label*="복사" i]',
 ].join(",");
-
 const LOGIN_CONTROL_SELECTOR = [
   '[data-testid*="login" i]',
   "a",
   "button",
   '[role="dialog"]',
 ].join(",");
-
 const PROVIDER_LIMIT_SELECTOR = [
   '[role="dialog"]',
   '[role="alert"]',
   '[data-testid*="rate-limit" i]',
   '[data-testid*="provider-limit" i]',
 ].join(",");
-
 export interface TurnObservation {
   role: "user" | "assistant";
   dataMessageId: string;
   text: string;
   domIndex: number;
 }
-
 export interface ChipObservation {
   filename: string;
   complete: boolean;
   rootPath: number[];
   seedPath: number[];
 }
-
+export interface ArtifactControlLocator {
+  locator: Locator;
+  kind: "inline" | "entity";
+  label: string;
+}
+function normalizeMarkdown(value: string, preserveFenceLanguages: boolean): string {
+  return value
+    .replace(/\r\n?/gu, "\n")
+    .split("\n")
+    .flatMap((raw) => {
+      const line = raw.trim();
+      const fence = line.match(/^```([\p{L}\p{N}_.+-]+)?$/u);
+      return fence ? (preserveFenceLanguages && fence[1] ? [fence[1]] : []) : [line];
+    })
+    .join("\n")
+    .replace(/\n+/gu, "\n")
+    .trim();
+}
+export function normalizePromptText(value: string): string { return normalizeMarkdown(value, false); }
+export function renderedTurnMatchesPrompt(
+  renderedText: string,
+  expectedPrompt: string,
+): boolean {
+  const prompts = new Set([normalizePromptText(expectedPrompt), normalizeMarkdown(expectedPrompt, true)]);
+  const lines = normalizePromptText(renderedText).split("\n");
+  let firstBodyLine = 0;
+  while (firstBodyLine + 1 < lines.length
+    && FILENAME_PATTERN.test(lines[firstBodyLine]!)
+    && /^(?:file|파일)$/iu.test(lines[firstBodyLine + 1]!)) {
+    firstBodyLine += 2;
+  }
+  const renderedBody = lines.slice(firstBodyLine).join("\n").trim();
+  return [...prompts].some((prompt) => Boolean(prompt
+    && (renderedBody === prompt || renderedBody.endsWith(prompt))));
+}
 const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
   const filename = /[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu;
   const visible = (node) => {
@@ -133,22 +155,18 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
     return { filename: match, complete: !busy, rootPath, seedPath };
   }).filter(Boolean);
 })()`;
-
 export function normalizeLabel(value: string): string {
   return value.normalize("NFC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
 }
-
 export function normalizeIntelligenceLabel(value: string): string {
   const firstLine = value.normalize("NFC").trim().split(/\r?\n/u)[0] ?? "";
   return firstLine.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
 }
-
 export function normalizeChipStem(value: string): string {
   return normalizeLabel(value)
     .replace(/\.[a-z0-9]{1,8}$/u, "")
     .replace(/ \(([1-9]|[1-9][0-9])\)$/u, "");
 }
-
 export async function visibleFirst(
   page: Page,
   selectors: readonly string[],
@@ -159,7 +177,6 @@ export async function visibleFirst(
   }
   return null;
 }
-
 export async function findIntelligencePill(
   page: Page,
   intelligenceLabels: readonly string[],
@@ -183,7 +200,6 @@ export async function findIntelligencePill(
     await page.waitForTimeout(500);
   }
 }
-
 export async function findIntelligenceOption(
   page: Page,
   targetLabels: readonly string[],
@@ -200,13 +216,11 @@ export async function findIntelligenceOption(
   }
   return matches.length === 1 ? matches[0]! : null;
 }
-
 export async function waitForIntelligenceMenu(page: Page, timeoutMs: number): Promise<boolean> {
   return page.locator(INTELLIGENCE_OPTION_SELECTOR).first()
     .waitFor({ state: "visible", timeout: timeoutMs })
     .then(() => true, () => false);
 }
-
 export async function readCurrentModelLabel(
   page: Page,
   intelligenceLabels: readonly string[],
@@ -214,7 +228,6 @@ export async function readCurrentModelLabel(
   const pill = await findIntelligencePill(page, intelligenceLabels);
   return pill ? pill.innerText().catch(() => "") : "";
 }
-
 export async function readTurns(page: Page): Promise<TurnObservation[]> {
   return page.locator(TURN_SELECTOR).evaluateAll((nodes) => nodes.map((node, domIndex) => {
     const element = node as HTMLElement;
@@ -231,7 +244,37 @@ export async function readTurns(page: Page): Promise<TurnObservation[]> {
     };
   }).filter((item): item is TurnObservation => item !== null));
 }
-
+export async function readAssistantAnswer(page: Page, assistantTurnId?: string): Promise<string> {
+  let turn = await assistantLocator(page, assistantTurnId);
+  if (!turn && assistantTurnId) turn = await assistantLocator(page);
+  if (!turn) return "";
+  return turn.evaluate((node, filenameSource) => {
+    const root = node as HTMLElement;
+    let answer = root.innerText || root.textContent || "";
+    const filename = new RegExp(filenameSource as string, "iu");
+    const controls = root.querySelectorAll('a[download],button,[role="button"]');
+    for (const candidate of Array.from(controls)) {
+      const control = candidate as HTMLElement;
+      const name = control.getAttribute("download") || control.getAttribute("aria-label")
+        || control.getAttribute("title") || control.innerText || control.textContent || "";
+      const matched = name.match(filename)?.[0];
+      if (!matched) continue;
+      let block = control;
+      for (let hop = 0; hop < 3; hop += 1) {
+        const parent = block.parentElement;
+        if (!parent || parent === root) break;
+        const text = parent.innerText || parent.textContent || "";
+        const residue = text.replace(matched, "").replace(/download|다운로드/giu, "")
+          .replace(/[\s\p{P}\p{S}]/gu, "");
+        if (residue) break;
+        block = parent;
+      }
+      const removable = block.innerText || block.textContent || "";
+      if (removable) answer = answer.replace(removable, "");
+    }
+    return answer.replace(/\n{3,}/gu, "\n\n").trim();
+  }, FILENAME_PATTERN.source).catch(() => "");
+}
 export async function generationActive(page: Page): Promise<boolean> {
   return page.locator('button,[role="button"]').evaluateAll((nodes, source) => {
     const pattern = new RegExp(source as string, "i");
@@ -244,11 +287,9 @@ export async function generationActive(page: Page): Promise<boolean> {
     });
   }, STOP_PATTERN.source).catch(() => false);
 }
-
 export async function observeAttachmentChips(page: Page): Promise<ChipObservation[]> {
   const candidates = await page.evaluate<ChipObservation[]>(CHIP_OBSERVER_SCRIPT)
     .catch(() => [] as ChipObservation[]);
-
   const groups = new Map<string, ChipObservation[]>();
   for (const candidate of candidates) {
     if (!pathPrefix(candidate.rootPath, candidate.seedPath)) continue;
@@ -271,7 +312,6 @@ export async function observeAttachmentChips(page: Page): Promise<ChipObservatio
     && pathPrefix(candidate.rootPath, other.rootPath)
   ))).sort((left, right) => comparePath(left.rootPath, right.rootPath));
 }
-
 export async function answerActionVisible(
   page: Page,
   assistantTurnId?: string,
@@ -298,43 +338,45 @@ export async function answerActionVisible(
     return false;
   }, COPY_CONTROL_SELECTOR).catch(() => false);
 }
-
 export async function artifactControlLocators(
   page: Page,
   assistantTurnId?: string,
-): Promise<Locator[]> {
-  const turn = await assistantLocator(page, assistantTurnId);
+): Promise<ArtifactControlLocator[]> {
+  let turn = await assistantLocator(page, assistantTurnId);
+  if (!turn && assistantTurnId) turn = await assistantLocator(page);
   if (!turn) return [];
-  const candidates = turn.locator(ACTION_CONTROL_SELECTOR);
-  const result: Locator[] = [];
+  const candidates = turn.locator(ARTIFACT_CONTROL_SELECTOR);
+  const result: ArtifactControlLocator[] = [];
   for (let index = 0; index < await candidates.count(); index += 1) {
     const candidate = candidates.nth(index);
     if (!await candidate.isVisible().catch(() => false)) continue;
-    const descriptor = await candidate.evaluate((node) => ({
-      download: node.hasAttribute("download"),
-      label: node.getAttribute("aria-label") || node.textContent || "",
-    })).catch(() => ({ download: false, label: "" }));
-    if (descriptor.download || /download|다운로드/i.test(descriptor.label)) result.push(candidate);
+    const descriptor = await candidate.evaluate((node, filenameSource) => {
+      const inline = node.matches("a[download]");
+      const accessible = node.getAttribute("aria-label")
+        || node.getAttribute("title")
+        || node.textContent
+        || "";
+      const downloadName = inline ? node.getAttribute("download") || "" : "";
+      const pattern = new RegExp(filenameSource as string, "iu");
+      const filename = (downloadName.match(pattern)?.[0] || accessible.match(pattern)?.[0] || "").trim();
+      return { inline, filename };
+    }, FILENAME_PATTERN.source).catch(() => ({ inline: false, filename: "" }));
+    if (!descriptor.filename) continue;
+    result.push({
+      locator: candidate,
+      kind: descriptor.inline ? "inline" : "entity",
+      label: descriptor.filename,
+    });
   }
   return result;
 }
-
 export async function artifactControls(
   page: Page,
   assistantTurnId?: string,
 ): Promise<ArtifactControl[]> {
   const locators = await artifactControlLocators(page, assistantTurnId);
-  const controls: ArtifactControl[] = [];
-  for (let index = 0; index < locators.length; index += 1) {
-    const locator = locators[index]!;
-    const label = await locator.evaluate((node) => (
-      node.getAttribute("aria-label") || node.textContent || "Download"
-    )).catch(() => "Download");
-    controls.push({ index, label: label.trim() || "Download" });
-  }
-  return controls;
+  return locators.map((control, index) => ({ index, label: control.label }));
 }
-
 export async function readinessObservation(
   page: Page,
   intelligenceLabels: readonly string[],
@@ -352,7 +394,6 @@ export async function readinessObservation(
     await page.waitForTimeout(500);
   }
 }
-
 async function readinessObservationOnce(
   page: Page,
   intelligenceLabels: readonly string[],
@@ -384,13 +425,11 @@ async function readinessObservationOnce(
   if (state === "unknown" && await visibleFirst(page, COMPOSER_SELECTORS)) state = "ready";
   return { state, modelLabel: await readCurrentModelLabel(page, intelligenceLabels) };
 }
-
 async function locatorLabel(locator: Locator): Promise<string> {
   const aria = await locator.getAttribute("aria-label").catch(() => null);
   if (aria) return aria;
   return locator.innerText().catch(() => "");
 }
-
 async function assistantLocator(page: Page, dataMessageId?: string): Promise<Locator | null> {
   const turns = page.locator(ASSISTANT_TURN_SELECTOR);
   if (dataMessageId) {
@@ -407,11 +446,9 @@ async function assistantLocator(page: Page, dataMessageId?: string): Promise<Loc
   }
   return null;
 }
-
 function pathPrefix(prefix: number[], value: number[]): boolean {
   return prefix.length <= value.length && prefix.every((item, index) => item === value[index]);
 }
-
 function comparePath(left: number[], right: number[]): number {
   const length = Math.min(left.length, right.length);
   for (let index = 0; index < length; index += 1) {

@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-
 import { GwpDatabase } from "../../src/supervisor/db.js";
 import {
   applyReconcileResult,
@@ -12,13 +11,11 @@ import {
   markPreClickNoSend,
   markSendUncertain,
 } from "../../src/supervisor/run.js";
-
 async function fresh(id: string): Promise<GwpDatabase> {
   const db = await GwpDatabase.open(":memory:");
   db.createRequest(id, "a".repeat(64));
   return db;
 }
-
 test("send transition table covers confirmed, pre-click, and post-click outcomes", async (t) => {
   await t.test("armed -> confirmed -> generating", async () => {
     const db = await fresh("req_1000000000000001");
@@ -33,7 +30,6 @@ test("send transition table covers confirmed, pre-click, and post-click outcomes
     assert.equal(db.latestAttempt("req_1000000000000001")?.state, "confirmed");
     db.close();
   });
-
   await t.test("armed -> no_send_proven on pre-click failure", async () => {
     const db = await fresh("req_1000000000000002");
     armSendAttempt(db, "req_1000000000000002");
@@ -41,17 +37,29 @@ test("send transition table covers confirmed, pre-click, and post-click outcomes
     assert.equal(db.latestAttempt("req_1000000000000002")?.state, "no_send_proven");
     db.close();
   });
-
   await t.test("armed -> uncertain on post-click or transport loss", async () => {
     const db = await fresh("req_1000000000000003");
     armSendAttempt(db, "req_1000000000000003");
-    markSendUncertain(db, "req_1000000000000003", "socket lost");
+    markSendUncertain(db, "req_1000000000000003", "socket lost", {
+      pendingUserTurnId: "pending-user",
+      pendingConversationUrl: "https://chatgpt.com/c/WEB:pending",
+      preClickBaseline: ["old-user", "old-assistant"],
+    });
     assert.equal(db.getRequest("req_1000000000000003")?.status, "uncertain");
+    assert.equal(
+      db.getRequest("req_1000000000000003")?.conversation_url,
+      "https://chatgpt.com/c/WEB:pending",
+    );
+    assert.deepEqual(JSON.parse(db.getRequest("req_1000000000000003")?.error_detail ?? ""), {
+      detail: "socket lost",
+      pendingConversationUrl: "https://chatgpt.com/c/WEB:pending",
+      preClickBaseline: ["old-user", "old-assistant"],
+    });
     assert.equal(db.latestAttempt("req_1000000000000003")?.state, "uncertain");
+    assert.equal(db.latestAttempt("req_1000000000000003")?.user_turn_id, "pending-user");
     db.close();
   });
 });
-
 test("armed-death resume reconcile has exactly three fail-closed branches", async (t) => {
   await t.test("found: reconcile without another click", async () => {
     const db = await fresh("req_2000000000000001");
@@ -70,7 +78,6 @@ test("armed-death resume reconcile has exactly three fail-closed branches", asyn
     assert.equal(db.listAttempts("req_2000000000000001").length, 1);
     db.close();
   });
-
   await t.test("proven absent: exactly one second attempt is allowed", async () => {
     const id = "req_2000000000000002";
     const db = await fresh(id);
@@ -86,7 +93,6 @@ test("armed-death resume reconcile has exactly three fail-closed branches", asyn
     assert.throws(() => armSendAttempt(db, id), /limit exceeded/);
     db.close();
   });
-
   await t.test("unproven: uncertain remains and no retry is armed", async () => {
     const id = "req_2000000000000003";
     const db = await fresh(id);
@@ -99,7 +105,6 @@ test("armed-death resume reconcile has exactly three fail-closed branches", asyn
     db.close();
   });
 });
-
 test("attempt terminal states cannot be reused as an armed intent", async () => {
   const id = "req_3000000000000001";
   const db = await fresh(id);
@@ -112,7 +117,6 @@ test("attempt terminal states cannot be reused as an armed intent", async () => 
   }), /requires an armed attempt/);
   db.close();
 });
-
 test("guarded transitions accept existing terminal winners without overwriting them", async (t) => {
   await t.test("confirmed winner is never reverted or replaced by a stale result", async () => {
     const id = "req_3000000000000002";
@@ -123,7 +127,11 @@ test("guarded transitions accept existing terminal winners without overwriting t
       userTurnId: "winner-user",
       assistantTurnId: "winner-assistant",
     });
-    assert.equal(markSendUncertain(db, id, "stale timeout"), "confirmed");
+    assert.equal(markSendUncertain(db, id, "stale timeout", {
+      pendingUserTurnId: "stale-user",
+      pendingConversationUrl: "https://chatgpt.com/c/stale-pending",
+      preClickBaseline: [],
+    }), "confirmed");
     assert.equal(markPreClickNoSend(db, id), "confirmed");
     assert.equal(confirmSendAttempt(db, id, {
       conversationUrl: "https://chatgpt.com/c/stale",
@@ -136,7 +144,6 @@ test("guarded transitions accept existing terminal winners without overwriting t
     assert.equal(db.latestAttempt(id)?.assistant_turn_id, "winner-assistant");
     db.close();
   });
-
   await t.test("reconciled winner is never reverted or replaced by a stale result", async () => {
     const id = "req_3000000000000003";
     const db = await fresh(id);
@@ -161,7 +168,6 @@ test("guarded transitions accept existing terminal winners without overwriting t
     db.close();
   });
 });
-
 test("assistant turn rebinding is guarded by attempt, durable user, and expected prior id", async () => {
   const id = "req_3000000000000004";
   const db = await fresh(id);
@@ -171,7 +177,6 @@ test("assistant turn rebinding is guarded by attempt, durable user, and expected
     userTurnId: "durable-user",
     assistantTurnId: "provisional-without-known-prefix",
   });
-
   const promoted = db.rebindAssistantTurnId(
     id,
     1,
@@ -182,7 +187,6 @@ test("assistant turn rebinding is guarded by attempt, durable user, and expected
   assert.equal(promoted.changed, true);
   assert.equal(promoted.row.assistant_turn_id, "final-assistant-id");
   assert.equal(promoted.row.user_turn_id, "durable-user");
-
   const stale = db.rebindAssistantTurnId(
     id,
     1,
@@ -192,7 +196,6 @@ test("assistant turn rebinding is guarded by attempt, durable user, and expected
   );
   assert.equal(stale.changed, false);
   assert.equal(stale.row.assistant_turn_id, "final-assistant-id");
-
   const wrongUser = db.rebindAssistantTurnId(
     id,
     1,
@@ -203,7 +206,6 @@ test("assistant turn rebinding is guarded by attempt, durable user, and expected
   assert.equal(wrongUser.changed, false);
   assert.equal(db.latestAttempt(id)?.user_turn_id, "durable-user");
   assert.equal(db.latestAttempt(id)?.assistant_turn_id, "final-assistant-id");
-
   db.setRequestStatus(id, "complete");
   const lateAfterComplete = db.rebindAssistantTurnId(
     id,
@@ -216,7 +218,6 @@ test("assistant turn rebinding is guarded by attempt, durable user, and expected
   assert.equal(lateAfterComplete.row.assistant_turn_id, "final-assistant-id");
   db.close();
 });
-
 test("attempt 2 arm is atomic across independent database connections", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-attempt-race-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -230,7 +231,6 @@ test("attempt 2 arm is atomic across independent database connections", async (t
   const two = await GwpDatabase.open(filename);
   t.after(() => one.close());
   t.after(() => two.close());
-
   const contenders = await Promise.allSettled([
     Promise.resolve().then(() => armSendAttempt(one, id)),
     Promise.resolve().then(() => armSendAttempt(two, id)),
@@ -241,4 +241,36 @@ test("attempt 2 arm is atomic across independent database connections", async (t
   assert.equal(one.latestAttempt(id)?.state, "armed");
   assert.equal(one.getRequest(id)?.status, "sending");
   assert.equal(one.listAttempts(id).some((attempt) => attempt.attempt_no > 2), false);
+});
+test("malformed found reconcile result is unproven and cannot authorize retry", async () => {
+  const id = "req_4000000000000002";
+  const db = await fresh(id);
+  armSendAttempt(db, id);
+  markSendUncertain(db, id, "missing result identity");
+  assert.equal(applyReconcileResult(db, id, { found: true, proven: true }), "unproven");
+  assert.equal(db.getRequest(id)?.status, "uncertain");
+  assert.equal(db.latestAttempt(id)?.state, "uncertain");
+  assert.throws(() => armSendAttempt(db, id), /requires a staged request/);
+  db.close();
+});
+test("durable pending user anchor rejects absence and mismatched identity", async (t) => {
+  for (const [id, result] of [
+    ["req_4000000000000003", { found: false, proven: true }],
+    ["req_4000000000000004", {
+      found: true,
+      proven: true,
+      conversationUrl: "https://chatgpt.com/c/wrong-user",
+      userTurnId: "another-user",
+    }],
+  ] as const) {
+    await t.test(id, async () => {
+      const db = await fresh(id);
+      armSendAttempt(db, id);
+      markSendUncertain(db, id, "pending anchor", { pendingUserTurnId: "durable-user" });
+      assert.equal(applyReconcileResult(db, id, result), "unproven");
+      assert.equal(db.getRequest(id)?.status, "uncertain");
+      assert.equal(db.latestAttempt(id)?.user_turn_id, "durable-user");
+      db.close();
+    });
+  }
 });

@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-
 import { GwpDatabase } from "../../src/supervisor/db.js";
 import { validateConfig } from "../../src/supervisor/run.js";
 import {
@@ -14,17 +13,14 @@ import {
   PROVIDER_COOLDOWN_MS,
 } from "../../src/supervisor/slots.js";
 import type { RequestStatus, SlotConfig } from "../../src/shared/types.js";
-
 const slots: SlotConfig[] = [
   { id: "slot-a", account: "a", port: 19301 },
   { id: "slot-b", account: "b", port: 19302 },
   { id: "slot-c", account: "c", port: 19303 },
 ];
-
 function requestId(index: number): string {
   return `req_${index.toString(16).padStart(16, "0")}`;
 }
-
 function addRequest(
   db: GwpDatabase,
   index: number,
@@ -38,7 +34,6 @@ function addRequest(
   }
   return id;
 }
-
 test("slot config requires maxConcurrent and a distinct valid TCP port", () => {
   assert.throws(
     () => validateConfig({ image: "test", maxConcurrent: 0, slots }),
@@ -76,7 +71,6 @@ test("slot config requires maxConcurrent and a distinct valid TCP port", () => {
   );
   assert.equal(validateConfig({ image: "test", maxConcurrent: 3, slots }).slots.length, 3);
 });
-
 test("allocation orders by occupancy, then oldest use, then slot id", async () => {
   const db = await GwpDatabase.open(":memory:");
   db.syncSlots(slots);
@@ -87,13 +81,11 @@ test("allocation orders by occupancy, then oldest use, then slot id", async () =
   addRequest(db, 2, "slot-a", "generating");
   addRequest(db, 3, "slot-b", "uncertain");
   addRequest(db, 4, "slot-c", "staged");
-
   const target = addRequest(db, 5);
   const claim = claimSlotForRequest(db, slots, 3, target, 100);
   assert.equal(claim.slot?.id, "slot-c");
   assert.equal(claim.request.slot_id, "slot-c");
   assert.equal(db.countActiveForSlot("slot-c"), 2);
-
   const tieDb = await GwpDatabase.open(":memory:");
   tieDb.syncSlots(slots);
   const tieTarget = addRequest(tieDb, 6);
@@ -101,7 +93,6 @@ test("allocation orders by occupancy, then oldest use, then slot id", async () =
   tieDb.close();
   db.close();
 });
-
 test("allocation enforces maxConcurrent using only nonterminal requests", async () => {
   const db = await GwpDatabase.open(":memory:");
   const config = slots.slice(0, 1);
@@ -109,11 +100,9 @@ test("allocation enforces maxConcurrent using only nonterminal requests", async 
   addRequest(db, 10, "slot-a", "sending");
   addRequest(db, 11, "slot-a", "generating");
   addRequest(db, 12, "slot-a", "complete");
-
   const target = addRequest(db, 13);
   assert.equal(claimSlotForRequest(db, config, 2, target, 100).slot, null);
   assert.equal(db.getRequest(target)?.slot_id, null);
-
   db.setRequestStatus(requestId(10), "complete");
   const claimed = claimSlotForRequest(db, config, 2, target, 101);
   assert.equal(claimed.slot?.id, "slot-a");
@@ -122,7 +111,6 @@ test("allocation enforces maxConcurrent using only nonterminal requests", async 
   assert.equal(db.countActiveForSlot("slot-a"), 2);
   db.close();
 });
-
 test("provider cooldown and needs-login states remain ineligible until recovered", async () => {
   const db = await GwpDatabase.open(":memory:");
   const config = slots.slice(0, 1);
@@ -137,7 +125,6 @@ test("provider cooldown and needs-login states remain ineligible until recovered
     claimSlotForRequest(db, config, 3, target, 1_000 + PROVIDER_COOLDOWN_MS).slot?.id,
     "slot-a",
   );
-
   db.setRequestStatus(target, "complete");
   markSlotNeedsLogin(db, "slot-a");
   const blocked = addRequest(db, 21);
@@ -146,7 +133,6 @@ test("provider cooldown and needs-login states remain ineligible until recovered
   assert.equal(claimSlotForRequest(db, config, 3, blocked, 9_999_999).slot?.id, "slot-a");
   db.close();
 });
-
 test("two database connections serialize claims without exceeding capacity", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-slot-race-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -159,7 +145,6 @@ test("two database connections serialize claims without exceeding capacity", asy
   const two = await GwpDatabase.open(filename);
   t.after(() => one.close());
   t.after(() => two.close());
-
   const claimed = await Promise.all([
     Promise.resolve().then(() => claimSlotForRequest(one, slots.slice(0, 2), 1, firstRequest, 100)),
     Promise.resolve().then(() => claimSlotForRequest(two, slots.slice(0, 2), 1, secondRequest, 100)),

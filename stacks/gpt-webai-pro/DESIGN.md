@@ -236,12 +236,42 @@ DB의 모든 attempt 상태 전이는 **guarded UPDATE**(`... WHERE state IN (<�
 수용한다 — confirmed/reconciled를 덮어쓰는 전이는 존재하지 않는다. attempt 2 arm은
 "직전 attempt가 no_send_proven일 때만" 조건을 같은 트랜잭션 안에서 검사해 원자 삽입한다.
 
-실패 분기 — daemon의 모든 send 에러는 `phase: 'pre_click' | 'post_click'`을 반드시 포함:
+**전송 확정 매칭 규칙 (2026-07-28 라이브 수정 — 오탐이 중복 전송을 유발했음)**: 새 user
+턴은 `turn.text === prompt` **정확 일치로 판정하지 않는다**. 첨부가 있으면 렌더된 user 턴
+텍스트 앞에 첨부 파일명/라벨이 붙어(`bundle.tar.gz File … <prompt>`) 절대 같지 않고,
+코드펜스/유니코드도 innerText가 원문과 달라진다. 판정 프리미티브
+`renderedTurnMatchesPrompt(rendered, prompt)` (send·reconcile 공용, 단일 헬퍼):
+- 양쪽을 **마크다운 무해 정규화**한다: CRLF→LF, 코드펜스 라인(정확히 ``` 또는 ```lang)
+  제거, 행 앞뒤 공백 제거, 연속 개행 축약, trim.
+- ChatGPT가 fenced code의 언어를 별도 헤더/배지 줄로 렌더하면, 원문 opening fence의 언어와
+  같은 위치·같은 토큰인 variant만 추가로 허용한다. `python` 같은 언어 단어를 전역 제거하지 않는다.
+- 렌더 텍스트에서 **선행 첨부 라벨 블록을 제거**한 본문이 정규화 프롬프트와 같거나
+  그것을 `endsWith` 하면 매칭. (임의 "마지막 N자" 규칙은 쓰지 않는다 — 취약하고 오인
+  위험. 코드펜스 제거로 파이썬/유니코드 케이스가 결정적으로 매칭된다.)
+- 확정 루프(send.ts)는 우리가 방금 클릭한 **그 탭**에서만 보므로, "baseline에 없던 새 user
+  턴 + 이 매칭"이면 충분(같은 탭에 우리 외 발신자 없음). 이 매칭 실패로 인한 확정 창
+  초과는 실제 전송 성공 오탐이므로 절대 `no_send_proven`으로 떨어지면 안 된다(아래).
 
-- **pre_click 에러** (모델 못 찾음, 칩 불일치, 컴포저 접근 실패): 클릭 전이므로 안전.
-  attempt → `no_send_proven`. 원인별로 needs_user_action/failed 또는 슬롯 교체 재시도(§8).
-- **post_click 에러 / RPC 타임아웃 / 소켓 단절 / daemon 사망**: attempt → `uncertain`,
-  request → `uncertain`. **여기서 절대 즉시 재전송하지 않는다.** 복구는 §5.3.
+**클릭 시점 durable 앵커 (중복 방지의 핵심)**: 안전성은 텍스트가 아니라 **ChatGPT가 서버에서
+부여하는 user turn id**(전역 유일)로 보장한다. daemon `send`는 클릭 직후 확정 루프에서
+이 탭에 나타난 **첫 새 user 턴 id**를 잡는 즉시, 확정(assistant/URL)이 나중에 실패하더라도
+그 값을 확보한다. 확정 실패로 throw할 때 에러에 `pendingUserTurnId`(잡았으면),
+`pendingConversationUrl`(그 탭 현재 URL, 루트여도), `preClickBaseline`을 싣는다.
+supervisor는 이를 **클릭이 실제로 일어났다는 증거**로 DB에 즉시 기록한다
+(`send_attempts.user_turn_id`에 pendingUserTurnId, requests.conversation_url이 비면
+pendingConversationUrl). turn id는 DDL/envelope 신설이 아니라 기존 필드 활용이다.
+
+실패 분기 — daemon의 모든 send 에러는 `phase: 'pre_click' | 'post_click'`을 반드시 포함하고,
+**pre_click은 daemon이 "send 버튼이 눌리지 않았음"을 적극 확인했을 때만** 부여한다
+(클릭 시도 자체가 시작됐으면 무조건 post_click):
+
+- **pre_click 에러** (모델 라벨 부재, 칩 불일치, 컴포저 접근 실패 — 클릭 코드에 진입 전):
+  전송이 발생하지 않았음이 확실. attempt → `no_send_proven`. needs_user_action/failed 또는
+  슬롯 교체 재시도(§8). 단 재시도(attempt 2)는 §5.3의 **긍정적 부재 증명**을 통과해야만
+  실제 재전송한다 (오분류 방어).
+- **post_click 에러 / 확정 창 초과 / 클릭 예외 / RPC 타임아웃 / 소켓 단절 / daemon 사망**:
+  attempt → `uncertain`, request → `uncertain`, `pendingConversationUrl` 기록.
+  **여기서 절대 즉시 재전송하지 않는다.** 복구는 §5.3.
 
 ### 5.3 uncertain 복구 (reconcile)
 
@@ -249,16 +279,31 @@ DB의 모든 attempt 상태 전이는 **guarded UPDATE**(`... WHERE state IN (<�
 sending/armed 요청)을 만나면 — 반드시 해당 요청의 `send.lock` flock을 쥔 상태로:
 
 1. 슬롯 컨테이너/daemon 재기동(필요 시).
-2. `daemon.reconcile({promptSha256, conversationUrl?})`:
-   - conversation_url을 알면 그 대화로 이동해 마지막 user 턴 텍스트의 sha256을 비교.
-   - 모르면(신규 대화 전송 중 사망) **열려 있는 chatgpt.com 탭들만** 스캔해 매칭 턴을 찾는다.
-     사이드바/히스토리 클릭 탐색은 하지 않는다 (프라이버시 + v1 금지 계승).
+2. `daemon.reconcile({prompt, promptSha256, conversationUrl?, pendingConversationUrl?,
+   pendingUserTurnId?})`. reconcile에는 **원문 `prompt`를 전달**해 §5.2 공용 헬퍼
+   `renderedTurnMatchesPrompt`를 그대로 쓴다(promptSha256은 로그/보조용으로 유지). 매칭
+   우선순위:
+   - **(A) `pendingUserTurnId`가 있으면 그 turn id를 전역에서 찾는다** — 있으면 그 탭이 곧
+     내 요청. 전역 유일 id라 오매칭 불가. 이게 1순위이자 모호성의 근본 해소책.
+   - (B) 없으면 `conversationUrl`/`pendingConversationUrl` 탭을 확인(텍스트 매칭).
+   - (C) 여전히 모르면 **열려 있는 chatgpt.com 탭들만** 스캔(텍스트 매칭). 사이드바/히스토리
+     클릭 탐색은 하지 않는다.
+   - **양성 회수(found)는 부재 증명 권한과 분리한다.** 앵커가 없어도 유일한 bound `/c/`
+     탭에서 user 턴이 매칭되고 다중 매치나 같은 프롬프트의 unbound(root) 매치가 없으면
+     found로 회수한다. 다른 unreadable 탭은 이 확실한 양성 매치를 무효화하지 않는다.
+     다중/unbound 매치는 모호하므로 보류한다. `canProveAbsence`는 found가 아니라 아래의
+     부재 증명과 재전송 승인에만 적용한다.
 3. 결과:
    - 턴 발견 → attempt `uncertain→reconciled`, status=generating, poll 계속. **재클릭 0회.**
-   - 턴 없음이 증명됨(대화 접근 성공 + 매칭 턴 부재) → attempt `no_send_proven`.
-     attempt_no<2이면 새 attempt로 재전송 허용, 아니면 needs_user_action.
-   - 증명 불가(Chrome도 죽어 탭 소실 등) → uncertain 유지, envelope needs_user_action에
-     상황 설명. 사람이 ChatGPT에서 직접 확인하는 것이 최후 수단.
+   - **부재 증명(재전송 허용)은 매우 보수적으로**: 대화/탭 접근에 성공했고 그 안에 매칭
+     user 턴/앵커가 확실히 없을 때만 `no_send_proven`. pendingUserTurnId 또는
+     pendingConversationUrl이 있는데 해당 앵커/탭에 접근 못 하면 부재로 판정하지 않는다
+     (uncertain 유지). attempt_no<2 AND 긍정적 부재 증명일 때만 새 attempt로 재전송.
+     **앵커 없이 텍스트 매칭만으로 판정하는데 동일 프롬프트 탭이 하나라도 있으면(단일이든
+     복수든) 재전송 금지** — anchor가 소실된 오매칭도 중복을 낳으므로 fail-closed. 중복보다
+     uncertain이 낫다.
+   - 증명 불가(Chrome 사망·탭 소실·앵커 소실·모호) → uncertain 유지, envelope
+     needs_user_action에 상황 설명. 사람이 ChatGPT에서 직접 확인하는 것이 최후 수단.
 
 ### 5.4 resume 일반 규칙
 
@@ -387,12 +432,36 @@ complete 판정 조건 (모두 충족):
 
 주의: 스트림 종료 직후 텍스트 공백 갭이 존재한다 (v1 poll 버그의 교훈,
 `lib/commands/poll.mjs`) — stop 버튼이 사라져도 answerText가 비어 있으면 complete가 아니다.
-답변 추출은 마지막 assistant 턴 노드의 innerText. artifact 컨트롤은 그 턴 내부의
-다운로드 가능 요소(`a[download]`, aria/텍스트 "Download" 계열)만 나열.
+답변 추출은 마지막 visible assistant 턴을 기준으로 하되 저장 assistant id가 사라졌으면 그 턴으로
+폴백한다. 파일 엔티티/inline download subtree와 그 wrapper의 action-only `Download` 텍스트는
+answer markdown/hash에서 제외한다.
+정제 후 본문이 비어도 artifact control이 하나 이상이면 유효한 artifact-only complete다.
+
+complete 안정화 시 artifact control이 0개이고 정제 전 답변에 파일명 또는 명시적인
+download/file/attachment(한국어 포함) 힌트가 있거나 정제 본문이 비었을 때만, poll deadline 안에서 최대 8초 동안
+500ms 간격으로 지연 렌더를 재관찰한다. 힌트가 없는 일반 답변은 유예 없이 즉시 complete한다.
+poll deadline이 먼저 오면 빈 artifact로 종결하지 않고 generating을 반환해 다음 poll에서 잇는다.
+
+**artifact 컨트롤 발견 (2026-07-28 실 DOM 기준)**: 현 ChatGPT는 인라인 `a[download]`가
+아니라 **답변 본문의 "파일 엔티티" 버튼**으로 파일을 노출한다 (실측: `<button
+aria-label="numbers.txt" class="behavior-btn …">numbers.txt</button>`, 파일 아이콘 svg 포함).
+발견 규칙:
+- assistant 턴 안에서 파일명(§6.1 FILENAME 정규식)을 accessible name/텍스트로 가진 버튼을
+  나열. 각 컨트롤의 label=파일명, index=등장 순서.
+- 다운로드 실행: 그 버튼 클릭 → 열리는 미리보기 패널에서 `aria-label="Download"` 버튼을
+  Playwright download 이벤트를 arm한 채 클릭 → 저장. (실측: 파일 버튼 클릭 시 패널에
+  `Download` 버튼 등장.) 인라인 `a[download]`도 있으면 그대로 지원(폴백).
 
 다운로드: Playwright download 이벤트로 outbox에 저장 → supervisor가
 `requests/<id>/artifacts/`로 이동 + sha256/size 기록. `.tar.gz` 같은 복합 확장자 보존.
 CDP 이벤트와의 이중 상관은 하지 않는다.
+
+managed 슬롯의 daemon은 컨테이너 경로 `/outbox/<file>`을 RPC `outboxPath`로 반환한다.
+supervisor는 `/outbox/` 경계 안의 경로만 슬롯의 host bind mount
+`<state>/slots/<slotId>/outbox/<file>`로 매핑하고, host 경계를 다시 검사한 뒤 그 host
+경로에서 sha256/size를 검증하고 요청 artifact로 이동한다. unmanaged 테스트 슬롯은 daemon이
+반환한 host 경로를 그대로 사용한다. 유효하게 매핑된 managed outbox 파일은 저장 성공과
+검증/저장 실패 모두 정리해 `.gwp-*` 임시 파일이나 최종명이 슬롯 outbox에 남지 않게 한다.
 
 **artifact 실패 정책**: 컨트롤당 최대 2회 시도. 그래도 실패하면 — 성공한 artifact는 전부
 보존(행+파일), 요청은 **complete로 종결**하되 envelope `message`에 실패 컨트롤

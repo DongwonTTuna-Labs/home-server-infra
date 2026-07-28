@@ -6,20 +6,19 @@ import path from "node:path";
 import test from "node:test";
 import { chromium, type Browser, type Page } from "playwright-core";
 import WebSocket from "ws";
-
 import { GwpError } from "../src/shared/errors.js";
 import { sha256Text } from "../src/shared/fsx.js";
+import type { ReconcileParams } from "../src/shared/types.js";
 import { startDaemon, type DaemonHandle } from "../src/daemon/main.js";
 import { BrowserSession } from "../src/daemon/browser.js";
+import { artifactControls } from "../src/daemon/selectors.js";
 import { RpcClient } from "../src/supervisor/rpc-client.js";
 import { findChromium } from "./fake-chatgpt/chromium.js";
 import { startFakeChatGpt } from "./fake-chatgpt/server.js";
-
 const LABELS = {
   target: ["Pro"],
   intelligence: ["Instant", "Medium", "High", "Extra High", "Pro"],
 };
-
 interface ScenarioRuntime {
   browser: Browser;
   daemon: DaemonHandle;
@@ -29,7 +28,6 @@ interface ScenarioRuntime {
   tokenPath: string;
   close(): Promise<void>;
 }
-
 function pollRequest(
   sent: { conversationUrl: string; userTurnId: string; assistantTurnId: string },
   prompt: string,
@@ -43,7 +41,12 @@ function pollRequest(
     waitMs,
   };
 }
-
+function reconcileRequest(
+  prompt: string,
+  extra: Omit<ReconcileParams, "prompt" | "promptSha256"> = {},
+): ReconcileParams {
+  return { prompt, promptSha256: sha256Text(prompt), ...extra };
+}
 async function seedCompletedConversation(page: Page, values: {
   url: string;
   prompt: string;
@@ -72,7 +75,6 @@ async function seedCompletedConversation(page: Page, values: {
     history.replaceState({}, "", input.url);
   }, values);
 }
-
 async function pageWithUserTurn(browser: Browser, userTurnId: string): Promise<Page> {
   for (const context of browser.contexts()) {
     for (const page of context.pages()) {
@@ -88,7 +90,6 @@ async function pageWithUserTurn(browser: Browser, userTurnId: string): Promise<P
   }
   throw new Error(`browser page for user turn ${userTurnId} was not found`);
 }
-
 async function unauthorizedStatus(port: number, authorization?: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/`, authorization
@@ -111,12 +112,10 @@ async function unauthorizedStatus(port: number, authorization?: string): Promise
     });
   });
 }
-
 test("daemon RPC covers required fake scenarios and the live Intelligence picker contract", async (t) => {
   const executablePath = await findChromium();
   const fake = await startFakeChatGpt();
   t.after(() => fake.close());
-
   async function setup(scenario: string): Promise<ScenarioRuntime> {
     const directory = await mkdtemp(path.join(os.tmpdir(), `gwp-daemon-${scenario}-`));
     const browser = await chromium.launch({
@@ -155,13 +154,16 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       },
     };
   }
-
   await t.test("happy: readiness, send, reconcile, poll, open, health, capture", async () => {
     const runtime = await setup("happy");
     try {
       const initialReadiness = await runtime.rpc.call("readiness", undefined);
       assert.equal(initialReadiness.state, "ready");
       assert.equal(initialReadiness.modelLabel, "Instant\n5.5");
+      assert.deepEqual(
+        await runtime.rpc.call("reconcile", reconcileRequest("lost with browser")),
+        { found: false, proven: false },
+      );
       const prompt = "hello from daemon e2e";
       const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
       assert.match(sent.conversationUrl, /\/c\/fake-/);
@@ -174,15 +176,13 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         await page.locator('[role="menuitemradio"][data-intelligence="Pro"]').getAttribute("aria-checked"),
         "true",
       );
-      const reconciled = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
+      const reconciled = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
         conversationUrl: sent.conversationUrl,
-      });
+      }));
       assert.equal(reconciled.found, true);
-      const missing = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text("not present"),
+      const missing = await runtime.rpc.call("reconcile", reconcileRequest("not present", {
         conversationUrl: sent.conversationUrl,
-      });
+      }));
       assert.deepEqual(missing, { found: false, proven: true });
       const polled = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
       assert.equal(polled.state, "complete");
@@ -207,11 +207,8 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         true,
       );
       assert.equal(page.isClosed(), true);
-    } finally {
-      await runtime.close();
-    }
+    } finally { await runtime.close(); }
   });
-
   await t.test("temporary WEB URL is replaced without navigating away from confirmed turns", async () => {
     const runtime = await setup("url-rebind");
     try {
@@ -221,20 +218,15 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
       await page.waitForURL(/\/c\/final-/);
       const finalUrl = page.url();
-
       const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
       assert.equal(terminal.state, "complete");
       assert.equal(terminal.currentUrl, finalUrl);
       assert.equal(page.url(), finalUrl);
-
       const repeated = await runtime.rpc.call("poll", pollRequest(sent, prompt, 0));
       assert.equal(repeated.currentUrl, finalUrl);
       assert.equal(page.url(), finalUrl);
-    } finally {
-      await runtime.close();
-    }
+    } finally { await runtime.close(); }
   });
-
   await t.test("assistant placeholder id rebinds to the observed final id behind the durable user turn", async () => {
     const runtime = await setup("assistant-id-rebind");
     try {
@@ -252,7 +244,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         .locator('[data-message-author-role="assistant"]')
         .getAttribute("data-message-id");
       assert.match(observedAssistantTurnId ?? "", /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
-
       const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
       assert.equal(terminal.state, "complete");
       assert.equal(terminal.answerMarkdown, "fake answer");
@@ -261,7 +252,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("root redirect during rebind falls back to prompt reconciliation in open tabs", async () => {
     const runtime = await setup("root-redirect");
     try {
@@ -293,11 +283,10 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         "/c/WEB:stale-root?scenario=root-redirect",
         fake.baseUrl("root-redirect"),
       ).href;
-
-      const reconciled = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
+      const reconciled = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
         conversationUrl: staleUrl,
-      });
+        pendingUserTurnId: "user-root-rebind",
+      }));
       assert.equal(reconciled.found, true);
       assert.equal(reconciled.conversationUrl, finalUrl);
       assert.equal(reconciled.userTurnId, "user-root-rebind");
@@ -306,7 +295,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("stored URL wins over another open tab with the same prompt", async () => {
     const runtime = await setup("happy");
     try {
@@ -322,6 +310,7 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         userTurnId: "user-competitor",
         assistantTurnId: "assistant-competitor",
       });
+      const competitorUrl = competitor.url();
       const target = await context.newPage();
       await target.goto(fake.baseUrl("happy"));
       await seedCompletedConversation(target, {
@@ -332,7 +321,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         assistantTurnId: "assistant-target",
       });
       const targetUrl = target.url();
-
       const polled = await runtime.rpc.call("poll", {
         conversationUrl: targetUrl,
         promptSha256: sha256Text(prompt),
@@ -341,20 +329,23 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       assert.equal(polled.state, "complete");
       assert.equal(polled.currentUrl, targetUrl);
       assert.equal(polled.answerMarkdown, "target answer");
-
-      const reconciled = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
+      const reconciled = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
         conversationUrl: targetUrl,
-      });
+      }));
       assert.equal(reconciled.found, true);
       assert.equal(reconciled.conversationUrl, targetUrl);
       assert.equal(reconciled.userTurnId, "user-target");
       assert.equal(reconciled.assistantTurnId, "assistant-target");
+      const idAnchored = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
+        conversationUrl: competitorUrl,
+        pendingUserTurnId: "user-target",
+      }));
+      assert.equal(idAnchored.conversationUrl, targetUrl);
+      assert.equal(idAnchored.userTurnId, "user-target");
     } finally {
       await runtime.close();
     }
   });
-
   await t.test("durable user anchor wins across same-prompt tabs and a stale assistant id", async () => {
     const runtime = await setup("happy");
     try {
@@ -380,7 +371,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         userTurnId: "user-durable-target",
         assistantTurnId: "assistant-durable-target",
       });
-
       const polled = await runtime.rpc.call("poll", {
         conversationUrl: competitorUrl,
         promptSha256: sha256Text(prompt),
@@ -396,7 +386,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("two requests share one browser without sharing tabs and close independently", async () => {
     const runtime = await setup("multi-tab");
     try {
@@ -420,7 +409,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const secondPage = await pageWithUserTurn(runtime.browser, second.userTurnId);
       assert.notEqual(firstPage, secondPage);
       assert.equal(runtime.browser.contexts()[0]?.pages().length, 3);
-
       const [firstPoll, secondPoll] = await Promise.all([
         runtime.rpc.call("poll", pollRequest(first, "first multiplexed request", 7_000)),
         runtime.rpc.call("poll", pollRequest(second, "second multiplexed request", 7_000)),
@@ -429,7 +417,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       assert.equal(firstPoll.answerMarkdown, "answer for first multiplexed request");
       assert.equal(secondPoll.state, "complete");
       assert.equal(secondPoll.answerMarkdown, "answer for second multiplexed request");
-
       await runtime.rpc.call("closeConversation", { conversationUrl: firstPoll.currentUrl });
       assert.equal(firstPage.isClosed(), true);
       assert.equal(secondPage.isClosed(), false);
@@ -439,44 +426,69 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
-  await t.test("reconcile is fenced behind send and duplicate prompt candidates fail closed", async () => {
+  await t.test("anchorless reconcile recovers one bound match but not absence or ambiguity", async () => {
     const runtime = await setup("multi-tab");
     try {
       const prompt = "identical prompt during reconcile";
-      const sending = runtime.rpc.call("send", { prompt, files: [], newConversation: true });
-      const reconciling = runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
-      });
-      const [first, fenced] = await Promise.all([sending, reconciling]);
-      assert.equal(fenced.found, true);
-      assert.equal(fenced.userTurnId, first.userTurnId);
-
+      const first = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const recovered = await runtime.rpc.call("reconcile", reconcileRequest(prompt));
+      assert.equal(recovered.found, true);
+      assert.equal(recovered.userTurnId, first.userTurnId);
+      const absent = await runtime.rpc.call("reconcile", reconcileRequest("missing anchorless prompt"));
+      assert.deepEqual(absent, { found: false, proven: false });
       const second = await runtime.rpc.call("send", {
         prompt,
         files: [],
         newConversation: true,
       });
-      const ambiguous = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
-      });
+      const ambiguous = await runtime.rpc.call("reconcile", reconcileRequest(prompt));
       assert.deepEqual(ambiguous, { found: false, proven: false });
-
-      const firstScoped = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
+      const firstScoped = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
         conversationUrl: first.conversationUrl,
-      });
-      const secondScoped = await runtime.rpc.call("reconcile", {
-        promptSha256: sha256Text(prompt),
+      }));
+      const secondScoped = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
         conversationUrl: second.conversationUrl,
-      });
+      }));
       assert.equal(firstScoped.userTurnId, first.userTurnId);
       assert.equal(secondScoped.userTurnId, second.userTurnId);
     } finally {
       await runtime.close();
     }
   });
-
+  await t.test("reconcile follows a pending root tab but never proves an inaccessible tab absent", async () => {
+    const runtime = await setup("multi-tab");
+    try {
+      const page = await runtime.browser.contexts()[0]!.newPage();
+      await page.goto(fake.baseUrl("multi-tab"));
+      const pendingConversationUrl = page.url();
+      const prompt = "uniquely landed after confirmation miss";
+      const origin = new URL(fake.baseUrl("multi-tab")).origin;
+      const finalUrl = `${origin}/c/pending-promoted?scenario=multi-tab`;
+      await seedCompletedConversation(page, {
+        url: finalUrl,
+        prompt,
+        answer: "landed",
+        userTurnId: "user-pending-promoted",
+        assistantTurnId: "assistant-pending-promoted",
+      });
+      const found = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
+        pendingConversationUrl,
+        pendingUserTurnId: "user-pending-promoted",
+        preClickBaseline: [],
+      }));
+      assert.equal(found.found, true);
+      assert.equal(found.conversationUrl, finalUrl);
+      assert.equal(found.userTurnId, "user-pending-promoted");
+      const inaccessible = await runtime.rpc.call("reconcile", reconcileRequest("not present in any tab", {
+        pendingConversationUrl: `${origin}/c/WEB:stale-root?scenario=root-redirect`,
+        pendingUserTurnId: "missing-user-anchor",
+        preClickBaseline: [],
+      }));
+      assert.deepEqual(inaccessible, { found: false, proven: false });
+    } finally {
+      await runtime.close();
+    }
+  });
   await t.test("WebSocket handshake requires the exact bearer token", async () => {
     const runtime = await setup("happy");
     try {
@@ -492,7 +504,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("login-wall", async () => {
     const runtime = await setup("login-wall");
     try {
@@ -501,7 +512,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("rate-limit", async () => {
     const runtime = await setup("rate-limit");
     try {
@@ -510,7 +520,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("model-missing is a pre-click error", async () => {
     const runtime = await setup("model-missing");
     try {
@@ -524,7 +533,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("missing aria-checked confirmation is a pre-click error", async () => {
     const runtime = await setup("model-check-fails");
     try {
@@ -538,7 +546,48 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
+  await t.test("post-click error preserves the first observed user turn id", async () => {
+    const runtime = await setup("confirmation-miss");
+    try {
+      const context = runtime.browser.contexts()[0]!;
+      const newPage = context.waitForEvent("page");
+      const sending = runtime.rpc.call("send", {
+        prompt: "landed before confirmation failed",
+        files: [],
+        newConversation: true,
+      });
+      const page = await newPage;
+      const user = page.locator('[data-message-author-role="user"]').first();
+      await user.waitFor({ state: "visible", timeout: 10_000 });
+      const pendingUserTurnId = await user.getAttribute("data-message-id");
+      assert.ok(pendingUserTurnId);
+      await page.close();
+      await assert.rejects(sending, (error: unknown) => error instanceof GwpError
+        && error.phase === "post_click"
+        && error.pendingUserTurnId === pendingUserTurnId
+        && error.preClickBaseline?.length === 0);
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("code fences and Unicode normalize identically in send and reconcile", async () => {
+    const runtime = await setup("markdown-normalization");
+    try {
+      const prompt = "파이썬 실행\r\n```python\r\n  print(\"안녕 🧪\")  \r\n```\r\n완료";
+      const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      const rendered = await page.locator(`[data-message-id="${sent.userTurnId}"]`).innerText();
+      assert.doesNotMatch(rendered, /```/u);
+      assert.match(rendered, /^python$/mu);
+      assert.match(rendered, /안녕 🧪/u);
+      const reconciled = await runtime.rpc.call("reconcile", reconcileRequest(prompt, {
+        conversationUrl: sent.conversationUrl,
+      }));
+      assert.equal(reconciled.userTurnId, sent.userTurnId);
+    } finally {
+      await runtime.close();
+    }
+  });
   await t.test("post-stream-gap remains generating until text materializes and stabilizes", async () => {
     const runtime = await setup("post-stream-gap");
     try {
@@ -553,7 +602,6 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-
   await t.test("attachments accept semantic chips and duplicate UI rename", async () => {
     const runtime = await setup("attachments");
     const left = path.join(runtime.directory, "left");
@@ -573,29 +621,72 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         newConversation: true,
       });
       assert.match(sent.conversationUrl, /\/c\//);
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      const rendered = await page.locator(`[data-message-id="${sent.userTurnId}"]`).innerText();
+      assert.match(rendered, /same\.txt\s+File/);
+      assert.match(rendered, /same \(1\)\.txt\s+File/);
+      assert.ok(rendered.endsWith("attachments"));
+      const reconciled = await runtime.rpc.call("reconcile", reconcileRequest("attachments", {
+        conversationUrl: sent.conversationUrl,
+      }));
+      assert.equal(reconciled.userTurnId, sent.userTurnId);
     } finally {
       await runtime.close();
     }
   });
-
-  await t.test("artifacts download twice and preserve compound extension", async () => {
-    const runtime = await setup("artifacts");
+  for (const scenario of ["artifacts", "artifacts-inline"] as const) {
+    await t.test(`${scenario} downloads twice and preserves compound extension`, async () => {
+      const runtime = await setup(scenario);
+      try {
+        const prompt = scenario;
+        const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+        const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
+        assert.equal(terminal.state, "complete");
+        assert.deepEqual(terminal.artifactControls?.map((control) => control.label), [
+          "report.txt",
+          "archive.tar.gz",
+        ]);
+        const first = await runtime.rpc.call("download", { conversationUrl: sent.conversationUrl, controlIndex: 0 });
+        const second = await runtime.rpc.call("download", { conversationUrl: sent.conversationUrl, controlIndex: 1 });
+        assert.deepEqual([first.filename, second.filename], ["report.txt", "archive.tar.gz"]);
+        assert.equal((await readFile(first.outboxPath, "utf8")), "report from fake ChatGPT\n");
+        assert.deepEqual(await readFile(second.outboxPath), Buffer.from("fake-tar-gz"));
+      } finally { await runtime.close(); }
+    });
+  }
+  for (const [scenario, answer, waitMs] of [["artifacts-delayed", "numbers.txt.", 12_000],
+    ["artifacts-empty", "", 6_000]] as const) {
+    await t.test(`${scenario} discovers a delayed filename-only entity`, async () => {
+      const runtime = await setup(scenario);
+      try {
+        const prompt = scenario;
+        const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
+        const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, waitMs));
+        assert.equal(terminal.state, "complete");
+        assert.equal(terminal.answerMarkdown, answer);
+        assert.equal(terminal.answerSha256, sha256Text(terminal.answerMarkdown));
+        assert.deepEqual(terminal.artifactControls, [{ index: 0, label: "numbers.txt" }]);
+        const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+        assert.deepEqual(await artifactControls(page, "stale-assistant-id"), terminal.artifactControls);
+        const saved = await runtime.rpc.call("download", { conversationUrl: sent.conversationUrl, controlIndex: 0 });
+        assert.equal(saved.filename, "numbers.txt");
+        assert.equal(await readFile(saved.outboxPath, "utf8"), "1\n2\n3\n");
+      } finally { await runtime.close(); }
+    });
+  }
+  await t.test("answer without a file hint completes before a delayed entity appears", async () => {
+    const runtime = await setup("artifacts-no-hint");
     try {
-      const prompt = "artifacts";
+      const prompt = "ordinary answer only";
       const sent = await runtime.rpc.call("send", { prompt, files: [], newConversation: true });
-      const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
+      const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 12_000));
       assert.equal(terminal.state, "complete");
-      assert.equal(terminal.artifactControls?.length, 2);
-      const first = await runtime.rpc.call("download", { conversationUrl: sent.conversationUrl, controlIndex: 0 });
-      const second = await runtime.rpc.call("download", { conversationUrl: sent.conversationUrl, controlIndex: 1 });
-      assert.deepEqual([first.filename, second.filename].sort(), ["archive.tar.gz", "report.txt"]);
-      assert.ok((await readFile(first.outboxPath)).length > 0);
-      assert.ok((await readFile(second.outboxPath)).length > 0);
-    } finally {
-      await runtime.close();
-    }
+      assert.equal(terminal.answerMarkdown, "ordinary answer");
+      assert.deepEqual(terminal.artifactControls, []);
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      assert.equal(await page.locator('button[aria-label="report.txt"]').count(), 0);
+    } finally { await runtime.close(); }
   });
-
   await t.test("slow exceeds waitMs without terminalizing", async () => {
     const runtime = await setup("slow");
     const second = await RpcClient.connect(runtime.daemon.port, runtime.tokenPath);

@@ -1,5 +1,4 @@
 import type { Page } from "playwright-core";
-
 import { GwpError } from "../../shared/errors.js";
 import type { LabelConfig } from "../../shared/types.js";
 import {
@@ -9,7 +8,6 @@ import {
   readCurrentModelLabel,
   waitForIntelligenceMenu,
 } from "../selectors.js";
-
 export async function ensurePro(page: Page, labels: LabelConfig): Promise<string> {
   const targets = new Set(labels.target.map(normalizeIntelligenceLabel));
   try {
@@ -17,7 +15,6 @@ export async function ensurePro(page: Page, labels: LabelConfig): Promise<string
     if (!pill) throw new Error("intelligence picker pill is not uniquely visible");
     let current = await pill.innerText().catch(() => "");
     if (targets.has(normalizeIntelligenceLabel(current))) return current.trim();
-
     await pill.click({ timeout: 10_000 });
     if (!await waitForIntelligenceMenu(page, 10_000)) {
       throw new Error("intelligence radio menu did not become visible");

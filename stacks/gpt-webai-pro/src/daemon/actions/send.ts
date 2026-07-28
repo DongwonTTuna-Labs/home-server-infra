@@ -1,5 +1,4 @@
 import type { Page } from "playwright-core";
-
 import { GwpError } from "../../shared/errors.js";
 import type { LabelConfig, SendParams, SendResult } from "../../shared/types.js";
 import {
@@ -8,51 +7,52 @@ import {
   SEND_BUTTON_SELECTORS,
   UPLOAD_BUTTON_SELECTORS,
   normalizeChipStem,
+  renderedTurnMatchesPrompt,
   observeAttachmentChips,
   readTurns,
   visibleFirst,
 } from "../selectors.js";
 import type { BrowserSession } from "../browser.js";
 import { ensurePro } from "./model.js";
-
 export async function sendMessage(
   session: BrowserSession,
   params: SendParams,
   labels: LabelConfig,
 ): Promise<SendResult> {
-  let clicked = false;
+  let page: Page | null = null;
+  let clickStarted = false;
+  let pendingUserTurnId: string | undefined;
+  let preClickBaseline: string[] | undefined;
   try {
-    const page = await session.newConversation();
+    page = await session.newConversation();
     await ensurePro(page, labels);
     await fillComposer(page, params.prompt);
     if (params.files.length > 0) {
       await attachFiles(page, params.files.map((file) => file.containerPath));
       await waitForExpectedChips(page, params.files.map((file) => file.name), 30_000);
     }
-
     const baseline = await readTurns(page);
     const baselineIds = new Set(baseline.map((turn) => turn.dataMessageId));
     const send = await waitForSendButton(page, 30_000);
     if (!send) throw new GwpError("compose_failed", "send button is not ready", { phase: "pre_click" });
+    preClickBaseline = [...baselineIds];
+    clickStarted = true;
     try {
       await send.click({ timeout: 10_000 });
-      clicked = true;
     } catch (error) {
       throw new GwpError("click_uncertain", `send click did not return cleanly: ${String(error)}`, {
         phase: "post_click",
         cause: error,
       });
     }
-
-    const deadline = Date.now() + 30_000;
-    const expectedPrompt = params.prompt.trim();
+    const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       const turns = await readTurns(page);
-      const user = turns.find((turn) => (
-        turn.role === "user"
-        && !baselineIds.has(turn.dataMessageId)
-        && turn.text === expectedPrompt
+      const newUsers = turns.filter((turn) => (
+        turn.role === "user" && !baselineIds.has(turn.dataMessageId)
       ));
+      pendingUserTurnId ??= newUsers[0]?.dataMessageId;
+      const user = newUsers.find((turn) => renderedTurnMatchesPrompt(turn.text, params.prompt));
       const assistant = user && turns.find((turn) => (
         turn.role === "assistant"
         && !baselineIds.has(turn.dataMessageId)
@@ -74,21 +74,26 @@ export async function sendMessage(
       { phase: "post_click" },
     );
   } catch (error) {
-    if (error instanceof GwpError) {
-      if (error.phase) throw error;
-      throw new GwpError(error.kind, error.detail, {
-        phase: clicked ? "post_click" : "pre_click",
+    const gwp = error instanceof GwpError ? error : null;
+    throw new GwpError(
+      gwp?.kind ?? (clickStarted ? "click_uncertain" : "compose_failed"),
+      gwp?.detail ?? String(error),
+      {
+        // Entering send.click() transfers authority irrevocably to post-click.
+        phase: clickStarted ? "post_click" : gwp?.phase ?? "pre_click",
         cause: error,
-        networkEvidence: error.networkEvidence,
-      });
-    }
-    throw new GwpError(clicked ? "click_uncertain" : "compose_failed", String(error), {
-      phase: clicked ? "post_click" : "pre_click",
-      cause: error,
-    });
+        ...(gwp?.networkEvidence ? { networkEvidence: true } : {}),
+        ...(clickStarted && page
+          ? {
+              ...(pendingUserTurnId ? { pendingUserTurnId } : {}),
+              pendingConversationUrl: page.url(),
+              preClickBaseline: preClickBaseline ?? [],
+            }
+          : {}),
+      },
+    );
   }
 }
-
 async function fillComposer(page: Page, prompt: string): Promise<void> {
   const composer = await visibleFirst(page, COMPOSER_SELECTORS);
   if (!composer) throw new GwpError("compose_failed", "composer is not visible", { phase: "pre_click" });
@@ -100,7 +105,6 @@ async function fillComposer(page: Page, prompt: string): Promise<void> {
     await page.keyboard.insertText(prompt);
   }
 }
-
 async function attachFiles(page: Page, files: string[]): Promise<void> {
   const input = page.locator(FILE_INPUT_SELECTOR).first();
   if (await input.count() > 0) {
@@ -113,7 +117,6 @@ async function attachFiles(page: Page, files: string[]): Promise<void> {
   await upload.click({ timeout: 10_000 });
   await (await chooser).setFiles(files);
 }
-
 async function waitForExpectedChips(
   page: Page,
   expectedNames: string[],
@@ -136,7 +139,6 @@ async function waitForExpectedChips(
     { phase: "pre_click" },
   );
 }
-
 async function waitForSendButton(page: Page, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -146,13 +148,11 @@ async function waitForSendButton(page: Page, timeoutMs: number) {
   }
   return null;
 }
-
 function counts(values: string[]): Map<string, number> {
   const result = new Map<string, number>();
   for (const value of values) result.set(value, (result.get(value) ?? 0) + 1);
   return result;
 }
-
 function sameCounts(left: Map<string, number>, right: Map<string, number>): boolean {
   return left.size === right.size && [...left].every(([key, value]) => right.get(key) === value);
 }
