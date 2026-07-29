@@ -81,10 +81,37 @@ export interface SendParams {
   prompt: string;
   files: RpcFile[];
 }
+export type SendStep =
+  | "navigate"
+  | "ensure_model"
+  | "compose"
+  | "attach"
+  | "verify_chips"
+  | "baseline"
+  | "wait_send_button"
+  | "click"
+  | "confirm";
+export interface SendProgress {
+  step: SendStep;
+  phase: import("./errors.js").SendPhase;
+  elapsedMs: number;
+  stepElapsedMs: number;
+  pendingUserTurnId?: string;
+  pendingConversationUrl?: string;
+  preClickBaseline?: string[];
+  matchDebug?: string;
+}
+export const SEND_PROGRESS_METHOD = "gwp.sendProgress";
+export interface SendProgressNotification {
+  jsonrpc: "2.0";
+  method: typeof SEND_PROGRESS_METHOD;
+  params: { callId: number; progress: SendProgress };
+}
 export interface SendResult {
   conversationUrl: string;
   userTurnId: string;
   assistantTurnId: string;
+  matchedBy?: "strict" | "loose" | "single_turn";
 }
 export interface ReconcileParams {
   prompt: string;
@@ -100,6 +127,8 @@ export interface ReconcileResult {
   userTurnId?: string;
   assistantTurnId?: string;
   proven: boolean;
+  matchedBy?: "cache" | "turn_anchor" | "strict" | "loose" | "single_turn";
+  evidence?: string;
 }
 export interface ArtifactControl {
   index: number;

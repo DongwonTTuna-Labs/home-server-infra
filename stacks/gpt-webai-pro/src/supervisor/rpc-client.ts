@@ -6,15 +6,29 @@ import {
   type DaemonErrorKind,
   type SendPhase,
 } from "../shared/errors.js";
-import type { RpcMethod, RpcMethods } from "../shared/types.js";
+import { SEND_PROGRESS_METHOD, type RpcMethod, type RpcMethods, type SendProgress } from "../shared/types.js";
+export interface CallOptions {
+  // 절대 상한. 이 시간 안에 결과가 없으면 실패한다.
+  timeoutMs?: number;
+  // 무진행 상한: daemon의 progress 알림이 이 간격 안에 계속 오는 한 timeoutMs까지
+  // 기다린다. 알림이 끊기면(daemon 사망/행) 조기에 실패한다. send처럼 소요 시간이
+  // 페이지 상태에 좌우되는 호출에 쓴다.
+  inactivityMs?: number;
+  onProgress?: (progress: SendProgress) => void;
+}
 interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
   timer: NodeJS.Timeout;
+  inactivityMs?: number;
+  inactivityTimer?: NodeJS.Timeout;
+  onProgress?: (progress: SendProgress) => void;
 }
 interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: number;
+  method?: string;
+  params?: { callId?: number; progress?: SendProgress };
   result?: unknown;
   error?: {
     code: number;
@@ -80,27 +94,44 @@ export class RpcClient {
   call<M extends RpcMethod>(
     method: M,
     params: RpcMethods[M]["params"],
-    timeoutMs = 65_000,
+    options: number | CallOptions = 65_000,
   ): Promise<RpcMethods[M]["result"]> {
+    const resolved = typeof options === "number" ? { timeoutMs: options } : options;
+    const timeoutMs = resolved.timeoutMs ?? 65_000;
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const settle = (reason: Error) => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        if (pending.inactivityTimer) clearTimeout(pending.inactivityTimer);
         this.pending.delete(id);
-        reject(new Error(`RPC ${method} timed out`));
+        reject(reason);
+      };
+      const timer = setTimeout(() => {
+        settle(new Error(`RPC ${method} timed out`));
       }, timeoutMs);
-      this.pending.set(id, {
+      const entry: PendingCall = {
         resolve: resolve as (value: unknown) => void,
         reject,
         timer,
-      });
+        ...(resolved.inactivityMs ? { inactivityMs: resolved.inactivityMs } : {}),
+        ...(resolved.onProgress ? { onProgress: resolved.onProgress } : {}),
+      };
+      if (resolved.inactivityMs) {
+        entry.inactivityTimer = setTimeout(() => {
+          settle(new Error(
+            `RPC ${method} made no progress for ${resolved.inactivityMs}ms`,
+          ));
+        }, resolved.inactivityMs);
+      }
+      this.pending.set(id, entry);
       const payload = params === undefined
         ? { jsonrpc: "2.0", id, method }
         : { jsonrpc: "2.0", id, method, params };
       this.socket.send(JSON.stringify(payload), (error) => {
         if (!error) return;
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(error);
+        settle(error instanceof Error ? error : new Error(String(error)));
       });
     });
   }
@@ -123,9 +154,14 @@ export class RpcClient {
       this.rejectAll(new Error("daemon returned invalid JSON"));
       return;
     }
+    if (response.id === undefined || response.id === null) {
+      if (response.method === SEND_PROGRESS_METHOD) this.onProgressNotification(response);
+      return;
+    }
     const pending = this.pending.get(response.id);
     if (!pending) return;
     clearTimeout(pending.timer);
+    if (pending.inactivityTimer) clearTimeout(pending.inactivityTimer);
     this.pending.delete(response.id);
     if (response.error) {
       const rawKind = response.error.data?.kind ?? "internal";
@@ -152,9 +188,32 @@ export class RpcClient {
     }
     pending.resolve(response.result);
   }
+  private onProgressNotification(notification: JsonRpcResponse): void {
+    const callId = notification.params?.callId;
+    const progress = notification.params?.progress;
+    if (typeof callId !== "number" || !progress) return;
+    const pending = this.pending.get(callId);
+    if (!pending) return;
+    if (pending.inactivityTimer && pending.inactivityMs) {
+      clearTimeout(pending.inactivityTimer);
+      pending.inactivityTimer = setTimeout(() => {
+        clearTimeout(pending.timer);
+        this.pending.delete(callId);
+        pending.reject(new Error(
+          `RPC send made no progress for ${pending.inactivityMs}ms`,
+        ));
+      }, pending.inactivityMs);
+    }
+    try {
+      pending.onProgress?.(progress);
+    } catch {
+      // A progress observer must never break the call itself.
+    }
+  }
   private rejectAll(error: unknown): void {
     for (const call of this.pending.values()) {
       clearTimeout(call.timer);
+      if (call.inactivityTimer) clearTimeout(call.inactivityTimer);
       call.reject(error);
     }
     this.pending.clear();

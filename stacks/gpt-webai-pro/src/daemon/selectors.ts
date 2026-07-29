@@ -88,11 +88,10 @@ function normalizeMarkdown(value: string, preserveFenceLanguages: boolean): stri
     .trim();
 }
 export function normalizePromptText(value: string): string { return normalizeMarkdown(value, false); }
-export function renderedTurnMatchesPrompt(
-  renderedText: string,
-  expectedPrompt: string,
-): boolean {
-  const prompts = new Set([normalizePromptText(expectedPrompt), normalizeMarkdown(expectedPrompt, true)]);
+function promptVariants(expectedPrompt: string): string[] {
+  return [...new Set([normalizePromptText(expectedPrompt), normalizeMarkdown(expectedPrompt, true)])];
+}
+export function renderedBodyForMatch(renderedText: string): string {
   const lines = normalizePromptText(renderedText).split("\n");
   let firstBodyLine = 0;
   while (firstBodyLine + 1 < lines.length
@@ -100,9 +99,65 @@ export function renderedTurnMatchesPrompt(
     && /^(?:file|파일)$/iu.test(lines[firstBodyLine + 1]!)) {
     firstBodyLine += 2;
   }
-  const renderedBody = lines.slice(firstBodyLine).join("\n").trim();
-  return [...prompts].some((prompt) => Boolean(prompt
+  return lines.slice(firstBodyLine).join("\n").trim();
+}
+export function renderedTurnMatchesPrompt(
+  renderedText: string,
+  expectedPrompt: string,
+): boolean {
+  const renderedBody = renderedBodyForMatch(renderedText);
+  return promptVariants(expectedPrompt).some((prompt) => Boolean(prompt
     && (renderedBody === prompt || renderedBody.endsWith(prompt))));
+}
+// 대형 프롬프트는 ChatGPT 렌더가 원문과 수백 자 단위로 어긋날 수 있어(마크다운 렌더,
+// 중간 축약) 완전 일치가 실패한다. 이 loose 판정은 identity가 이미 다른 근거로 좁혀진
+// 경우(방금 클릭한 탭의 유일한 새 user 턴, URL 앵커로 연 대화의 유일한 user 턴)에만
+// 쓴다 — 열린 탭 텍스트 스캔의 identity 증명으로는 쓰지 않는다.
+export const LOOSE_MATCH_MIN_PROMPT_CHARS = 4_096;
+const LOOSE_MATCH_EDGE_CHARS = 1_000;
+export function renderedTurnMatchesPromptLoose(
+  renderedText: string,
+  expectedPrompt: string,
+): boolean {
+  const renderedBody = renderedBodyForMatch(renderedText);
+  return promptVariants(expectedPrompt).some((prompt) => (
+    prompt.length >= LOOSE_MATCH_MIN_PROMPT_CHARS
+    && renderedBody.length >= Math.floor(prompt.length * 0.9)
+    && renderedBody.length <= prompt.length + 200
+    && renderedBody.slice(0, LOOSE_MATCH_EDGE_CHARS) === prompt.slice(0, LOOSE_MATCH_EDGE_CHARS)
+    && renderedBody.slice(-LOOSE_MATCH_EDGE_CHARS) === prompt.slice(-LOOSE_MATCH_EDGE_CHARS)
+  ));
+}
+// 실 UI는 user 턴 마크다운을 렌더링해 문서 전체에서 문법 문자가 소실된다 (2026-07-29
+// 라이브 실측: firstDiff=476, tailMatch=0, 길이 98% — 앞뒤 경계 비교로는 잡을 수 없음).
+// 이 tier는 identity가 다른 근거로 이미 확정된 유일 턴(방금 클릭한 탭의 단일 새 user 턴,
+// URL 앵커 대화의 단일 user 턴)에 대한 최종 sanity로만 쓴다.
+export function renderedTurnLengthSane(
+  renderedText: string,
+  expectedPrompt: string,
+): boolean {
+  const renderedBody = renderedBodyForMatch(renderedText);
+  return promptVariants(expectedPrompt).some((prompt) => (
+    prompt.length >= LOOSE_MATCH_MIN_PROMPT_CHARS
+    && renderedBody.length >= Math.floor(prompt.length * 0.85)
+    && renderedBody.length <= Math.ceil(prompt.length * 1.1)
+  ));
+}
+export function renderedTurnMatchEvidence(
+  renderedText: string,
+  expectedPrompt: string,
+): string {
+  const prompt = normalizePromptText(expectedPrompt);
+  const renderedBody = renderedBodyForMatch(renderedText);
+  const limit = Math.min(prompt.length, renderedBody.length);
+  let firstDiff = 0;
+  while (firstDiff < limit && prompt[firstDiff] === renderedBody[firstDiff]) firstDiff += 1;
+  let tailMatch = 0;
+  while (tailMatch < limit
+    && prompt[prompt.length - 1 - tailMatch] === renderedBody[renderedBody.length - 1 - tailMatch]) {
+    tailMatch += 1;
+  }
+  return `renderedLen=${renderedBody.length} promptLen=${prompt.length} firstDiff=${firstDiff} tailMatch=${tailMatch}`;
 }
 const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
   const filename = /[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu;
@@ -249,6 +304,31 @@ export async function readTurns(page: Page): Promise<TurnObservation[]> {
       domIndex,
     };
   }).filter((item): item is TurnObservation => item !== null));
+}
+export type TurnMeta = Omit<TurnObservation, "text">;
+// innerText는 강제 layout을 유발한다 — 87KB user 턴이 있는 페이지에서 250ms 주기
+// 전체 추출은 확정 루프를 분 단위로 늘렸다(2026-07-29 실측). 확정/스캔 루프는 이
+// 경량 관측으로 돌고, 텍스트는 매칭 대상 턴만 readTurnTextById로 뽑는다.
+export async function readTurnsShallow(page: Page): Promise<TurnMeta[]> {
+  return page.locator(TURN_SELECTOR).evaluateAll((nodes) => nodes.map((node, domIndex) => {
+    const element = node as HTMLElement;
+    const rect = element.getBoundingClientRect();
+    const role = element.getAttribute("data-message-author-role");
+    if ((role !== "user" && role !== "assistant") || rect.width <= 0 || rect.height <= 0) return null;
+    const dataMessageId = element.getAttribute("data-message-id") || "";
+    if (!dataMessageId) return null;
+    return { role, dataMessageId, domIndex };
+  }).filter((item): item is Omit<TurnObservation, "text"> => item !== null));
+}
+export async function readTurnTextById(page: Page, dataMessageId: string): Promise<string | null> {
+  return page.locator(TURN_SELECTOR).evaluateAll((nodes, expected) => {
+    for (const node of nodes) {
+      const element = node as HTMLElement;
+      if (element.getAttribute("data-message-id") !== expected) continue;
+      return (element.innerText || element.textContent || "").trim();
+    }
+    return null;
+  }, dataMessageId);
 }
 export async function readAssistantAnswer(page: Page, assistantTurnId?: string): Promise<string> {
   let turn = await assistantLocator(page, assistantTurnId);

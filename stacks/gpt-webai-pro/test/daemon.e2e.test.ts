@@ -19,6 +19,8 @@ const LABELS = {
   target: ["Pro"],
   intelligence: ["Instant", "Medium", "High", "Extra High", "Pro"],
 };
+// fake 페이지는 즉시 렌더되므로 렌더 대기를 짧게 잡아 zero-turn 케이스 테스트를 빠르게 한다.
+process.env.GWP_RECONCILE_RENDER_WAIT_MS = "1500";
 interface ScenarioRuntime {
   browser: Browser;
   daemon: DaemonHandle;
@@ -183,7 +185,11 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       const missing = await runtime.rpc.call("reconcile", reconcileRequest("not present", {
         conversationUrl: sent.conversationUrl,
       }));
-      assert.deepEqual(missing, { found: false, proven: true });
+      // 앵커된 대화에 매칭되지 않는 새 user 턴이 남아 있는 한 부재를 증명하지 않는다 —
+      // 렌더 변형으로 매칭만 실패한 우리 전송일 수 있고, 부재 증명은 재전송을 승인한다.
+      assert.equal(missing.found, false);
+      assert.equal(missing.proven, false);
+      assert.match(missing.evidence ?? "", /renderedLen=\d+ promptLen=\d+ firstDiff=\d+/);
       const polled = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
       assert.equal(polled.state, "complete");
       assert.equal(polled.answerMarkdown, "fake answer");
@@ -551,6 +557,86 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
         && error.phase === "post_click"
         && error.pendingUserTurnId === pendingUserTurnId
         && error.preClickBaseline?.length === 0);
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("send streams progress with early anchors and caches the result for reconcile", async () => {
+    const runtime = await setup("happy");
+    try {
+      const prompt = "progress and cache request";
+      const steps: string[] = [];
+      let anchored: { pendingUserTurnId?: string; pendingConversationUrl?: string } = {};
+      const sent = await runtime.rpc.call("send", { prompt, files: [] }, {
+        timeoutMs: 65_000,
+        inactivityMs: 20_000,
+        onProgress: (progress) => {
+          if (steps.at(-1) !== progress.step) steps.push(progress.step);
+          if (progress.pendingUserTurnId) anchored = progress;
+        },
+      });
+      for (const required of ["navigate", "compose", "baseline", "click", "confirm"]) {
+        assert.ok(steps.includes(required), `missing progress step ${required} in ${steps.join(",")}`);
+      }
+      assert.equal(anchored.pendingUserTurnId, sent.userTurnId);
+      assert.ok(anchored.pendingConversationUrl);
+      // 대화 탭을 닫아도 같은 daemon 프로세스의 send 캐시가 reconcile을 결정한다 (§5.3 A0).
+      await runtime.rpc.call("closeConversation", { conversationUrl: sent.conversationUrl });
+      const reconciled = await runtime.rpc.call("reconcile", reconcileRequest(prompt));
+      assert.equal(reconciled.found, true);
+      assert.equal(reconciled.matchedBy, "cache");
+      assert.equal(reconciled.userTurnId, sent.userTurnId);
+      assert.equal(reconciled.conversationUrl, sent.conversationUrl);
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("an anchored conversation that renders no turns can never prove absence", async () => {
+    const runtime = await setup("happy");
+    try {
+      const context = runtime.browser.contexts()[0]!;
+      const page = await context.newPage();
+      const emptyUrl = `${new URL(fake.baseUrl("happy")).origin}/c/empty-anchored?scenario=happy`;
+      await page.goto(emptyUrl);
+      const verdict = await runtime.rpc.call("reconcile", reconcileRequest("prompt that never landed", {
+        conversationUrl: emptyUrl,
+      }));
+      // 렌더 전/빈 대화 뷰를 부재로 오판하면 attempt 2 중복 전송이 승인된다 (2026-07-29 라이브).
+      assert.equal(verdict.found, false);
+      assert.equal(verdict.proven, false);
+      await page.close();
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("a large prompt with a divergent rendered turn still confirms via the loose gate", async () => {
+    const runtime = await setup("large-prompt-drift");
+    try {
+      const prompt = Array.from({ length: 1_500 }, (_, index) => (
+        `지시서 라인 ${index}: mixed content segment ${index * 13} for the large prompt drift case`
+      )).join("\n");
+      const sent = await runtime.rpc.call("send", { prompt, files: [] }, {
+        timeoutMs: 65_000,
+        inactivityMs: 20_000,
+      });
+      assert.equal(sent.matchedBy, "loose");
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      assert.ok(page);
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("markdown-rendered user turn confirms via the single-turn length gate", async () => {
+    const runtime = await setup("markdown-drift");
+    try {
+      const prompt = Array.from({ length: 800 }, (_, index) => (
+        `**케이스 ${index}**: markdown \`code${index}\` heavy line with syntax everywhere`
+      )).join("\n");
+      const sent = await runtime.rpc.call("send", { prompt, files: [] }, {
+        timeoutMs: 65_000,
+        inactivityMs: 20_000,
+      });
+      assert.equal(sent.matchedBy, "single_turn");
     } finally {
       await runtime.close();
     }

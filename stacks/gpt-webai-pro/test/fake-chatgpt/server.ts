@@ -150,13 +150,22 @@ const PAGE = String.raw`<!doctype html>
   let sequence = 0;
   app.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
     const prompt = document.getElementById('prompt-textarea').innerText.trim();
-    const renderedPrompt = scenario === 'markdown-normalization'
+    let renderedPrompt = scenario === 'markdown-normalization'
       ? prompt.split('\n').flatMap((raw) => {
         const line = raw.trim();
         const fence = line.match(/^\x60{3}([A-Za-z0-9_.+-]+)?$/);
         return fence ? (fence[1] ? [fence[1]] : []) : [line];
       }).join('\n')
       : prompt;
+    if (scenario === 'large-prompt-drift') {
+      // 실 UI가 대형 user 턴을 원문과 다르게 렌더하는 상황(중간 축약)을 재현한다.
+      const middle = Math.floor(prompt.length / 2);
+      renderedPrompt = prompt.slice(0, middle) + prompt.slice(middle + Math.floor(prompt.length * 0.03));
+    }
+    if (scenario === 'markdown-drift') {
+      // user 턴 마크다운 렌더로 문법 문자가 문서 전체에서 소실되는 실측 모드(2026-07-29).
+      renderedPrompt = prompt.replace(/\*\*/g, '').replace(/\x60/g, '');
+    }
     const conversation = document.getElementById('conversation');
     const user = document.createElement('div');
     user.setAttribute('data-message-author-role', 'user');

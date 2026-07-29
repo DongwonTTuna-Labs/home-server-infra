@@ -5,7 +5,7 @@ import { actionEnvelope, completeEnvelope, failedEnvelope, networkFailureEnvelop
 import { GwpError, errorMessage, isDirectNetworkFailure, type PublicErrorKind } from "../shared/errors.js";
 import { appendJsonLine, atomicWrite, fileSize, mkdirp, moveFile, sha256File, sha256Text, tryAcquireFileLock } from "../shared/fsx.js";
 import { newRequestId } from "../shared/ids.js";
-import type { Envelope, PollResult, PublicArtifact, ReadinessResult, ReconcileResult, RequestRow, RpcFile, SendResult, SlotConfig, SlotState, SlotsConfig } from "../shared/types.js";
+import type { Envelope, PollResult, PublicArtifact, ReadinessResult, ReconcileResult, RequestRow, RpcFile, SendProgress, SendResult, SlotConfig, SlotState, SlotsConfig } from "../shared/types.js";
 import { GwpDatabase } from "./db.js";
 import { DockerManager, mapContainerOutboxPath } from "./docker.js";
 import { RpcClient } from "./rpc-client.js";
@@ -13,6 +13,15 @@ import { claimSlotForRequest, markSlotIdle, markSlotNeedsLogin, markSlotProvider
 const ACTIVE_STATUSES = new Set(["staged", "sending", "generating", "uncertain"]);
 const TERMINAL_STATUSES = new Set(["complete", "needs_user_action", "failed"]);
 const SEND_IN_PROGRESS_MESSAGE = "전송 진행 중(소유 프로세스 생존)";
+// send RPC는 고정 타임아웃이 아니라 progress 기반으로 기다린다: daemon이 알림으로
+// 살아있음을 증명하는 한 절대 상한까지 완주를 기다린다. 94KB 프롬프트가 페이지 jank로
+// 180s를 넘겨 앵커가 통째로 유실된 2026-07-29 사건이 근거다.
+const SEND_RPC_MAX_MS = envMs("GWP_SEND_MAX_MS", 30 * 60_000);
+const SEND_RPC_INACTIVITY_MS = envMs("GWP_SEND_INACTIVITY_MS", 120_000);
+function envMs(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 interface ValidatedFile {
   source: string;
   name: string;
@@ -443,13 +452,36 @@ export class Supervisor {
       }
       const attemptNo = armSendAttempt(this.db, request.id);
       this.log(request.id, "sending", `attempt ${attemptNo} armed`);
+      let lastProgress: SendProgress | undefined;
+      let lastLoggedStep: string | undefined;
       try {
-        const result = await client.call("send", { prompt, files }, 180_000);
+        const result = await client.call("send", { prompt, files }, {
+          timeoutMs: SEND_RPC_MAX_MS,
+          inactivityMs: SEND_RPC_INACTIVITY_MS,
+          onProgress: (progress) => {
+            lastProgress = progress;
+            if (progress.step !== lastLoggedStep) {
+              lastLoggedStep = progress.step;
+              this.log(
+                request.id,
+                "sending",
+                `send ${progress.step} +${Math.round(progress.elapsedMs / 1_000)}s`
+                  + (progress.matchDebug ? ` (${progress.matchDebug})` : ""),
+              );
+            }
+          },
+        });
         const finalState = confirmSendAttempt(this.db, request.id, result);
-        this.log(request.id, "generating", `attempt ${attemptNo} ${finalState}`);
+        this.log(
+          request.id,
+          "generating",
+          `attempt ${attemptNo} ${finalState}`
+            + (result.matchedBy && result.matchedBy !== "strict" ? ` (matched: ${result.matchedBy})` : ""),
+        );
         await client.close();
         return null;
-      } catch (error) {
+      } catch (rawError) {
+        const error = withProgressAnchors(rawError, lastProgress);
         const phase = error instanceof GwpError ? error.phase : undefined;
         if (phase === "pre_click") {
           const finalState = markPreClickNoSend(this.db, request.id);
@@ -576,9 +608,16 @@ export class Supervisor {
           : {}),
         ...(pendingConversationUrl ? { pendingConversationUrl } : {}),
         ...(anchor?.preClickBaseline ? { preClickBaseline: anchor.preClickBaseline } : {}),
-      }, Math.max(5_000, Math.min(65_000, deadline - Date.now() + 5_000)));
+        // 대형 user 턴이 있는 대화의 네비게이션+관측은 65s를 넘길 수 있다.
+      }, Math.max(5_000, Math.min(120_000, deadline - Date.now() + 5_000)));
       await client.close();
       client = null;
+      if (result.matchedBy && result.matchedBy !== "strict") {
+        this.log(request.id, "uncertain", `reconcile matched by ${result.matchedBy}`);
+      }
+      if (result.evidence) {
+        this.log(request.id, "uncertain", `reconcile mismatch evidence: ${result.evidence}`);
+      }
       const decision = applyReconcileResult(this.db, request.id, result);
       if (decision === "found") {
         this.log(request.id, "generating", "uncertain send reconciled as found");
@@ -969,6 +1008,25 @@ export class Supervisor {
       ...(detail ? { detail } : {}),
     }).catch(() => undefined);
   }
+}
+// 로컬에서 send 대기를 포기(절대 상한/무진행/소켓 오류)해도 daemon이 progress로 복제해 준
+// 마지막 앵커를 잃지 않는다. 클릭 가능성을 배제할 수 없으므로 phase는 무조건 post_click
+// (fail-closed, §5.2). daemon이 직접 던진 GwpError는 이미 자체 앵커를 실어 온다.
+export function withProgressAnchors(error: unknown, progress: SendProgress | undefined): unknown {
+  if (error instanceof GwpError || !progress) return error;
+  return new GwpError(
+    "click_uncertain",
+    `${errorMessage(error)} (last step: ${progress.step} +${Math.round(progress.elapsedMs / 1_000)}s)`,
+    {
+      phase: "post_click",
+      cause: error,
+      ...(progress.pendingUserTurnId ? { pendingUserTurnId: progress.pendingUserTurnId } : {}),
+      ...(progress.pendingConversationUrl
+        ? { pendingConversationUrl: progress.pendingConversationUrl }
+        : {}),
+      ...(progress.preClickBaseline ? { preClickBaseline: progress.preClickBaseline } : {}),
+    },
+  );
 }
 export function armSendAttempt(db: GwpDatabase, requestId: string): number {
   return db.immediate(() => {

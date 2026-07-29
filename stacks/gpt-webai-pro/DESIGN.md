@@ -273,6 +273,21 @@ pendingConversationUrl). turn id는 DDL/envelope 신설이 아니라 기존 필�
   attempt → `uncertain`, request → `uncertain`, `pendingConversationUrl` 기록.
   **여기서 절대 즉시 재전송하지 않는다.** 복구는 §5.3.
 
+**send RPC 대기 규칙 (2026-07-29 재설계 — 고정 타임아웃이 앵커를 유실시켰음)**: supervisor는
+send RPC에 고정 짧은 타임아웃을 걸지 않는다. daemon은 send 진행 중 단계 전이·주기(2.5s)
+heartbeat를 JSON-RPC notification(`gwp.sendProgress`)으로 흘리고, 관측 즉시
+`pendingUserTurnId`/`pendingConversationUrl`/`preClickBaseline`을 알림에 복제한다.
+supervisor는:
+- **무진행 상한** `GWP_SEND_INACTIVITY_MS`(기본 120s): 알림이 이 간격 안에 계속 오는 한
+  기다린다. 끊기면 daemon 사망/행으로 보고 포기한다.
+- **절대 상한** `GWP_SEND_MAX_MS`(기본 30분): 어떤 경우에도 이 이상 기다리지 않는다.
+- **포기하더라도 마지막 progress의 앵커를 그대로 `markSendUncertain`에 싣는다**
+  (phase는 무조건 post_click — 클릭 가능성을 배제할 수 없으므로 fail-closed).
+  과거 "RPC send timed out"이 앵커 0개로 떨어져 reconcile이 최악 경로(텍스트 탭 스캔)로
+  가던 구멍(2026-07-29, 94KB 프롬프트 180s 초과 사건)이 이 규칙으로 막힌다.
+- daemon은 supervisor가 포기한 뒤에도 send를 완주하고, 성공 결과를 promptSha 키로
+  메모리에 캐시한다(§5.3 A0). 정상 완료 시 확정 창 초과가 아니라 회수 가능한 진실이 된다.
+
 ### 5.3 uncertain 복구 (reconcile)
 
 `resume --session <id>`가 uncertain 요청(또는 §5.2 flock 획득으로 사망이 확정된
@@ -283,11 +298,20 @@ sending/armed 요청)을 만나면 — 반드시 해당 요청의 `send.lock` fl
    pendingUserTurnId?})`. reconcile에는 **원문 `prompt`를 전달**해 §5.2 공용 헬퍼
    `renderedTurnMatchesPrompt`를 그대로 쓴다(promptSha256은 로그/보조용으로 유지). 매칭
    우선순위:
+   - **(A0) daemon 메모리 send 캐시**: 같은 daemon 프로세스에서 이 promptSha의 send가
+     이미 성공 완료했다면 그 결과(`conversationUrl`/turn id)를 그대로 회수한다. mutation
+     큐가 순서를 보장하므로(진행 중 send가 끝난 뒤에야 reconcile 클로저가 돈다) 캐시는
+     항상 완결된 진실이다. supervisor가 대기를 포기한 뒤 daemon이 완주한 케이스의
+     결정적 회수 경로.
    - **(A) `pendingUserTurnId`가 있으면 그 turn id를 전역에서 찾는다** — 있으면 그 탭이 곧
      내 요청. 전역 유일 id라 오매칭 불가. 이게 1순위이자 모호성의 근본 해소책.
    - (B) 없으면 `conversationUrl`/`pendingConversationUrl` 탭을 확인(텍스트 매칭).
+     URL 앵커는 우리 DB에 기록된 우리 대화이므로, 유일한 user 턴에 한해 loose 매칭과
+     single_turn 길이 sanity(§6.4 tier ③, 대화의 user 턴이 정확히 1개일 때)를 허용한다.
+     매칭 실패 시 길이/first-diff evidence를 결과에 실어 supervisor 로그로 남긴다.
    - (C) 여전히 모르면 **열려 있는 chatgpt.com 탭들만** 스캔(텍스트 매칭). 사이드바/히스토리
-     클릭 탐색은 하지 않는다.
+     클릭 탐색은 하지 않는다. **여기서는 loose 매칭을 쓰지 않는다** — 앵커 없는 텍스트
+     스캔에서 loose는 identity 증명이 아니다.
    - **양성 회수(found)는 부재 증명 권한과 분리한다.** 앵커가 없어도 유일한 bound `/c/`
      탭에서 user 턴이 매칭되고 다중 매치나 같은 프롬프트의 unbound(root) 매치가 없으면
      found로 회수한다. 다른 unreadable 탭은 이 확실한 양성 매치를 무효화하지 않는다.
@@ -298,7 +322,15 @@ sending/armed 요청)을 만나면 — 반드시 해당 요청의 `send.lock` fl
    - **부재 증명(재전송 허용)은 매우 보수적으로**: 대화/탭 접근에 성공했고 그 안에 매칭
      user 턴/앵커가 확실히 없을 때만 `no_send_proven`. pendingUserTurnId 또는
      pendingConversationUrl이 있는데 해당 앵커/탭에 접근 못 하면 부재로 판정하지 않는다
-     (uncertain 유지). attempt_no<2 AND 긍정적 부재 증명일 때만 새 attempt로 재전송.
+     (uncertain 유지). **baseline 밖 새 user 턴이 매칭 없이 존재하면(어느 탭이든) 부재로
+     판정하지 않는다** — 대형 프롬프트 렌더 변형으로 매칭만 실패한 자기 전송을 부재로
+     오판하면 그대로 중복 전송이 된다 (2026-07-29 규칙 강화). **앵커된 `/c/` 페이지가
+     턴 0개로 읽히면 unreadable로 취급한다(부재 증명 불가)** — 무거운 대화는
+     domcontentloaded 후 턴 렌더까지 수 초가 걸려, 렌더 전 스캔이 빈 대화로 읽힌다.
+     reconcile은 앵커 페이지에서 턴이 나타날 때까지 대기(`GWP_RECONCILE_RENDER_WAIT_MS`,
+     기본 20s)한 뒤에만 판정한다 (2026-07-29 라이브: 렌더 전 스캔이 부재를 오판해
+     attempt 2 중복 전송 발생). attempt_no<2 AND 긍정적
+     부재 증명일 때만 새 attempt로 재전송.
      **앵커 없이 텍스트 매칭만으로 판정하는데 동일 프롬프트 탭이 하나라도 있으면(단일이든
      복수든) 재전송 금지** — anchor가 소실된 오매칭도 중복을 낳으므로 fail-closed. 중복보다
      uncertain이 낫다.
@@ -375,6 +407,19 @@ supervisor가 슬롯당 32-hex 토큰을 `slots/<slotId>/daemon.token`(0600)에 
 kind 폐쇄 목록: `needs_login, provider_limit, model_unavailable, nav_failed, compose_failed,
 chip_mismatch, click_uncertain, turn_not_found, artifact_failed, internal`.
 
+**progress notification**: send 진행 중 daemon은 같은 소켓으로 JSON-RPC notification
+`{method:"gwp.sendProgress", params:{callId, progress}}`를 흘린다 (단계 전이 시 +
+2.5s heartbeat). `progress = {step, phase, elapsedMs, stepElapsedMs, pendingUserTurnId?,
+pendingConversationUrl?, preClickBaseline?, matchDebug?}`,
+`step ∈ navigate|ensure_model|compose|attach|verify_chips|baseline|wait_send_button|click|confirm`.
+supervisor `RpcClient.call`은 옵션 `{timeoutMs, inactivityMs, onProgress}`로 이를 소비한다
+(§5.2 send RPC 대기 규칙).
+
+**daemon 운영 로그**: daemon은 stderr(=docker logs)에 JSON 라인을 남긴다 — RPC 시작/종료
+(`rpc`: method/ms/ok/kind), send 단계 전이(`send_step`), reconcile 판정(`reconcile`,
+`reconcile_cache_hit`). 2026-07-29 이전엔 daemon이 무로그라 스톨 지점을 밖에서 알 수
+없었다.
+
 ### 6.3 Pro 보장 (`actions/model.ts`) — 2026-07-27 실측 DOM 기준
 
 현 ChatGPT UI는 model/effort 2단계가 아니라 **단일 "Intelligence" 라디오**다
@@ -397,10 +442,27 @@ chip_mismatch, click_uncertain, turn_not_found, artifact_failed, internal`.
 
 ### 6.4 전송 확인
 
-클릭 후 30s 내에 다음 셋 모두 관찰되어야 confirmed:
+클릭 후 확정 창(`GWP_CONFIRM_WINDOW_MS`, 기본 300s — supervisor가 progress로 생존을
+확인하며 기다리므로 넉넉히 잡는다) 내에 다음 셋 모두 관찰되어야 confirmed:
 (a) 전송 프롬프트와 일치하는 **새** user 턴(data-message-id가 클릭 전 스냅샷에 없음),
 (b) 그 뒤의 새 assistant 턴 (생성 중이어도 됨), (c) non-root `/c/...` URL.
 미달 시 `click_uncertain` (post_click) — supervisor가 §5.3으로.
+
+확정 루프 관측 규칙 (2026-07-29 — 대형 프롬프트 스톨의 교훈):
+- 루프는 경량 관측(`readTurnsShallow`: id/role만, innerText 없음)으로 돌고, 텍스트는
+  매칭 후보 턴만 `readTurnTextById`로 뽑는다. innerText는 강제 layout이라 87KB 턴이
+  있는 페이지에서 전량 추출을 반복하면 루프가 분 단위로 늘어진다.
+- **앵커는 매칭과 무관하게 즉시 확보**: 새 user 턴이 보이는 순간 `pendingUserTurnId`/
+  `pendingConversationUrl`을 잡아 progress로 복제한다 (§5.2).
+- (a)의 매칭은 3단 tier다. ① 정확 매칭(`renderedTurnMatchesPrompt`). ② **방금 클릭한
+  탭의 유일한 새 user 턴**에 한해 loose 매칭(`renderedTurnMatchesPromptLoose`: 정규화
+  프롬프트 ≥4096자, 길이 90%~+200자, 앞뒤 1000자 일치). ③ 같은 조건의 단일 새 턴에
+  길이 sanity(`renderedTurnLengthSane`: ≥4096자, 길이 85%~110%)만 보는 single_turn.
+  근거: ChatGPT는 user 턴 마크다운을 **렌더링**해 문법 문자가 문서 전체에서 소실된다 —
+  2026-07-29 라이브 실측 21,762자 프롬프트가 renderedLen=21336, firstDiff=476,
+  tailMatch=0으로 ①②를 모두 구조적으로 실패했다. identity는 텍스트가 아니라 "방금
+  클릭한 새 대화 탭 + pre-click baseline + 유일한 새 user 턴"이 이미 보장하므로 ③은
+  안전하다. 전 tier 실패 시 길이/first-diff evidence를 progress·에러 detail에 남긴다.
 
 ### 6.5 대화 URL·assistant turn id 가변성 (2026-07-27 실측)
 
