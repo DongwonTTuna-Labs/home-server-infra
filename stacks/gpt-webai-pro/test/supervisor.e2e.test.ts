@@ -667,6 +667,49 @@ test("provider-limit slot is skipped and receives a three-minute cooldown", asyn
   assert.equal(limited.state, "provider_limit");
   assert.ok((limited.cooldown_until ?? 0) >= before + 179_000);
 });
+test("reap advances an abandoned generating request but never initiates staged sends", async (t) => {
+  let readyToComplete = false;
+  const { supervisor } = await fixture(t, [{
+    id: "slot-01",
+    account: "a",
+    handler: (method, params) => {
+      if (method === "readiness") return { state: "ready", modelLabel: "Pro" };
+      if (method === "send") {
+        return {
+          conversationUrl: "https://chatgpt.com/c/reap-mock",
+          userTurnId: "user-reap",
+          assistantTurnId: "assistant-reap",
+        };
+      }
+      if (method === "poll") return readyToComplete
+        ? complete("reaped answer", pollUrl(params))
+        : { state: "generating", currentUrl: pollUrl(params) };
+      if (method === "closeConversation") return { ok: true };
+      throw new Error(`unexpected ${method}`);
+    },
+  }]);
+  // 소유 세션이 running envelope을 받고 사라진 상황 재현: generating으로 방치된다.
+  const abandoned = await supervisor.run("abandoned by owner", [], 0);
+  assert.equal(abandoned.status, "running");
+  // 전송이 arm되지 않은 staged 요청은 reap이 절대 개시하지 않는다.
+  supervisor.db.createRequest("req_00staged0000dead", sha256Text("never armed"));
+  const still = await supervisor.reap(2);
+  assert.deepEqual(
+    still.actions.map((action) => [action.session, action.before, action.after]),
+    [
+      [abandoned.sessionId, "generating", "running"],
+      ["req_00staged0000dead", "staged", "staged"],
+    ],
+  );
+  readyToComplete = true;
+  const reaped = await supervisor.reap(5);
+  const advanced = reaped.actions.find((action) => action.session === abandoned.sessionId);
+  assert.deepEqual(advanced && [advanced.before, advanced.after], ["generating", "complete"]);
+  assert.equal(supervisor.db.getRequest("req_00staged0000dead")?.status, "staged");
+  const settled = await supervisor.resume(abandoned.sessionId!, 0);
+  assert.equal(settled.status, "complete");
+  assert.equal(settled.answer, "reaped answer");
+});
 test("timeout returns running and resume completes the same session", async (t) => {
   let sendCalls = 0;
   let readyToComplete = false;

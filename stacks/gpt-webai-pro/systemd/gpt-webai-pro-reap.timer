@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically advance abandoned gpt-webai-pro requests
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Unit=gpt-webai-pro-reap.service
+
+[Install]
+WantedBy=timers.target

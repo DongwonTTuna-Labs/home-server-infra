@@ -342,6 +342,17 @@ sending/armed 요청)을 만나면 — 반드시 해당 요청의 `send.lock` fl
 `resume`은 상태 기반 멱등 재진입이다: staged→전송부터, uncertain→reconcile,
 generating→poll 재개, complete→저장된 envelope 재출력. 어떤 상태에서 몇 번 불러도 안전.
 
+**reap — 방치 요청 자동 전진 (2026-07-30)**: 비종결 상태는 supervisor 프로세스가 돌 때만
+전진한다 — 소유 세션이 running envelope 후 resume을 재실행하지 않으면 generating이 무한
+방치된다(실사례: status 폴링 모니터로 완결을 기다린 세션 → 13시간 교착). `gpt-webai-pro
+reap [--timeout-seconds N=120]`은 sending/generating/uncertain 요청 전부를 resume으로
+전진시키는 시스템 안전망이다. **staged는 절대 건드리지 않는다** — 전송이 arm되지 않은
+요청의 개시는 소유 세션의 결정이다(reap의 역할은 "보낸 것을 끝내기"). resume의 멱등성
+계약이 그대로 안전을 보장한다: 살아 있는 소유자와 경합하면 flock/guarded-update가
+보호하고 reap은 running으로 비켜난다. systemd user 타이머
+`gpt-webai-pro-reap.timer`(부팅 5분 후, 이후 10분 간격)로 상시 가동 — 세션이 어떤
+방식으로 기다리든(status 폴링 포함) 요청은 스스로 종결에 도달한다.
+
 ## 6. 브라우저 조작 계약 (daemon)
 
 ### 6.1 셀렉터 원칙

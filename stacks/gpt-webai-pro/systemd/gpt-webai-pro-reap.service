@@ -1,0 +1,10 @@
+[Unit]
+Description=Advance abandoned gpt-webai-pro requests (resume is the only engine that moves generating/uncertain to terminal)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/.local/bin/gpt-webai-pro reap
+TimeoutStartSec=30min

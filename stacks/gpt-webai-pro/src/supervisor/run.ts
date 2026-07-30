@@ -300,6 +300,46 @@ export class Supervisor {
     }
     return { ok: true, dryRun: !apply, actions };
   }
+  // 비종결 요청은 supervisor 프로세스가 돌 때만 상태가 전진한다. 소유 세션이 resume을
+  // 다시 돌리지 않으면 generating이 무한 방치된다(2026-07-30 R6 13시간 사례). reap은
+  // 이미-전송된 요청(sending/generating/uncertain)을 resume으로 전진시키는 시스템
+  // 안전망이다 — resume은 멱등이고 flock/guarded-update가 동시 실행을 보호하므로
+  // 살아 있는 소유자와 경합해도 안전하다(소유자 생존 시 running envelope로 비켜난다).
+  // staged는 전송이 한 번도 arm되지 않은 요청이라 개시 결정이 소유 세션 몫 — 건드리지
+  // 않는다 (reaper의 역할은 "보낸 것을 끝내기"이지 "안 보낸 것을 보내기"가 아니다).
+  async reap(timeoutSeconds: number): Promise<{
+    ok: true;
+    actions: Array<{ session: string; before: string; after: string; detail?: string }>;
+  }> {
+    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
+      throw new InputError("timeout-seconds must be a non-negative number");
+    }
+    const actions: Array<{ session: string; before: string; after: string; detail?: string }> = [];
+    for (const request of this.db.listNonterminalRequests()) {
+      if (request.status === "staged") {
+        actions.push({
+          session: request.id,
+          before: "staged",
+          after: "staged",
+          detail: "skipped: send never armed; initiation belongs to the owner",
+        });
+        continue;
+      }
+      const before = request.status;
+      try {
+        const envelope = await this.resume(request.id, timeoutSeconds);
+        actions.push({
+          session: request.id,
+          before,
+          after: envelope.status,
+          ...(envelope.message ? { detail: envelope.message } : {}),
+        });
+      } catch (error) {
+        actions.push({ session: request.id, before, after: "error", detail: errorMessage(error) });
+      }
+    }
+    return { ok: true, actions };
+  }
   async release(id: string): Promise<Envelope> {
     if (!this.db.getRequest(id)) throw new InputError(`unknown session: ${id}`);
     const sendLock = await tryAcquireFileLock(this.sendLockPath(id));

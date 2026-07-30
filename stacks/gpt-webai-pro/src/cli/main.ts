@@ -24,6 +24,7 @@ const COMMANDS = new Set([
   "smoke",
   "login",
   "keepalive",
+  "reap",
 ]);
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const command = COMMANDS.has(argv[0] ?? "") ? argv.shift()! : "run";
@@ -139,6 +140,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       supervisor = await Supervisor.open();
       return emitJson(await supervisor.keepalive(), 0);
     }
+    if (command === "reap") {
+      const timeoutSeconds = parseReap(argv);
+      supervisor = await Supervisor.open();
+      return emitJson(await supervisor.reap(timeoutSeconds), 0);
+    }
     if (command === "smoke") {
       if (argv.length > 0) throw new InputError("smoke accepts no arguments");
       if (process.env.GWP_LIVE !== "1") throw new InputError("smoke requires GWP_LIVE=1");
@@ -226,6 +232,18 @@ function parseSessionCommand(
   }
   if (!session || !isRequestId(session)) throw new InputError("--session req_... is required");
   return { session, timeoutSeconds };
+}
+function parseReap(argv: string[]): number {
+  // reap 주기 실행의 기본 예산은 짧게 잡는다: 완료된 답변 회수에는 충분하고, 아직
+  // 생성 중이면 running으로 비켜나 다음 타이머 틱이 잇는다.
+  let timeoutSeconds = 120;
+  for (let index = 0; index < argv.length; index += 1) {
+    const item = argv[index]!;
+    if (item === "--timeout-seconds") {
+      timeoutSeconds = parseTimeout(requireValue(argv, ++index, "--timeout-seconds"));
+    } else throw new InputError(`unexpected argument: ${item}`);
+  }
+  return timeoutSeconds;
 }
 function parseCleanup(argv: string[]): boolean {
   if (argv.length === 0 || (argv.length === 1 && argv[0] === "--dry-run")) return false;
