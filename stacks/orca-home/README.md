@@ -56,7 +56,7 @@ storage, restrictive umask, and private readiness output) in place, and do not
 remove the flag unless a separately validated AppArmor/user-namespace or
 setuid-sandbox deployment replaces this exception.
 
-## Release pin
+## Bootstrap pin and latest channel
 
 [`release.json`](release.json) pins the official `stablyai/orca` Linux
 AppImage by version, byte size, GitHub-published SHA-256, and a deterministic
@@ -64,13 +64,41 @@ SHA-256 of the complete extracted tree. The installer verifies that tree both
 after extraction and before reusing an existing release, records the release
 source commit, verifies the x86-64 ELF asset, and installs the release under
 `~/.local/orca/releases/v1.4.156/`. The stable `~/.local/orca/current` symlink
-selects that release for systemd.
+selects the active release for systemd. The pinned release is the deterministic
+bootstrap and recovery floor; it is not an upper bound on the active version.
 
-The installer refuses to switch `current` across versions. Orca persists state
-under both `~/.config/orca/` and `~/.config/Orca/`, and upstream explicitly
-warns that a binary-only rollback can lose fields after a newer schema has
-written the profile. A future release bump must add a complete binary/version
-and profile rollback generation before changing the symlink.
+`orca-update-latest.timer` checks GitHub's latest non-draft, non-prerelease
+release hourly with up to ten minutes of jitter. The updater requires both the
+GitHub asset SHA-256 and the upstream `latest-linux.yml` SHA-512, verifies the
+x86-64 AppImage and deterministic extracted tree, and publishes the new release
+with `mv -T`. It never follows an unversioned asset URL after discovery and
+never downgrades the current semantic version.
+
+Orca persists state under both `~/.config/orca/` and `~/.config/Orca/`.
+Immediately before switching versions, the updater stops only
+`orca-serve.service`. If Orca left its version-matched persistent daemon in an
+`app-orca-*.scope`, the updater accepts exactly one live, user-owned,
+mode-`0600` daemon record and verifies its PID, release entry path, app version,
+process name, and exact scope before sending that PID `SIGTERM`; unrelated
+processes and ambiguous records fail closed.
+
+The updater then writes a mode-`0600` profile snapshot below the mode-`0700`
+Orca state directory. An `.incomplete` marker covers snapshot creation, and
+the completed manifest records the archive size and SHA-256. It then requires
+the private readiness contract, canonical project/worktree, and local plus
+public WebSocket `101`. Any failure restores the previous symlink and profile
+snapshot, restarts the old runtime, and blocks the failed tag until a newer
+release appears. An explicitly stopped `orca-serve.service` is preserved
+rather than restarted by the updater.
+
+Retention always keeps the active release, its immediately previous release,
+and every non-dynamic bootstrap pin. It keeps the one complete rollback bundle
+referenced by the current successful update state. Older directories are
+removed only when they satisfy the updater's exact private ownership, naming,
+manifest, archive, and full dynamic-release integrity contracts; unknown,
+corrupt, symlinked, or user-created paths are preserved. A later updater run
+also removes an interrupted snapshot only when its trusted `.incomplete`
+marker and restricted partial contents validate.
 
 ## Install or refresh
 
@@ -89,16 +117,19 @@ stacks/orca-home/scripts/install.sh \
   --activate
 ```
 
-The installer also installs and enables `orca-serve.service`. `Xvfb`, `jq`,
+The installer also installs and enables `orca-serve.service` and the hourly
+latest-channel timer. The runtime unit uses `Restart=always`, so both clean and
+failed process exits recover after five seconds; an explicit
+`systemctl --user stop orca-serve.service` still remains stopped. `Xvfb`, `jq`,
 `file`, `flock`, `git`, `node`, `tar`, and the normal Electron runtime
-libraries must already be present. A mode-`0600` host-local install lock
-serializes release verification, extraction, unit installation, activation,
-and bootstrap. The staging-to-release move also uses `mv -T`, so an unexpected
-concurrent destination fails instead of nesting a second extracted tree under
-the pinned release.
+libraries must already be present. A mode-`0600` host-local install lock is
+shared by the installer and updater, serializing release verification,
+extraction, unit installation, activation, and bootstrap. Staged releases use
+`mv -T`, so an unexpected concurrent destination fails instead of nesting a
+second extracted tree under a release.
 
-After runtime readiness, the installer uses the pinned Orca CLI and the private
-runtime pairing only in-process to idempotently register
+After runtime readiness, the installer uses the active version-matched Orca CLI
+and the private runtime pairing only in-process to idempotently register
 `$HOME/Documents/Programming/home-server-infra` as the initial server-owned
 project. It then requires the matching runtime worktree before declaring
 activation successful. The pairing value is never passed as an argument or
@@ -144,7 +175,10 @@ Validate the tracked files first:
 
 ```bash
 bash -n stacks/orca-home/scripts/*.sh
-systemd-analyze --user verify stacks/orca-home/systemd/orca-serve.service
+systemd-analyze --user verify \
+  stacks/orca-home/systemd/orca-serve.service \
+  stacks/orca-home/systemd/orca-update-latest.service \
+  stacks/orca-home/systemd/orca-update-latest.timer
 cloudflared tunnel \
   --config stacks/tunnel-apps/cloudflared/tunnel-apps.yml \
   ingress validate
@@ -168,6 +202,9 @@ test "${state_root#/}" != "$state_root"
 readiness=$state_root/orca-home/serve-ready.json
 systemctl --user is-enabled orca-serve.service
 systemctl --user is-active orca-serve.service
+systemctl --user is-enabled orca-update-latest.timer
+systemctl --user is-active orca-update-latest.timer
+test "$(systemctl --user show orca-serve.service -p Restart --value)" = always
 systemctl --user show orca-serve.service -p ExecStart --value \
   | grep -F -- 'AppRun --no-sandbox serve'
 test "$(stat -c '%a' "$readiness")" = 600
@@ -192,6 +229,8 @@ ss -ltn 'sport = :6768' | grep -F ':6768'
         any(.result.repos[]; .path == $path and .kind == "git")
       ' >/dev/null
 )
+
+$HOME/.local/libexec/orca-home-update-latest --check
 ```
 
 Recreate only the shared application-tunnel connector, then confirm its active
@@ -228,10 +267,17 @@ grep -Eq '^HTTP/1[.]1 101 ' "$headers"
 
 ## Rollback and withdrawal
 
-Do not roll back only `current` or only the AppImage. For a future version
-rollback, follow the profile-plus-binary procedure in the pinned upstream
-headless guide and restore one complete generation. The initial `v1.4.156`
-deployment has no older Orca generation to restore.
+Do not roll back only `current` or only the AppImage. Automatic update failures
+restore one complete profile-plus-binary generation. The last update outcome is
+recorded without pairing material in
+`${XDG_STATE_HOME:-$HOME/.local/state}/orca-home/update-state.json`; rollback
+archives in the adjacent `update-rollbacks/` directory may contain credentials
+and must remain mode `0600` inside its mode-`0700` parent. Only the current
+successful generation is retained automatically; unrecognized or failed
+forensic directories are deliberately left for an operator. A failed tag is
+recorded in `update-blocked.json` so the hourly timer does not repeatedly cause
+an outage. Retry it only after diagnosing the journal and explicitly running
+`orca-home-update-latest --apply --force`.
 
 For a full withdrawal, remove the `orca.dongwontuna.net` DNS record in
 Cloudflare, remove its ingress rule, recreate only `cloudflared-apps`, and then

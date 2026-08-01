@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [--source PATH] [--activate]
 
-Install the release-pinned Orca headless runtime and user systemd unit.
+Install the bootstrap-pinned Orca runtime, service, and latest-channel timer.
 
   --source PATH  Use an already-downloaded AppImage instead of downloading it.
   --activate     Enable and restart orca-serve.service after installation.
@@ -56,6 +56,9 @@ stack_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 release_json=$stack_dir/release.json
 service_source=$stack_dir/systemd/orca-serve.service
 runner_source=$stack_dir/scripts/run.sh
+updater_source=$stack_dir/scripts/update-latest.sh
+updater_service_source=$stack_dir/systemd/orca-update-latest.service
+updater_timer_source=$stack_dir/systemd/orca-update-latest.timer
 
 if ! jq -e '
   .schema_version == "orca-home.release.v1" and
@@ -148,6 +151,81 @@ verify_extracted_tree() {
   fi
 }
 
+verify_dynamic_release() {
+  local root=$1
+  local metadata=$root/release.json
+  local dynamic_version
+  local dynamic_tag
+  local dynamic_size
+  local dynamic_sha256
+  local dynamic_tree_sha256
+  local digest_output
+  local actual_sha256
+  local actual_tree_sha256
+  local file_info
+
+  if [ ! -d "$root" ] || [ -L "$root" ] \
+    || [ ! -f "$metadata" ] || [ -L "$metadata" ]; then
+    return 1
+  fi
+  if ! jq -e '
+    .schema_version == "orca-home.dynamic-release.v1" and
+    .channel == "latest" and
+    (.version | type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")) and
+    (.tag | type == "string") and
+    .asset == "orca-linux.AppImage" and
+    (.url | type == "string") and
+    (.size | type == "number" and . > 0 and floor == .) and
+    (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.extracted_tree_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+  ' "$metadata" >/dev/null; then
+    return 1
+  fi
+
+  dynamic_version=$(jq -er .version "$metadata")
+  dynamic_tag=$(jq -er .tag "$metadata")
+  dynamic_size=$(jq -er '.size | tostring' "$metadata")
+  dynamic_sha256=$(jq -er .sha256 "$metadata")
+  dynamic_tree_sha256=$(jq -er .extracted_tree_sha256 "$metadata")
+  if [ "$dynamic_tag" != "v$dynamic_version" ] \
+    || [ "$(basename -- "$root")" != "$dynamic_tag" ] \
+    || [ "$(jq -er .url "$metadata")" \
+      != "https://github.com/stablyai/orca/releases/download/$dynamic_tag/$asset" ] \
+    || [ ! -f "$root/$asset" ] \
+    || [ -L "$root/$asset" ] \
+    || [ ! -x "$root/squashfs-root/AppRun" ] \
+    || [ "$(stat -c '%s' -- "$root/$asset")" != "$dynamic_size" ]; then
+    return 1
+  fi
+
+  actual_sha256=$(sha256sum -- "$root/$asset")
+  actual_sha256=${actual_sha256%% *}
+  if [ "$actual_sha256" != "$dynamic_sha256" ]; then
+    return 1
+  fi
+  file_info=$(LC_ALL=C file -- "$root/$asset")
+  if ! grep -Eq 'ELF .* executable' <<<"$file_info" \
+    || ! grep -Fq 'x86-64' <<<"$file_info"; then
+    return 1
+  fi
+  digest_output=$(
+    tar \
+      --sort=name \
+      --format=gnu \
+      --mtime=@0 \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --hard-dereference \
+      -C "$root" \
+      -cf - \
+      squashfs-root \
+      | sha256sum
+  )
+  actual_tree_sha256=${digest_output%% *}
+  [ "$actual_tree_sha256" = "$dynamic_tree_sha256" ]
+}
+
 if [ -n "$source_path" ]; then
   if [ ! -f "$source_path" ]; then
     printf 'install.sh: source is not a regular file: %s\n' "$source_path" >&2
@@ -195,7 +273,7 @@ fi
 state_dir=$state_root/orca-home
 readiness=$state_dir/serve-ready.json
 default_project_path=$HOME/Documents/Programming/home-server-infra
-orca_cli=$release_dir/squashfs-root/resources/app.asar.unpacked/out/cli/index.js
+orca_cli=
 
 bootstrap_default_project() {
   local repo_add_json
@@ -327,12 +405,19 @@ if [ "$release_ready" -eq 0 ]; then
 fi
 
 target=releases/$tag
+active_release_dir=$release_dir
 if [ -L "$current_link" ]; then
   current_target=$(readlink -- "$current_link")
   if [ "$current_target" != "$target" ]; then
-    printf '%s\n' \
-      'install.sh: refusing a cross-version switch without an Orca profile rollback bundle' >&2
-    exit 1
+    if [[ ! "$current_target" =~ ^releases/v[0-9]+[.][0-9]+[.][0-9]+$ ]] \
+      || ! verify_dynamic_release "$install_root/$current_target"; then
+      printf '%s\n' \
+        'install.sh: current auto-updated release failed verification' >&2
+      exit 1
+    fi
+    active_release_dir=$install_root/$current_target
+    printf 'Preserving verified auto-updated Orca release %s.\n' \
+      "${current_target##*/}"
   fi
 elif [ -e "$current_link" ]; then
   printf 'install.sh: current path is not a symlink: %s\n' "$current_link" >&2
@@ -341,11 +426,21 @@ else
   ln -s -- "$target" "$link_staging"
   mv -T -- "$link_staging" "$current_link"
 fi
+orca_cli=$active_release_dir/squashfs-root/resources/app.asar.unpacked/out/cli/index.js
 
 bash -n "$runner_source"
-systemd-analyze --user verify "$service_source"
+bash -n "$updater_source"
 install -m 0755 -- "$runner_source" "$libexec_dir/orca-home-run"
+install -m 0755 -- "$updater_source" "$libexec_dir/orca-home-update-latest"
+systemd-analyze --user verify \
+  "$service_source" \
+  "$updater_service_source" \
+  "$updater_timer_source"
 install -m 0644 -- "$service_source" "$unit_dir/orca-serve.service"
+install -m 0644 -- \
+  "$updater_service_source" \
+  "$updater_timer_source" \
+  "$unit_dir/"
 systemctl --user daemon-reload
 
 if [ "$activate" -eq 1 ]; then
@@ -390,10 +485,13 @@ if [ "$activate" -eq 1 ]; then
     exit 1
   fi
   bootstrap_default_project
+  systemctl --user enable --now orca-update-latest.timer
 fi
 
-printf 'Installed Orca %s AppRun at %s\n' \
+printf 'Installed Orca bootstrap %s AppRun at %s\n' \
   "$version" "$release_dir/squashfs-root/AppRun"
+printf 'Active Orca release: %s\n' "$(readlink -- "$current_link")"
 if [ "$activate" -eq 1 ]; then
-  printf '%s\n' 'orca-serve.service is enabled and active.'
+  printf '%s\n' \
+    'orca-serve.service is active; hourly latest-channel updates are enabled.'
 fi
