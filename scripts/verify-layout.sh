@@ -453,6 +453,22 @@ if ! grep -q 'bind=127.0.0.1' stacks/agent-stack/compose.yml; then
   printf 'SSH forwarder must bind 2222 on loopback only\n' >&2
   exit 1
 fi
+cloudflared_metrics_actual="$tmpdir/cloudflared-metrics.actual"
+cloudflared_metrics_expected="$tmpdir/cloudflared-metrics.expected"
+grep -Eho '127[.]0[.]0[.]1:202[0-9]+' \
+  stacks/agent-stack/compose.yml \
+  stacks/codexpro-home/systemd/cloudflared-codexpro-home.service \
+  stacks/tunnel-apps/compose.yaml \
+  | sort >"$cloudflared_metrics_actual"
+cat >"$cloudflared_metrics_expected" <<'EOF'
+127.0.0.1:20241
+127.0.0.1:20242
+127.0.0.1:20245
+EOF
+if ! diff -u "$cloudflared_metrics_expected" "$cloudflared_metrics_actual"; then
+  printf '%s\n' 'Cloudflared services must reserve unique loopback metrics ports' >&2
+  exit 1
+fi
 codexpro_tunnel_config=stacks/codexpro-home/cloudflared/codexpro-home.yml
 awk '
   function emit() {
@@ -520,7 +536,7 @@ done
 for fragment in \
   'Requires=codexpro-home.service' \
   'PartOf=codexpro-home.service' \
-  'ExecStart=%h/.local/bin/cloudflared tunnel --config %h/.cloudflared/codexpro-home.yml run codexpro-home'; do
+  'ExecStart=%h/.local/bin/cloudflared tunnel --metrics 127.0.0.1:20242 --config %h/.cloudflared/codexpro-home.yml run codexpro-home'; do
   if ! grep -Fq "$fragment" "$cloudflared_codexpro_service"; then
     printf 'CodexPro tunnel service contract missing: %s\n' "$fragment" >&2
     exit 1

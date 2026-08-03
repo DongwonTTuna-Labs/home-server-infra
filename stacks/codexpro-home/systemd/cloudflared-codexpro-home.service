@@ -6,7 +6,7 @@ PartOf=codexpro-home.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/cloudflared tunnel --config %h/.cloudflared/codexpro-home.yml run codexpro-home
+ExecStart=%h/.local/bin/cloudflared tunnel --metrics 127.0.0.1:20242 --config %h/.cloudflared/codexpro-home.yml run codexpro-home
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=45s
