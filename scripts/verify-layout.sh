@@ -371,8 +371,8 @@ import sys
 import tomllib
 
 EXPECTED_IMAGE = (
-    "ghcr.io/soju06/codex-lb:1.22.0@"
-    "sha256:3010b3c5567522fbb6e7225bdbe963fa1038c2584641fcec69094875e40e36e5"
+    "ghcr.io/soju06/codex-lb:1.23.0@"
+    "sha256:3b369ac16e03d31b940be35dd8e61583f9cbd74bfca5e92e4bd03bfec62e5b13"
 )
 EXPECTED_PROVIDER = {
     "name": "openai",
