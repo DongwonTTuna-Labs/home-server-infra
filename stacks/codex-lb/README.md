@@ -95,9 +95,19 @@ smoke test. Do not commit or attach the backup files to a PR.
 
 ## Migration Preflight
 
+v1.23.0 adds permanent hourly usage rollups; the startup migration backfills
+them from `request_logs`, so expect minutes of downtime on this dataset,
+comparable to the 1.21→1.22 useragent backfill. v1.23.0 also enables Auth
+Guardian (background OAuth token keepalive, 12h staleness gate) by default;
+`CODEX_LB_AUTH_GUARDIAN_ENABLED=false` is the opt-out if it ever misbehaves.
+
 The target Alembic head for the pinned stable release is
-`20260713_040000_add_account_refresh_claims`. The prior beta.3 head is
-`20260711_030000_add_limit_warmup_idle_threshold`. A historical 1.19 rollback
+`20260806_120000_add_http_bridge_owner_process_epoch`. The v1.22.0 head is
+`20260722_000000_backfill_request_log_useragent_families`, the v1.21.0 head is
+`20260713_040000_add_account_refresh_claims`, and the prior beta.3 head is
+`20260711_030000_add_limit_warmup_idle_threshold`. Do not infer the head from
+migration file names: in the v1.23.0 graph the `20260808_...` autovacuum
+revision is an ancestor of the `20260806_120000` head. A historical 1.19 rollback
 used `20260513_000000_add_accounts_alias` for both a true 1.19 schema and a
 1.20.1 superset schema. The revision string alone cannot distinguish them.
 
@@ -106,7 +116,9 @@ Start PostgreSQL, pull the pinned images, and define read-only schema checkers:
 ```bash
 set -euo pipefail
 COMPOSE=stacks/codex-lb/compose.yaml
-TARGET_HEAD=20260713_040000_add_account_refresh_claims
+TARGET_HEAD=20260806_120000_add_http_bridge_owner_process_epoch
+V122_HEAD=20260722_000000_backfill_request_log_useragent_families
+V121_HEAD=20260713_040000_add_account_refresh_claims
 BETA3_HEAD=20260711_030000_add_limit_warmup_idle_threshold
 BETA2_HEAD=20260709_000000_add_ttft_phase_observability
 STABLE_HEAD=20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads
@@ -138,7 +150,7 @@ Use this fail-closed state matrix:
 | --- | --- |
 | `TARGET_HEAD` | Run `db check`. Do not stamp backward or re-run migration manually. |
 | `none` and the `public` schema has zero tables | Run `db upgrade head`, then `db current` and `db check`. |
-| `BETA3_HEAD`, `BETA2_HEAD`, `STABLE_HEAD`, or `PRE_BETA_HEAD` | These are known ancestors. Run `db upgrade head` without stamping, then require `TARGET_HEAD` from `db current` and run `db check`. |
+| `V122_HEAD`, `V121_HEAD`, `BETA3_HEAD`, `BETA2_HEAD`, `STABLE_HEAD`, or `PRE_BETA_HEAD` | These are known ancestors. Run `db upgrade head` without stamping, then require `TARGET_HEAD` from `db current` and run `db check`. |
 | `20260513...`, 1.19 check passes and 1.20.1 check fails | This is an honest 1.19 schema. Run `db upgrade head` without stamping, then `db current` and `db check`. |
 | `20260513...`, 1.19 check fails and 1.20.1 check passes | This is the rollback-stamped 1.20.1 superset. Run `db stamp "$STABLE_HEAD"`, confirm with `db current`, then run `db upgrade head`, `db current`, and `db check`. |
 | Both schema checks pass, both fail, or the revision is unexpected | Stop. Do not stamp or upgrade until the physical schema and backup evidence are reconciled. |
@@ -173,7 +185,7 @@ docker compose -f stacks/codex-lb/compose.yaml up -d
 curl -fsS http://127.0.0.1:2455/health/ready
 curl -fsS https://relay-ai.dongwontuna.net/health/ready
 curl -fsS -D - -o /dev/null http://127.0.0.1:2455/health/ready \
-  | grep -i '^x-app-version: 1.21.0'
+  | grep -i '^x-app-version: 1.23.0'
 ```
 
 Health alone is not release evidence. Finish with one real Codex response and

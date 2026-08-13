@@ -4,7 +4,7 @@ services:
   codex-lb:
     # Operator-verified stable release, pinned by tag and OCI index digest.
     # Keep this service out of Watchtower and follow README.md for upgrades.
-    image: ghcr.io/soju06/codex-lb:1.21.0@sha256:f8f24d08d7cb4b993e64a52ed87b8eb769788a60df8e921665e817523d0ab945
+    image: ghcr.io/soju06/codex-lb:1.23.0@sha256:3b369ac16e03d31b940be35dd8e61583f9cbd74bfca5e92e4bd03bfec62e5b13
     container_name: codex-lb
     pull_policy: missing
     restart: always
@@ -21,13 +21,13 @@ services:
       # global admission limits and upstream/provider limits still apply.
       CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT: "0"
       CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT: "0"
-      # Request-path pool (max 100 conns) + separate background pool (max 20) so
-      # background jobs can't starve request connections. Must stay under the PG
-      # server's max_connections (set to 200 below).
-      CODEX_LB_DATABASE_POOL_SIZE: "50"
-      CODEX_LB_DATABASE_MAX_OVERFLOW: "50"
-      CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE: "10"
-      CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW: "10"
+      # Since v1.23.0 the background-task engine mirrors these two settings
+      # (its own CODEX_LB_DATABASE_BACKGROUND_* knobs were removed upstream,
+      # issue #1340), so the worst case is 2x(pool+overflow) connections:
+      # 2x(40+20)=120, under the PG server's max_connections (200 below) with
+      # headroom left for migrations, backups, and psql.
+      CODEX_LB_DATABASE_POOL_SIZE: "40"
+      CODEX_LB_DATABASE_MAX_OVERFLOW: "20"
       CODEX_LB_DASHBOARD_AUTH_MODE: standard
       CODEX_LB_LOG_FORMAT: text
     depends_on:
@@ -42,7 +42,8 @@ services:
     image: postgres:18
     container_name: codex-lb-postgres
     restart: always
-    # Headroom above the app pools (main 100 + background 20 = 120 max clients).
+    # Headroom above the app pools (main 60 + mirrored background 60 = 120 max
+    # clients as of v1.23.0).
     command: ["postgres", "-c", "max_connections=200"]
     labels:
       # Pin the DB engine: never let watchtower auto-jump a Postgres major.
