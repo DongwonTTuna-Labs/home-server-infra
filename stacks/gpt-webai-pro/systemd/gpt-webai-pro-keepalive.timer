@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh gpt-webai-pro ChatGPT login sessions daily
+
+[Timer]
+OnCalendar=*-*-* 09:20
+RandomizedDelaySec=600
+Persistent=true
+Unit=gpt-webai-pro-keepalive.service
+
+[Install]
+WantedBy=timers.target

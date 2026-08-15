@@ -1,0 +1,4 @@
+{
+  "target": ["Pro"],
+  "intelligence": ["Instant", "Medium", "High", "Extra High", "Pro"]
+}
