@@ -1,0 +1,9 @@
+{
+  "image": "home-server/gpt-webai-pro-slot:latest",
+  "maxConcurrent": 3,
+  "slots": [
+    { "id": "slot-a", "account": "a", "port": 19301 },
+    { "id": "slot-b", "account": "b", "port": 19302 },
+    { "id": "slot-c", "account": "c", "port": 19303 }
+  ]
+}

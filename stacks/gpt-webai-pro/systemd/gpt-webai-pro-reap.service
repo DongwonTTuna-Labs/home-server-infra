@@ -1,0 +1,10 @@
+[Unit]
+Description=Advance one abandoned gpt-webai-pro request within a bounded runtime lease
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/.local/bin/gpt-webai-pro reap
+TimeoutStartSec=5min
