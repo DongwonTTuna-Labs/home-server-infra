@@ -68,7 +68,9 @@ const PAGE = String.raw`<!doctype html>
 (() => {
   const query = new URL(location.href).searchParams;
   const scenario = query.get('scenario') || 'happy';
-  const tabId = crypto.randomUUID();
+  const tabId = typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2);
   if (scenario === 'root-redirect' && query.get('redirected') === '1') {
     localStorage.setItem('gwp-root-redirected', String(Date.now()));
   }

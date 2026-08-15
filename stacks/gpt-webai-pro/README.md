@@ -11,6 +11,16 @@
 Chromium profile입니다. request별 `send.lock`/`owner.lock`과 슬롯 runtime lock은 kernel
 flock으로만 잠기며 프로세스 종료 시 커널이 자동 해제합니다.
 
+macOS의 `flock`은 Homebrew `util-linux` keg에 포함되어 있으므로 최초 한 번 설치하고
+실행 경로에 연결합니다. Docker container smoke는 Docker Desktop의 host networking 기능을
+요구하지 않습니다.
+
+```bash
+brew install util-linux
+mkdir -p ~/.local/bin
+ln -sfn "$(brew --prefix util-linux)/bin/flock" ~/.local/bin/flock
+```
+
 ```bash
 cd stacks/gpt-webai-pro
 npm install

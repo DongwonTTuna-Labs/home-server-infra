@@ -8,6 +8,17 @@ harness_pid=""
 daemon_port="19399"
 daemon_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
 token_path="$smoke_dir/daemon.token"
+base_url="http://127.0.0.1:18765/?scenario=happy"
+network_args=(--network host)
+
+# Docker Desktop의 host networking 기능은 기본으로 꺼져 있다. macOS에서는 제품
+# 런타임과 같은 loopback publish를 사용하고, 컨테이너에서 host fake server는
+# Docker Desktop의 전용 DNS 이름으로 접근한다. Linux 홈서버는 기존 host network를
+# 유지해 host loopback에만 열린 fake server를 외부에 노출하지 않는다.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  base_url="http://host.docker.internal:18765/?scenario=happy"
+  network_args=(--publish "127.0.0.1:${daemon_port}:${daemon_port}")
+fi
 
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
@@ -29,11 +40,11 @@ done
 curl -fsS http://127.0.0.1:18765/ >/dev/null
 
 docker build -f "$root/container/Dockerfile" -t home-server/gpt-webai-pro-slot:smoke "$root"
-docker run -d --name "$container" --network host \
+docker run -d --name "$container" "${network_args[@]}" \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$smoke_dir/profile,dst=/profile" \
   --mount "type=bind,src=$smoke_dir/outbox,dst=/outbox" \
-  -e GWP_BASE_URL=http://127.0.0.1:18765/?scenario=happy \
+  -e GWP_BASE_URL="$base_url" \
   -e GWP_DAEMON_PORT="$daemon_port" \
   -e GWP_DAEMON_TOKEN="$daemon_token" \
   home-server/gpt-webai-pro-slot:smoke >/dev/null

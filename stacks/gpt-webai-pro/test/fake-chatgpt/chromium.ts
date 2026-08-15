@@ -14,23 +14,36 @@ export async function findChromium(): Promise<string> {
   const installed = await cachedChromium();
   if (install.status === 0 && installed) return installed;
   throw new Error([
-    "Chromium was not found via CHROME_BINARY_PATH or ~/.cache/ms-playwright/chromium-*.",
+    "Chromium was not found via CHROME_BINARY_PATH or the platform Playwright cache.",
     `npx playwright install chromium exited ${String(install.status)}.`,
     install.stderr.trim(),
   ].filter(Boolean).join(" "));
 }
 async function cachedChromium(): Promise<string | null> {
-  const cache = path.join(process.env.HOME ?? "", ".cache", "ms-playwright");
-  let directories: string[];
-  try {
-    directories = (await readdir(cache)).filter((name) => name.startsWith("chromium-")).sort().reverse();
-  } catch {
-    return null;
-  }
-  for (const directory of directories) {
-    for (const relative of ["chrome-linux64/chrome", "chrome-linux/chrome"]) {
-      const candidate = path.join(cache, directory, relative);
-      if (await executable(candidate)) return candidate;
+  const home = process.env.HOME ?? "";
+  const caches = process.platform === "darwin"
+    ? [path.join(home, "Library", "Caches", "ms-playwright"), path.join(home, ".cache", "ms-playwright")]
+    : [path.join(home, ".cache", "ms-playwright")];
+  const relatives = [
+    "chrome-linux64/chrome",
+    "chrome-linux/chrome",
+    "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+  ];
+  for (const cache of caches) {
+    let directories: string[];
+    try {
+      directories = (await readdir(cache)).filter((name) => name.startsWith("chromium-")).sort().reverse();
+    } catch {
+      continue;
+    }
+    for (const directory of directories) {
+      for (const relative of relatives) {
+        const candidate = path.join(cache, directory, relative);
+        if (await executable(candidate)) return candidate;
+      }
     }
   }
   return null;
