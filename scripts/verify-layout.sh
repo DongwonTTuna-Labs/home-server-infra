@@ -17,6 +17,14 @@ required=(
   stacks/nvidia-build-lb/README.md
   stacks/nvidia-build-lb/compose.yaml
   stacks/nvidia-build-lb/release.json
+  stacks/orca-home/README.md
+  stacks/orca-home/release.json
+  stacks/orca-home/scripts/install.sh
+  stacks/orca-home/scripts/run.sh
+  stacks/orca-home/scripts/update-latest.sh
+  stacks/orca-home/systemd/orca-serve.service
+  stacks/orca-home/systemd/orca-update-latest.service
+  stacks/orca-home/systemd/orca-update-latest.timer
   scripts/test-credential-scan.sh
   scripts/agent-apps-delayed-update-locked.sh
   stacks/nvidia-build-lb/systemd/agent-apps-delayed-update.service.d/nblb-cutover-lock.conf
@@ -52,6 +60,188 @@ if ! git ls-files --error-unmatch scripts/agent-apps-delayed-update-locked.sh >/
   printf 'Agent apps delayed update lock wrapper must be tracked\n' >&2
   exit 1
 fi
+
+orca_release=stacks/orca-home/release.json
+jq -e '
+  .schema_version == "orca-home.release.v1" and
+  .version == "1.4.156" and
+  .tag == "v1.4.156" and
+  .asset == "orca-linux.AppImage" and
+  .architecture == "x86_64" and
+  .url == "https://github.com/stablyai/orca/releases/download/v1.4.156/orca-linux.AppImage" and
+  .size == 201856738 and
+  .sha256 == "f6c394fd20ccdacd61a583f45cbd2e328d4240b06f1bc42142be0f3f58d1ba9b" and
+  .extracted_tree_sha256 == "09d43fbbe1a08da9f2b3c7716af7e2a56ee8ff30688d9c6ec66e72954f30822a" and
+  .source_commit == "e6b89208a69436bf856d572c4a17c98a4c1940d2"
+' "$orca_release" >/dev/null
+
+orca_installer=stacks/orca-home/scripts/install.sh
+if [ ! -x "$orca_installer" ]; then
+  printf '%s\n' 'Orca installer must be executable' >&2
+  exit 1
+fi
+bash -n "$orca_installer"
+orca_runner=stacks/orca-home/scripts/run.sh
+if [ ! -x "$orca_runner" ]; then
+  printf '%s\n' 'Orca private-output runner must be executable' >&2
+  exit 1
+fi
+bash -n "$orca_runner"
+for fragment in \
+  'umask 0077' \
+  '/usr/bin/install -d -m 0700' \
+  '/usr/bin/chmod 0600' \
+  'exec "$@" >"$readiness"'; do
+  if ! grep -Fq -- "$fragment" "$orca_runner"; then
+    printf 'Orca private-output runner contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+orca_updater=stacks/orca-home/scripts/update-latest.sh
+if [ ! -x "$orca_updater" ]; then
+  printf '%s\n' 'Orca latest-channel updater must be executable' >&2
+  exit 1
+fi
+bash -n "$orca_updater"
+for fragment in \
+  '--proto-redir' \
+  'sha256sum --check --status' \
+  '--appimage-extract' \
+  'squashfs-root/AppRun' \
+  'install_lock=$install_root/.install.lock' \
+  'flock --exclusive 9' \
+  'mv -T -- "$staging_dir" "$release_dir"' \
+  'verify_extracted_tree "$release_dir"' \
+  'verify_extracted_tree "$staging_dir"' \
+  'verify_dynamic_release "$install_root/$current_target"' \
+  'Preserving verified auto-updated Orca release' \
+  'orca-update-latest.timer' \
+  'systemctl --user show-environment' \
+  'state_root=${service_xdg_state_home:-$HOME/.local/state}' \
+  'default_project_path=$HOME/Documents/Programming/home-server-infra' \
+  'bootstrap_default_project' \
+  'ORCA_PAIRING_CODE=$(jq -er' \
+  'repo add --path "$default_project_path" --json' \
+  'worktree list --repo "id:$repo_id" --json' \
+  ': >"$readiness"' \
+  '.type == "orca_server_ready"' \
+  '.pairing.scope == "runtime"' \
+  'systemctl --user restart orca-serve.service'; do
+  if ! grep -Fq -- "$fragment" "$orca_installer"; then
+    printf 'Orca installer contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+for fragment in \
+  'https://api.github.com/repos/stablyai/orca/releases/latest' \
+  'latest-linux.yml' \
+  'sha256:' \
+  'base64 --decode' \
+  'sha512sum -- "$candidate"' \
+  'schema_version: "orca-home.dynamic-release.v1"' \
+  'install_lock=$install_root/.install.lock' \
+  'flock --exclusive 9' \
+  'umask 0077' \
+  'systemctl --user stop orca-serve.service' \
+  'stop_managed_daemon' \
+  'daemon-v*.pid' \
+  'expected one active daemon record' \
+  'daemon command mismatch for PID' \
+  '.config/orca' \
+  '.config/Orca' \
+  'orca-home.rollback.incomplete' \
+  'profilesTarSha256' \
+  'prune_incomplete_rollbacks' \
+  'prune_retained_state' \
+  'validate_rollback_bundle' \
+  'local layout=${2:-final}' \
+  'verify_dynamic_release "$candidate"' \
+  'verify_dynamic_release "$staging_dir" staging' \
+  'preserving unverified dynamic release' \
+  'rollback_activation' \
+  'update-blocked.json' \
+  'probe_websocket http://127.0.0.1:6768/' \
+  'probe_websocket https://orca.dongwontuna.net/' \
+  'verify_default_project' \
+  'current runtime selector is not a symlink' \
+  'preserving the operator stop'; do
+  if ! grep -Fq -- "$fragment" "$orca_updater"; then
+    printf 'Orca updater contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+
+orca_service=stacks/orca-home/systemd/orca-serve.service
+for fragment in \
+  'ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --json' \
+  'Environment=LIBGL_ALWAYS_SOFTWARE=1' \
+  'Environment=APPDIR=%h/.local/orca/current/squashfs-root' \
+  'UnsetEnvironment=DISPLAY' \
+  'StateDirectory=orca-home' \
+  'StateDirectoryMode=0700' \
+  'Restart=always' \
+  'UMask=0077' \
+  'NoNewPrivileges=true' \
+  'PrivateTmp=true' \
+  'ProtectSystem=full' \
+  'ReadOnlyPaths=%h/.local/orca/releases' \
+  'StandardOutput=null' \
+  'StandardError=journal'; do
+  if ! grep -Fq -- "$fragment" "$orca_service"; then
+    printf 'Orca service contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+if [ "$(grep -Fo -- '--no-sandbox' "$orca_service" | wc -l)" -ne 1 ]; then
+  printf '%s\n' 'Orca service must declare exactly one --no-sandbox fallback' >&2
+  exit 1
+fi
+if grep -Fq -- '--mobile-pairing' "$orca_service"; then
+  printf '%s\n' 'Orca home must issue a remote runtime pairing, not a mobile-only pairing' >&2
+  exit 1
+fi
+if grep -Fq 'APPIMAGE_EXTRACT_AND_RUN' "$orca_service" \
+  || grep -Fq -- '--appimage-extract-and-run' "$orca_installer"; then
+  printf '%s\n' 'Orca service must use the one-time extracted AppRun path' >&2
+  exit 1
+fi
+if grep -Eq '^StandardOutput=(journal|journal-or-kmsg|inherit|file:)' "$orca_service"; then
+  printf '%s\n' 'Orca pairing output must never enter the journal' >&2
+  exit 1
+fi
+
+orca_update_service=stacks/orca-home/systemd/orca-update-latest.service
+for fragment in \
+  'Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin' \
+  'ExecStart=%h/.local/libexec/orca-home-update-latest --apply' \
+  'TimeoutStartSec=20min' \
+  'UMask=0077' \
+  'Nice=10' \
+  'IOSchedulingClass=idle' \
+  'NoNewPrivileges=true' \
+  'PrivateTmp=true' \
+  'ProtectSystem=full' \
+  'StandardOutput=journal' \
+  'StandardError=journal'; do
+  if ! grep -Fq -- "$fragment" "$orca_update_service"; then
+    printf 'Orca update service contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
+
+orca_update_timer=stacks/orca-home/systemd/orca-update-latest.timer
+for fragment in \
+  'OnCalendar=hourly' \
+  'Persistent=true' \
+  'RandomizedDelaySec=10m' \
+  'AccuracySec=1m' \
+  'Unit=orca-update-latest.service' \
+  'WantedBy=timers.target'; do
+  if ! grep -Fq -- "$fragment" "$orca_update_timer"; then
+    printf 'Orca update timer contract missing: %s\n' "$fragment" >&2
+    exit 1
+  fi
+done
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -345,6 +535,7 @@ awk '
 ' "$tunnel_config" >"$tmpdir/tunnel-rules.actual"
 cat >"$tmpdir/tunnel-rules.expected" <<'EOF'
 relay-ai.dongwontuna.net||http://localhost:2455
+orca.dongwontuna.net||http://localhost:6768
 nvidia-lb.dongwontuna.net|^/admin(?:/.*)?$|http_status:404
 nvidia-lb.dongwontuna.net|^/internal(?:/.*)?$|http_status:404
 nvidia-lb.dongwontuna.net|^/metrics(?:/.*)?$|http_status:404

@@ -1,0 +1,31 @@
+[Unit]
+Description=Orca headless runtime for remote environment pairing
+Documentation=https://www.onorca.dev/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=APPDIR=%h/.local/orca/current/squashfs-root
+UnsetEnvironment=DISPLAY
+ExecStart=/usr/bin/bash %h/.local/libexec/orca-home-run %h/.local/orca/current/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address wss://orca.dongwontuna.net --json
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=control-group
+StateDirectory=orca-home
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadOnlyPaths=%h/.local/orca/releases
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=default.target

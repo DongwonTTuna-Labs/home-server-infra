@@ -1,0 +1,12 @@
+[Unit]
+Description=Check hourly for the latest stable Orca release
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+Unit=orca-update-latest.service
+
+[Install]
+WantedBy=timers.target

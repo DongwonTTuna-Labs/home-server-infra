@@ -9,6 +9,7 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 | Hostname | Origin |
 | --- | --- |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
+| `orca.dongwontuna.net` | `http://localhost:6768` (WebSocket; private pairing state is not logged) |
 | `nvidia-lb.dongwontuna.net` | `http://localhost:2456` (public dashboard/API/health; admin UI remains loopback-only) |
 
 ## Run
@@ -24,6 +25,8 @@ set -Eeuo pipefail
 tunnel=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
 curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
+systemctl --user is-active --quiet orca-serve.service
+ss -ltn 'sport = :6768' | grep -F ':6768'
 cloudflared tunnel --config "$tunnel" ingress validate
 docker compose -f stacks/tunnel-apps/compose.yaml config --quiet
 docker compose -f stacks/tunnel-apps/compose.yaml \
@@ -43,10 +46,17 @@ Move DNS routes only after local origins pass smoke tests:
 set -Eeuo pipefail
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
 curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
+systemctl --user is-active --quiet orca-serve.service
+ss -ltn 'sport = :6768' | grep -F ':6768'
 cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
+cloudflared tunnel route dns --overwrite-dns tunnel-apps orca.dongwontuna.net
 )
 ```
+
+Verify Orca's public `101 Switching Protocols` response with the secret-free
+WebSocket request in [`stacks/orca-home/README.md`](../orca-home/README.md).
+Do not read or print its pairing URL as part of tunnel verification.
 
 Verify both public routes after the DNS change:
 

@@ -1,0 +1,21 @@
+[Unit]
+Description=Update Orca headless runtime to the latest stable release
+Documentation=https://www.onorca.dev/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/libexec/orca-home-update-latest --apply
+TimeoutStartSec=20min
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal

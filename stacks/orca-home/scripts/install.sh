@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--source PATH] [--activate]
+
+Install the bootstrap-pinned Orca runtime, service, and latest-channel timer.
+
+  --source PATH  Use an already-downloaded AppImage instead of downloading it.
+  --activate     Enable and restart orca-serve.service after installation.
+EOF
+}
+
+source_path=
+activate=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        printf '%s\n' 'install.sh: --source requires a path' >&2
+        exit 2
+      fi
+      source_path=$2
+      shift 2
+      ;;
+    --activate)
+      activate=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'install.sh: unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+for command_name in bash curl file flock git grep jq node sha256sum stat systemctl systemd-analyze tar; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf 'install.sh: required command is missing: %s\n' "$command_name" >&2
+    exit 1
+  fi
+done
+
+if [ "$(uname -m)" != x86_64 ]; then
+  printf 'install.sh: release pin supports x86_64, not %s\n' "$(uname -m)" >&2
+  exit 1
+fi
+
+stack_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+release_json=$stack_dir/release.json
+service_source=$stack_dir/systemd/orca-serve.service
+runner_source=$stack_dir/scripts/run.sh
+updater_source=$stack_dir/scripts/update-latest.sh
+updater_service_source=$stack_dir/systemd/orca-update-latest.service
+updater_timer_source=$stack_dir/systemd/orca-update-latest.timer
+
+if ! jq -e '
+  .schema_version == "orca-home.release.v1" and
+  (.version | type == "string") and
+  (.tag | type == "string") and
+  .asset == "orca-linux.AppImage" and
+  .architecture == "x86_64" and
+  (.url | type == "string") and
+  (.size | type == "number" and . > 0 and floor == .) and
+  (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  (.extracted_tree_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  (.source_commit | type == "string" and test("^[0-9a-f]{40}$"))
+' "$release_json" >/dev/null; then
+  printf '%s\n' 'install.sh: release.json is invalid' >&2
+  exit 1
+fi
+
+version=$(jq -er .version "$release_json")
+tag=$(jq -er .tag "$release_json")
+asset=$(jq -er .asset "$release_json")
+url=$(jq -er .url "$release_json")
+expected_size=$(jq -er '.size | tostring' "$release_json")
+expected_sha256=$(jq -er .sha256 "$release_json")
+expected_extracted_tree_sha256=$(jq -er .extracted_tree_sha256 "$release_json")
+
+if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]] \
+  || [ "$tag" != "v$version" ] \
+  || [ "$url" != "https://github.com/stablyai/orca/releases/download/$tag/$asset" ]; then
+  printf '%s\n' 'install.sh: release identity is inconsistent' >&2
+  exit 1
+fi
+
+verify_asset() {
+  local path=$1
+  local actual_size
+  local file_info
+
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
+    printf 'install.sh: asset is not a regular non-symlink file: %s\n' "$path" >&2
+    return 1
+  fi
+  actual_size=$(stat -c '%s' -- "$path")
+  if [ "$actual_size" != "$expected_size" ]; then
+    printf 'install.sh: asset size mismatch (expected %s, got %s)\n' \
+      "$expected_size" "$actual_size" >&2
+    return 1
+  fi
+  if ! printf '%s  %s\n' "$expected_sha256" "$path" \
+    | sha256sum --check --status; then
+    printf '%s\n' 'install.sh: asset SHA-256 mismatch' >&2
+    return 1
+  fi
+  file_info=$(LC_ALL=C file -- "$path")
+  if ! grep -Eq 'ELF .* executable' <<<"$file_info" \
+    || ! grep -Fq 'x86-64' <<<"$file_info"; then
+    printf '%s\n' 'install.sh: asset architecture is not x86-64 ELF' >&2
+    return 1
+  fi
+}
+
+verify_extracted_tree() {
+  local root=$1
+  local tree=$root/squashfs-root
+  local digest_output
+  local actual_sha256
+
+  if [ ! -d "$tree" ] || [ -L "$tree" ]; then
+    printf 'install.sh: extracted tree is not a non-symlink directory: %s\n' \
+      "$tree" >&2
+    return 1
+  fi
+  digest_output=$(
+    tar \
+      --sort=name \
+      --format=gnu \
+      --mtime=@0 \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --hard-dereference \
+      -C "$root" \
+      -cf - \
+      squashfs-root \
+      | sha256sum
+  )
+  actual_sha256=${digest_output%% *}
+  if [ "$actual_sha256" != "$expected_extracted_tree_sha256" ]; then
+    printf '%s\n' 'install.sh: extracted tree SHA-256 mismatch' >&2
+    return 1
+  fi
+}
+
+verify_dynamic_release() {
+  local root=$1
+  local metadata=$root/release.json
+  local dynamic_version
+  local dynamic_tag
+  local dynamic_size
+  local dynamic_sha256
+  local dynamic_tree_sha256
+  local digest_output
+  local actual_sha256
+  local actual_tree_sha256
+  local file_info
+
+  if [ ! -d "$root" ] || [ -L "$root" ] \
+    || [ ! -f "$metadata" ] || [ -L "$metadata" ]; then
+    return 1
+  fi
+  if ! jq -e '
+    .schema_version == "orca-home.dynamic-release.v1" and
+    .channel == "latest" and
+    (.version | type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")) and
+    (.tag | type == "string") and
+    .asset == "orca-linux.AppImage" and
+    (.url | type == "string") and
+    (.size | type == "number" and . > 0 and floor == .) and
+    (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.extracted_tree_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+  ' "$metadata" >/dev/null; then
+    return 1
+  fi
+
+  dynamic_version=$(jq -er .version "$metadata")
+  dynamic_tag=$(jq -er .tag "$metadata")
+  dynamic_size=$(jq -er '.size | tostring' "$metadata")
+  dynamic_sha256=$(jq -er .sha256 "$metadata")
+  dynamic_tree_sha256=$(jq -er .extracted_tree_sha256 "$metadata")
+  if [ "$dynamic_tag" != "v$dynamic_version" ] \
+    || [ "$(basename -- "$root")" != "$dynamic_tag" ] \
+    || [ "$(jq -er .url "$metadata")" \
+      != "https://github.com/stablyai/orca/releases/download/$dynamic_tag/$asset" ] \
+    || [ ! -f "$root/$asset" ] \
+    || [ -L "$root/$asset" ] \
+    || [ ! -x "$root/squashfs-root/AppRun" ] \
+    || [ "$(stat -c '%s' -- "$root/$asset")" != "$dynamic_size" ]; then
+    return 1
+  fi
+
+  actual_sha256=$(sha256sum -- "$root/$asset")
+  actual_sha256=${actual_sha256%% *}
+  if [ "$actual_sha256" != "$dynamic_sha256" ]; then
+    return 1
+  fi
+  file_info=$(LC_ALL=C file -- "$root/$asset")
+  if ! grep -Eq 'ELF .* executable' <<<"$file_info" \
+    || ! grep -Fq 'x86-64' <<<"$file_info"; then
+    return 1
+  fi
+  digest_output=$(
+    tar \
+      --sort=name \
+      --format=gnu \
+      --mtime=@0 \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --hard-dereference \
+      -C "$root" \
+      -cf - \
+      squashfs-root \
+      | sha256sum
+  )
+  actual_tree_sha256=${digest_output%% *}
+  [ "$actual_tree_sha256" = "$dynamic_tree_sha256" ]
+}
+
+if [ -n "$source_path" ]; then
+  if [ ! -f "$source_path" ]; then
+    printf 'install.sh: source is not a regular file: %s\n' "$source_path" >&2
+    exit 1
+  fi
+  source_path=$(readlink -f -- "$source_path")
+  verify_asset "$source_path"
+fi
+
+install_root=$HOME/.local/orca
+release_root=$install_root/releases
+release_dir=$release_root/$tag
+current_link=$install_root/current
+unit_dir=$HOME/.config/systemd/user
+libexec_dir=$HOME/.local/libexec
+install -d -m 0755 -- "$install_root" "$release_root" "$unit_dir" "$libexec_dir"
+install_lock=$install_root/.install.lock
+original_umask=$(umask)
+umask 0077
+: >>"$install_lock"
+umask "$original_umask"
+chmod 0600 -- "$install_lock"
+exec 9<>"$install_lock"
+flock --exclusive 9
+
+if ! systemctl --user show-environment >/dev/null; then
+  printf '%s\n' 'install.sh: cannot read the user manager environment' >&2
+  exit 1
+fi
+service_xdg_state_home=$(
+  while IFS= read -r environment_line; do
+    case "$environment_line" in
+      XDG_STATE_HOME=*)
+        printf '%s' "${environment_line#XDG_STATE_HOME=}"
+        break
+        ;;
+    esac
+  done < <(systemctl --user show-environment)
+)
+state_root=${service_xdg_state_home:-$HOME/.local/state}
+if [[ "$state_root" != /* ]]; then
+  printf '%s\n' 'install.sh: user manager state root must be absolute' >&2
+  exit 1
+fi
+state_dir=$state_root/orca-home
+readiness=$state_dir/serve-ready.json
+default_project_path=$HOME/Documents/Programming/home-server-infra
+orca_cli=
+
+bootstrap_default_project() {
+  local repo_add_json
+  local repo_id
+  local worktree_list_json
+
+  if [ ! -f "$orca_cli" ] || [ -L "$orca_cli" ]; then
+    printf '%s\n' 'install.sh: pinned Orca CLI is missing from the extracted release' >&2
+    return 1
+  fi
+  if [ ! -d "$default_project_path" ] \
+    || [ -L "$default_project_path" ] \
+    || [ "$(git -C "$default_project_path" rev-parse --show-toplevel 2>/dev/null)" != "$default_project_path" ]; then
+    printf 'install.sh: default Orca project is not a Git repository root: %s\n' \
+      "$default_project_path" >&2
+    return 1
+  fi
+
+  (
+    export ORCA_PAIRING_CODE
+    ORCA_PAIRING_CODE=$(jq -er '
+      .pairing.url
+      | select(type == "string" and startswith("orca://pair?"))
+    ' "$readiness")
+
+    if ! repo_add_json=$(node "$orca_cli" repo add --path "$default_project_path" --json); then
+      printf '%s\n' 'install.sh: failed to register the default project with Orca' >&2
+      return 1
+    fi
+    if ! jq -e --arg path "$default_project_path" '
+      .ok == true and
+      .result.repo.path == $path and
+      .result.repo.kind == "git" and
+      (.result.repo.id | type == "string" and length > 0)
+    ' <<<"$repo_add_json" >/dev/null; then
+      printf '%s\n' 'install.sh: Orca returned an invalid default-project registration' >&2
+      return 1
+    fi
+    repo_id=$(jq -er '.result.repo.id' <<<"$repo_add_json")
+
+    if ! worktree_list_json=$(
+      node "$orca_cli" worktree list --repo "id:$repo_id" --json
+    ); then
+      printf '%s\n' 'install.sh: failed to verify the default Orca project worktree' >&2
+      return 1
+    fi
+    if ! jq -e --arg path "$default_project_path" --arg repo_id "$repo_id" '
+      .ok == true and
+      any(.result.worktrees[]; .path == $path and .repoId == $repo_id)
+    ' <<<"$worktree_list_json" >/dev/null; then
+      printf '%s\n' 'install.sh: default Orca project has no matching runtime worktree' >&2
+      return 1
+    fi
+  )
+
+  printf 'Registered Orca default project: %s\n' "$default_project_path"
+}
+
+staging_dir=
+link_staging=$install_root/.current.$$
+cleanup() {
+  if [ -n "$staging_dir" ]; then
+    case "$staging_dir" in
+      "$release_root"/."$tag".install.*)
+        /usr/bin/rm -rf -- "$staging_dir"
+        ;;
+      *)
+        printf 'install.sh: refusing unexpected cleanup path: %s\n' "$staging_dir" >&2
+        ;;
+    esac
+  fi
+  if [ -e "$link_staging" ] || [ -L "$link_staging" ]; then
+    /usr/bin/unlink -- "$link_staging"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+release_ready=0
+if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+  if [ -d "$release_dir" ] \
+    && [ ! -L "$release_dir" ] \
+    && [ -x "$release_dir/squashfs-root/AppRun" ] \
+    && verify_asset "$release_dir/$asset" \
+    && verify_extracted_tree "$release_dir"; then
+    install -m 0644 -- "$release_json" "$release_dir/release.json"
+    release_ready=1
+  else
+    printf 'install.sh: existing release directory is incomplete: %s\n' \
+      "$release_dir" >&2
+    exit 1
+  fi
+fi
+
+if [ "$release_ready" -eq 0 ]; then
+  staging_dir=$(mktemp -d "$release_root/.${tag}.install.XXXXXX")
+  candidate=$staging_dir/$asset
+
+  if [ -n "$source_path" ]; then
+    cp -- "$source_path" "$candidate"
+  else
+    curl \
+      --proto '=https' \
+      --proto-redir '=https' \
+      --fail \
+      --location \
+      --retry 3 \
+      --output "$candidate" \
+      "$url"
+  fi
+  chmod 0755 "$candidate"
+  verify_asset "$candidate"
+
+  (
+    cd "$staging_dir"
+    "./$asset" --appimage-extract >/dev/null
+  )
+  app_run=$staging_dir/squashfs-root/AppRun
+  if [ ! -x "$app_run" ]; then
+    printf '%s\n' 'install.sh: AppImage extraction did not produce AppRun' >&2
+    exit 1
+  fi
+  verify_extracted_tree "$staging_dir"
+  install -m 0644 -- "$release_json" "$staging_dir/release.json"
+  mv -T -- "$staging_dir" "$release_dir"
+  staging_dir=
+fi
+
+target=releases/$tag
+active_release_dir=$release_dir
+if [ -L "$current_link" ]; then
+  current_target=$(readlink -- "$current_link")
+  if [ "$current_target" != "$target" ]; then
+    if [[ ! "$current_target" =~ ^releases/v[0-9]+[.][0-9]+[.][0-9]+$ ]] \
+      || ! verify_dynamic_release "$install_root/$current_target"; then
+      printf '%s\n' \
+        'install.sh: current auto-updated release failed verification' >&2
+      exit 1
+    fi
+    active_release_dir=$install_root/$current_target
+    printf 'Preserving verified auto-updated Orca release %s.\n' \
+      "${current_target##*/}"
+  fi
+elif [ -e "$current_link" ]; then
+  printf 'install.sh: current path is not a symlink: %s\n' "$current_link" >&2
+  exit 1
+else
+  ln -s -- "$target" "$link_staging"
+  mv -T -- "$link_staging" "$current_link"
+fi
+orca_cli=$active_release_dir/squashfs-root/resources/app.asar.unpacked/out/cli/index.js
+
+bash -n "$runner_source"
+bash -n "$updater_source"
+install -m 0755 -- "$runner_source" "$libexec_dir/orca-home-run"
+install -m 0755 -- "$updater_source" "$libexec_dir/orca-home-update-latest"
+systemd-analyze --user verify \
+  "$service_source" \
+  "$updater_service_source" \
+  "$updater_timer_source"
+install -m 0644 -- "$service_source" "$unit_dir/orca-serve.service"
+install -m 0644 -- \
+  "$updater_service_source" \
+  "$updater_timer_source" \
+  "$unit_dir/"
+systemctl --user daemon-reload
+
+if [ "$activate" -eq 1 ]; then
+  systemctl --user enable orca-serve.service
+  umask 0077
+  install -d -m 0700 -- "$state_dir"
+  : >"$readiness"
+  chmod 0600 -- "$readiness"
+  systemctl --user restart orca-serve.service
+
+  ready=0
+  for _ in $(seq 1 45); do
+    if systemctl --user is-active --quiet orca-serve.service \
+      && [ -s "$readiness" ] \
+      && jq -e '
+        type == "object" and
+        .type == "orca_server_ready" and
+        .schemaVersion == 1 and
+        .endpoint == "ws://0.0.0.0:6768" and
+        .boundEndpoint == "ws://0.0.0.0:6768" and
+        .advertisedEndpoint == "wss://orca.dongwontuna.net" and
+        .managedWslCliReconciliation == "settled" and
+        .pairing.available == true and
+        .pairing.endpoint == "wss://orca.dongwontuna.net" and
+        .pairing.scope == "runtime"
+      ' "$readiness" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ready" -ne 1 ]; then
+    printf '%s\n' 'install.sh: Orca did not produce the v1 readiness contract' >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%a' -- "$readiness")" != 600 ]; then
+    printf '%s\n' 'install.sh: readiness state must have mode 0600' >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%a' -- "$state_dir")" != 700 ]; then
+    printf '%s\n' 'install.sh: readiness state directory must have mode 0700' >&2
+    exit 1
+  fi
+  bootstrap_default_project
+  systemctl --user enable --now orca-update-latest.timer
+fi
+
+printf 'Installed Orca bootstrap %s AppRun at %s\n' \
+  "$version" "$release_dir/squashfs-root/AppRun"
+printf 'Active Orca release: %s\n' "$(readlink -- "$current_link")"
+if [ "$activate" -eq 1 ]; then
+  printf '%s\n' \
+    'orca-serve.service is active; hourly latest-channel updates are enabled.'
+fi
