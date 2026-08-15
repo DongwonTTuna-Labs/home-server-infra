@@ -47,7 +47,11 @@ contract. The tracked deployment therefore runs:
 
 1. `codexpro-home.service`: loopback-only CodexPro on `127.0.0.1:8788`.
 2. `cloudflared-codexpro-home.service`: the dedicated Named Tunnel with the
-   path-restricted ingress file.
+   path-restricted ingress file and metrics pinned to `127.0.0.1:20242`.
+
+The explicit metrics port prevents a boot-order race with the SSH tunnel,
+which reserves `127.0.0.1:20241`. Without this pin, `cloudflared` may claim the
+SSH port during reboot and leave the SSH connector in a restart loop.
 
 CodexPro prints its token-bearing local URL on standard output. The service
 discards standard output while retaining standard error in the user journal.
