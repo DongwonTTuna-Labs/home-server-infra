@@ -7,7 +7,7 @@ This repository restores configuration, not live data.
 1. Restore `stacks/codex-lb/.env` with `CODEX_LB_POSTGRES_PASSWORD`.
 2. Restore `${HOME}/.cloudflared/685aeec4-5771-459a-8909-7ccfbb086815.json`;
    `stacks/tunnel-apps` mounts it read-only as the credential for the
-   relay/NVIDIA/Orca tunnel. If that tunnel was revoked or deleted, create a new
+   relay/Orca tunnel. If that tunnel was revoked or deleted, create a new
    named tunnel and update the tunnel ID and credential mount together. Do not
    restore OpenCode DNS or ingress.
 3. Restore Docker volumes `codex-lb-data` and
@@ -48,12 +48,10 @@ This repository restores configuration, not live data.
 
    ```sh
    cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
-   cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
    cloudflared tunnel route dns --overwrite-dns tunnel-apps orca.dongwontuna.net
    curl -fsS http://127.0.0.1:2455/health
    curl -fsS https://relay-ai.dongwontuna.net/health
    curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
-   curl -fsS https://nvidia-lb.dongwontuna.net/health/live
    ```
 
 10. Finish with a real Codex response and confirm its matching relay request log
