@@ -26,8 +26,9 @@ The rest of `/opt/agent-apps` stays excluded, for two different reasons:
 - `agent-hermes` and `agent-openclaw-gateway` publish no floating tag that
   tracks releases. For both images `latest` resolves to the same digest as
   `main`, so labelling them would follow unreleased branch builds rather than
-  tagged releases. They stay pinned to a release tag plus OCI digest and are
-  bumped by hand.
+  tagged releases. Both stay pinned to a release tag plus OCI digest;
+  `agent-hermes` is bumped by `hermes-update-latest.timer` below, and
+  `agent-openclaw-gateway` by hand.
 
 `codex-lb` is excluded because it is pinned to an operator-verified tag and OCI
 digest. Update it manually only after the backup and migration preflight in
@@ -36,6 +37,44 @@ digest. Update it manually only after the backup and migration preflight in
 A digest-pinned image cannot be updated by Watchtower at all: the reference is
 immutable, so the label is silently inert. Dropping the digest is a prerequisite
 for enrolling any of these, not an afterthought.
+
+## Hermes Release Updates
+
+`scripts/hermes-update-latest.sh` keeps `agent-hermes` on the newest tagged
+`nousresearch/hermes-agent` release — the job Watchtower cannot do, because the
+pin is a digest and the only floating tags are branch builds. It resolves the
+highest `vYYYY.M.D[.N]` tag, rewrites `HERMES_IMAGE` in `/opt/agent-apps/.env`,
+recreates the container, and rolls the pin back if the new release fails to come
+up healthy. A release that fails is recorded and skipped until `--force`.
+
+`/opt/agent-apps` is root-owned mode `0640`, so only the pin rewrite runs in a
+throwaway container that bind-mounts the stack directory; everything else runs as
+the invoking user.
+
+The timer fires at 04:00 KST, clear of both the Hermes cron jobs (08:00-09:00 and
+14:00 KST) and Watchtower (09:00 KST), because applying an update restarts the
+container. Keep it that way if the schedule is ever changed.
+
+Install:
+
+```sh
+install -Dm755 stacks/maintenance/scripts/hermes-update-latest.sh \
+  ~/.local/libexec/hermes-update-latest
+install -Dm644 stacks/maintenance/systemd/hermes-update-latest.service \
+  ~/.config/systemd/user/hermes-update-latest.service
+install -Dm644 stacks/maintenance/systemd/hermes-update-latest.timer \
+  ~/.config/systemd/user/hermes-update-latest.timer
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-update-latest.timer
+```
+
+Check without changing anything:
+
+```sh
+~/.local/libexec/hermes-update-latest --check
+systemctl --user list-timers hermes-update-latest.timer
+journalctl --user -u hermes-update-latest.service -n 50
+```
 
 ## Run
 

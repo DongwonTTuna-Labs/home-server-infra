@@ -37,6 +37,9 @@ required=(
   stacks/coding/systemd/codex-cli-update.timer
   stacks/maintenance/README.md
   stacks/maintenance/compose.yaml
+  stacks/maintenance/scripts/hermes-update-latest.sh
+  stacks/maintenance/systemd/hermes-update-latest.service
+  stacks/maintenance/systemd/hermes-update-latest.timer
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
   stacks/agent-stack/compose.yml
