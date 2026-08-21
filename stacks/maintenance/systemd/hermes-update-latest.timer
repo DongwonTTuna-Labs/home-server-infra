@@ -1,0 +1,15 @@
+[Unit]
+Description=Check daily for a newer tagged hermes-agent release
+
+[Timer]
+# 19:00 UTC is 04:00 KST. Hermes runs its own cron jobs at 08:00-09:00 and
+# 14:00 KST and Watchtower fires at 09:00 KST, so this window is clear of both;
+# the container restart this service performs must not land on a scheduled job.
+OnCalendar=*-*-* 19:00:00
+RandomizedDelaySec=20m
+Persistent=true
+AccuracySec=1m
+Unit=hermes-update-latest.service
+
+[Install]
+WantedBy=timers.target

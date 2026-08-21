@@ -1,0 +1,20 @@
+[Unit]
+Description=Update agent-hermes to the newest tagged hermes-agent release
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/libexec/hermes-update-latest --apply
+TimeoutStartSec=20min
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal
