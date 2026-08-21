@@ -10,7 +10,6 @@ the dedicated SSH tunnel plus `ssh-port-forward`.
 | --- | --- |
 | `relay-ai.dongwontuna.net` | `http://localhost:2455` |
 | `orca.dongwontuna.net` | `http://localhost:6768` (WebSocket; private pairing state is not logged) |
-| `nvidia-lb.dongwontuna.net` | `http://localhost:2456` (public dashboard/API/health; admin UI remains loopback-only) |
 
 ## Run
 
@@ -24,7 +23,6 @@ Host state required before starting the stack:
 set -Eeuo pipefail
 tunnel=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
-curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
 systemctl --user is-active --quiet orca-serve.service
 ss -ltn 'sport = :6768' | grep -F ':6768'
 cloudflared tunnel --config "$tunnel" ingress validate
@@ -45,11 +43,9 @@ Move DNS routes only after local origins pass smoke tests:
 (
 set -Eeuo pipefail
 curl -fsS -o /dev/null http://127.0.0.1:2455/health
-curl -fsS -o /dev/null http://127.0.0.1:2456/health/live
 systemctl --user is-active --quiet orca-serve.service
 ss -ltn 'sport = :6768' | grep -F ':6768'
 cloudflared tunnel route dns --overwrite-dns tunnel-apps relay-ai.dongwontuna.net
-cloudflared tunnel route dns --overwrite-dns tunnel-apps nvidia-lb.dongwontuna.net
 cloudflared tunnel route dns --overwrite-dns tunnel-apps orca.dongwontuna.net
 )
 ```
@@ -58,26 +54,13 @@ Verify Orca's public `101 Switching Protocols` response with the secret-free
 WebSocket request in [`stacks/orca-home/README.md`](../orca-home/README.md).
 Do not read or print its pairing URL as part of tunnel verification.
 
-Verify both public routes after the DNS change:
+Verify the public relay route after the DNS change:
 
 ```bash
 (
 set -Eeuo pipefail
 curl -fsS https://relay-ai.dongwontuna.net/health
 curl -fsS -o /dev/null https://relay-ai.dongwontuna.net/dashboard
-curl -fsS https://nvidia-lb.dongwontuna.net/
-curl -fsS https://nvidia-lb.dongwontuna.net/favicon.svg
-curl -fsS https://nvidia-lb.dongwontuna.net/status
-curl -fsS https://nvidia-lb.dongwontuna.net/models
-curl -fsS https://nvidia-lb.dongwontuna.net/docs
-curl -fsS https://nvidia-lb.dongwontuna.net/incidents
-curl -fsS https://nvidia-lb.dongwontuna.net/security
-curl -fsS https://nvidia-lb.dongwontuna.net/api/public/v1/summary
-curl -fsS https://nvidia-lb.dongwontuna.net/health/live
-test "$(curl -sS -o /dev/null -w '%{http_code}' https://nvidia-lb.dongwontuna.net/v1/models)" = 401
-for path in admin admin/api/v2/overview internal metrics debug; do
-  test "$(curl -sS -o /dev/null -w '%{http_code}' "https://nvidia-lb.dongwontuna.net/$path")" = 404
-done
 )
 ```
 

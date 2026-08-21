@@ -8,7 +8,6 @@ This repository stores reproducible configuration for:
 - domain-based tunnel suites
 - domain-based user systemd bundles
 - codex-lb relay
-- NVIDIA hosted API load balancer
 - GitHub Codex runner pool
 - Selected SSH and Codex dotfiles
 
@@ -27,7 +26,6 @@ stacks/codexpro-home/         ChatGPT CodexPro home workspace connector
 stacks/codex-github-runners/  Existing GitHub self-hosted runner pool
 stacks/coding/                Coding/agent domain boundaries
 stacks/maintenance/           Single host-wide Watchtower maintenance stack
-stacks/nvidia-build-lb/       Independent NVIDIA hosted API gateway stack
 stacks/orca-home/             Orca headless remote runtime and pairing service
 stacks/tunnel-apps/           Single non-SSH Cloudflare Tunnel stack
 services/robobotuna-company-os/ Mocked RoboboTuna Company OS first-slice service
@@ -46,7 +44,6 @@ Dify, Grimoire, or production data access.
 scripts/verify-layout.sh
 scripts/scan-secrets.sh
 CODEX_LB_POSTGRES_PASSWORD=placeholder docker compose -f stacks/codex-lb/compose.yaml config >/dev/null
-docker compose -f stacks/nvidia-build-lb/compose.yaml config >/dev/null
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
 docker compose -f stacks/tunnel-apps/compose.yaml config >/dev/null
 node --check stacks/codexpro-home/scripts/codexpro-home-url.mjs
