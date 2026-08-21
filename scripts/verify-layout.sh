@@ -43,6 +43,8 @@ required=(
   stacks/maintenance/systemd/hermes-update-latest.timer
   stacks/maintenance/systemd/n8n-workflow-watch.service
   stacks/maintenance/systemd/n8n-workflow-watch.timer
+  config/n8n/README.md
+  config/n8n/gmail-auto-label.json
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
   stacks/agent-stack/compose.yml
@@ -503,6 +505,23 @@ if ! grep -Fq \
   'ExecStart=/usr/local/libexec/nvidia-build-lb-agent-apps-delayed-update' \
   stacks/nvidia-build-lb/systemd/agent-apps-delayed-update.service.d/nblb-cutover-lock.conf; then
   printf 'Delayed-update systemd interlock drifted\n' >&2
+  exit 1
+fi
+
+workflow_export=config/n8n/gmail-auto-label.json
+if ! jq -e '(keys == ["connections", "name", "nodes", "settings"]) and (.nodes | length > 0)' \
+     "$workflow_export" >/dev/null 2>&1; then
+  printf 'n8n workflow export must hold exactly name/nodes/connections/settings: %s\n' \
+    "$workflow_export" >&2
+  exit 1
+fi
+# Nodes may reference credentials by id; the material itself must never reach
+# the repository, whatever flags a future export is taken with.
+if jq -e '[.. | objects | keys[]]
+          | index("apiKey") // index("accessToken")
+          // index("oauthTokenData") // index("clientSecret")' \
+     "$workflow_export" >/dev/null 2>&1; then
+  printf 'n8n workflow export carries credential material: %s\n' "$workflow_export" >&2
   exit 1
 fi
 
