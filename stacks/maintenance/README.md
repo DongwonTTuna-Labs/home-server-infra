@@ -76,6 +76,41 @@ systemctl --user list-timers hermes-update-latest.timer
 journalctl --user -u hermes-update-latest.service -n 50
 ```
 
+## n8n Automation Watchdog
+
+`scripts/n8n-workflow-watch.sh` reports n8n automation that has gone quiet.
+
+The failure it exists for is silence, not errors. The Gmail labelling workflow
+sat dead for 90 days on an expired OAuth token; that failure happens inside the
+polling trigger, which never writes an execution record, so an n8n error
+workflow would not have fired once. This checks the observable symptom instead —
+active workflows that have never run or have not run inside
+`N8N_WATCH_STALE_HOURS` (default 24) — plus failed executions and the
+trigger errors n8n only ever writes to its container log.
+
+Alerts go to the `#자동화-오류` Discord channel through Hermes, which already
+holds the bot credentials, so no new secret is introduced. Repeat alerts for an
+unchanged problem are suppressed for `N8N_WATCH_COOLDOWN_HOURS` (default 12).
+
+Install:
+
+```sh
+install -Dm755 stacks/maintenance/scripts/n8n-workflow-watch.sh \
+  ~/.local/libexec/n8n-workflow-watch
+install -Dm644 stacks/maintenance/systemd/n8n-workflow-watch.service \
+  ~/.config/systemd/user/n8n-workflow-watch.service
+install -Dm644 stacks/maintenance/systemd/n8n-workflow-watch.timer \
+  ~/.config/systemd/user/n8n-workflow-watch.timer
+systemctl --user daemon-reload
+systemctl --user enable --now n8n-workflow-watch.timer
+```
+
+Check without sending anything:
+
+```sh
+~/.local/libexec/n8n-workflow-watch --check
+```
+
 ## Run
 
 ```sh

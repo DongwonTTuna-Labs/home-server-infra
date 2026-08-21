@@ -33,8 +33,11 @@ required=(
   stacks/maintenance/README.md
   stacks/maintenance/compose.yaml
   stacks/maintenance/scripts/hermes-update-latest.sh
+  stacks/maintenance/scripts/n8n-workflow-watch.sh
   stacks/maintenance/systemd/hermes-update-latest.service
   stacks/maintenance/systemd/hermes-update-latest.timer
+  stacks/maintenance/systemd/n8n-workflow-watch.service
+  stacks/maintenance/systemd/n8n-workflow-watch.timer
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
   stacks/agent-stack/compose.yml

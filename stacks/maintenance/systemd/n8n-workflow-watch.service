@@ -1,0 +1,20 @@
+[Unit]
+Description=Check that n8n automations are still running and report failures to Discord
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/libexec/n8n-workflow-watch --notify
+TimeoutStartSec=5min
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal
