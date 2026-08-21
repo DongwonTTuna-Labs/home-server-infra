@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly n8n automation liveness check
+
+[Timer]
+# Hourly, because the failure this guards against is silence rather than a
+# burst of errors; repeat alerts are suppressed by the script's own cooldown.
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+AccuracySec=1m
+Unit=n8n-workflow-watch.service
+
+[Install]
+WantedBy=timers.target
