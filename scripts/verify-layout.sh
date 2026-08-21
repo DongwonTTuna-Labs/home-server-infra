@@ -38,6 +38,8 @@ required=(
   stacks/maintenance/systemd/hermes-update-latest.timer
   stacks/maintenance/systemd/n8n-workflow-watch.service
   stacks/maintenance/systemd/n8n-workflow-watch.timer
+  config/n8n/README.md
+  config/n8n/gmail-auto-label.json
   stacks/codex-github-runners/compose.yaml
   stacks/codex-github-runners/Dockerfile
   stacks/agent-stack/compose.yml
@@ -258,6 +260,23 @@ CODEX_LB_POSTGRES_PASSWORD=placeholder \
   docker compose -f stacks/codex-lb/compose.yaml config --format json \
   >"$tmpdir/codex-lb-compose.json"
 docker compose -f stacks/maintenance/compose.yaml config >/dev/null
+workflow_export=config/n8n/gmail-auto-label.json
+if ! jq -e '(keys == ["connections", "name", "nodes", "settings"]) and (.nodes | length > 0)' \
+     "$workflow_export" >/dev/null 2>&1; then
+  printf 'n8n workflow export must hold exactly name/nodes/connections/settings: %s\n' \
+    "$workflow_export" >&2
+  exit 1
+fi
+# Nodes may reference credentials by id; the material itself must never reach
+# the repository, whatever flags a future export is taken with.
+if jq -e '[.. | objects | keys[]]
+          | index("apiKey") // index("accessToken")
+          // index("oauthTokenData") // index("clientSecret")' \
+     "$workflow_export" >/dev/null 2>&1; then
+  printf 'n8n workflow export carries credential material: %s\n' "$workflow_export" >&2
+  exit 1
+fi
+
 tunnel_config=stacks/tunnel-apps/cloudflared/tunnel-apps.yml
 awk '
   function emit() {
