@@ -1221,7 +1221,7 @@ export function confirmSendAttempt(
     if (!attempt) throw new Error("confirmed send requires an armed attempt");
     const transition = db.transitionAttempt(requestId, attempt.attempt_no, ["armed"], "confirmed", {
       userTurnId: result.userTurnId,
-      assistantTurnId: result.assistantTurnId,
+      ...(result.assistantTurnId !== undefined ? { assistantTurnId: result.assistantTurnId } : {}),
     });
     if (!transition.changed) {
       if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {

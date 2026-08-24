@@ -110,7 +110,9 @@ export interface SendProgressNotification {
 export interface SendResult {
   conversationUrl: string;
   userTurnId: string;
-  assistantTurnId: string;
+  // assistant 턴은 전송 착지 확정에 필수가 아니다 — user 턴 + 비루트 대화 URL이면 착지로 본다.
+  // (reconcile의 turn_anchor와 동일 기준; 생성 완료는 poll이 별도로 판정한다.)
+  assistantTurnId?: string;
   matchedBy?: "strict" | "loose" | "single_turn";
 }
 export interface ReconcileParams {
