@@ -436,6 +436,12 @@ export class Supervisor {
   ): Promise<Envelope> {
     const deadline = Date.now() + Math.floor(timeoutSeconds * 1_000);
     const triedSlots = new Set<string>();
+    // GWP_ONLY_SLOT: 특정 슬롯에만 고정한다 (그 슬롯 외 전부 후보에서 제외).
+    // 그 슬롯이 사용 불가면 다른 슬롯으로 넘어가지 않고 pool_busy/recovering으로 대기한다.
+    const onlySlot = process.env.GWP_ONLY_SLOT?.trim();
+    if (onlySlot) {
+      for (const s of this.config.slots) if (s.id !== onlySlot) triedSlots.add(s.id);
+    }
     let sawLogin = false;
     let sawProviderLimit = false;
     for (;;) {
