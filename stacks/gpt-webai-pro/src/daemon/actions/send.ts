@@ -64,7 +64,9 @@ export async function sendMessage(
   let clickStarted = false;
   try {
     emit();
-    page = await session.newConversation();
+    page = params.conversationUrl
+      ? await session.open(params.conversationUrl)
+      : await session.newConversation();
     step("ensure_model");
     await ensurePro(page, labels);
     step("compose");

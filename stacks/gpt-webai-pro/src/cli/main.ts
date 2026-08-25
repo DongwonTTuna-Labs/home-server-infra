@@ -58,7 +58,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return emitEnvelope(emptyPromptEnvelope(), 0);
       }
       supervisor = await Supervisor.open();
-      const envelope = await supervisor.run(parsed.prompt, parsed.files, parsed.timeoutSeconds);
+      const envelope = await supervisor.run(parsed.prompt, parsed.files, parsed.timeoutSeconds, parsed.conversationUrl);
       return emitEnvelope(envelope, envelope.hardFailure ? 1 : 0);
     }
     if (command === "resume") {
@@ -188,9 +188,11 @@ async function parseRun(argv: string[]): Promise<{
   prompt: string;
   files: string[];
   timeoutSeconds: number;
+  conversationUrl?: string;
 }> {
   let promptFile: string | null = null;
   let timeoutSeconds = defaultTimeoutSeconds();
+  let conversationUrl: string | undefined;
   const files: string[] = [];
   const promptParts: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -201,6 +203,8 @@ async function parseRun(argv: string[]): Promise<{
       promptFile = requireValue(argv, ++index, "--prompt-file");
     } else if (item === "--timeout-seconds") {
       timeoutSeconds = parseTimeout(requireValue(argv, ++index, "--timeout-seconds"));
+    } else if (item === "--conversation") {
+      conversationUrl = requireValue(argv, ++index, "--conversation");
     } else if (item.startsWith("--")) {
       throw new InputError(`unknown run option: ${item}`);
     } else {
@@ -215,7 +219,7 @@ async function parseRun(argv: string[]): Promise<{
   else if (promptParts.length > 0) prompt = promptParts.join(" ");
   else if (!process.stdin.isTTY) prompt = await readStdin();
   else prompt = "";
-  return { prompt, files, timeoutSeconds };
+  return { prompt, files, timeoutSeconds, ...(conversationUrl ? { conversationUrl } : {}) };
 }
 function parseSessionCommand(
   argv: string[],

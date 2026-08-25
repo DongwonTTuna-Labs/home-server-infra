@@ -80,6 +80,8 @@ export interface ReadinessResult {
 export interface SendParams {
   prompt: string;
   files: RpcFile[];
+  // 지정 시 새 채팅 대신 이 기존 대화에 이어서 후속 턴을 보낸다 (RouteFork 연속 제안용).
+  conversationUrl?: string;
 }
 export type SendStep =
   | "navigate"
