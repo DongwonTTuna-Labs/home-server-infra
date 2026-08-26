@@ -2,6 +2,60 @@
 
 This repository restores configuration, not live data.
 
+## Host DNS
+
+Do this before restoring any stack. Every stack resolves names through the host,
+and containers inherit the host resolver via Docker's embedded `127.0.0.11`, so a
+host that hands DNS to Cloudflare WARP takes every service down with it when the
+WARP DoH upstream is unreachable. `docs/decisions/warp-dns-split.md` records the
+outage that established this and the reasoning behind the split.
+
+1. Confirm the Cloudflare Zero Trust device profile
+   `linux-home-server-traffic-only` still exists, matches `os.name is linux`,
+   sits above `Default` in the profile order, and uses Traffic only mode
+   (`warp_tunnel_only`). It is account state, not repository state, so a rebuilt
+   host inherits it on enrollment. If it is missing, recreate it before joining
+   the host to the organization; the `Default` profile uses Traffic and DNS mode
+   and would take the host resolver over again.
+2. Verify WARP left the resolver alone. The WARP link must carry no routing
+   domain, and the global DNS list must be empty:
+
+   ```sh
+   warp-cli settings | grep 'Mode:'          # expect TunnelOnly
+   resolvectl domain | grep -i cloudflare    # expect no '~.' entry
+   resolvectl dns                            # expect Global to be empty
+   ```
+
+3. Restore the fallback resolver drop-in. It only engages when no resolver is
+   configured at all, so it covers a DHCP lease that supplies no DNS and does
+   not rescue a configured-but-dead one:
+
+   ```sh
+   sudo install -d /etc/systemd/resolved.conf.d
+   printf '[Resolve]\nFallbackDNS=8.8.8.8 8.8.4.4 9.9.9.9\n' \
+     | sudo tee /etc/systemd/resolved.conf.d/20-fallback-dns.conf
+   sudo systemctl restart systemd-resolved
+   ```
+
+   The list is IPv4 and Google-first on purpose. This uplink drops external
+   UDP 53 intermittently for every provider, while TCP 53 and DoT stay solid and
+   Google is the fastest of the three on both; external IPv6 resolvers fail
+   outright because the host has no external IPv6 egress. Re-measure with at
+   least three probes per server before changing it, since a single probe reads
+   as a clean pass or a clean block either way.
+
+4. Confirm resolution works and the DHCP-supplied resolvers are the ones
+   answering:
+
+   ```sh
+   resolvectl status | head -12
+   getent hosts chatgpt.com
+   ```
+
+Do not pin `dns:` on individual Compose services to work around a broken host
+resolver. It hardcodes DHCP-supplied addresses and leaves the rest of the host
+broken.
+
 ## codex-lb Relay
 
 1. Restore `stacks/codex-lb/.env` with `CODEX_LB_POSTGRES_PASSWORD`.
