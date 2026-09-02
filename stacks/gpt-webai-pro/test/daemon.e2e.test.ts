@@ -538,25 +538,27 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       await runtime.close();
     }
   });
-  await t.test("post-click error preserves the first observed user turn id", async () => {
+  await t.test("send confirms on user turn + conversation url without an assistant turn", async () => {
+    // Pro+대형 첨부는 확정 창(300s) 안에 assistant 턴을 렌더하지 못할 수 있다.
+    // user 턴이 비루트 대화 URL에 착지하면 전송은 확정이며(생성 완료는 poll이 판정),
+    // reconcile turn_anchor와 동일 기준이다. assistant 턴을 요구하지 않는다.
     const runtime = await setup("confirmation-miss");
     try {
       const context = runtime.browser.contexts()[0]!;
       const newPage = context.waitForEvent("page");
       const sending = runtime.rpc.call("send", {
-        prompt: "landed before confirmation failed",
+        prompt: "landed before assistant turn rendered",
         files: [],
       });
       const page = await newPage;
       const user = page.locator('[data-message-author-role="user"]').first();
       await user.waitFor({ state: "visible", timeout: 10_000 });
-      const pendingUserTurnId = await user.getAttribute("data-message-id");
-      assert.ok(pendingUserTurnId);
-      await page.close();
-      await assert.rejects(sending, (error: unknown) => error instanceof GwpError
-        && error.phase === "post_click"
-        && error.pendingUserTurnId === pendingUserTurnId
-        && error.preClickBaseline?.length === 0);
+      const observedUserTurnId = await user.getAttribute("data-message-id");
+      assert.ok(observedUserTurnId);
+      const result = await sending;
+      assert.equal(result.userTurnId, observedUserTurnId);
+      assert.equal(result.assistantTurnId, undefined);
+      assert.match(result.conversationUrl, /\/c\//);
     } finally {
       await runtime.close();
     }

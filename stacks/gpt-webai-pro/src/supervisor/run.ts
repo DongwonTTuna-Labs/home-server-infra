@@ -80,7 +80,7 @@ export class Supervisor {
   close(): void {
     this.db.close();
   }
-  async run(prompt: string, files: string[], timeoutSeconds: number): Promise<Envelope> {
+  async run(prompt: string, files: string[], timeoutSeconds: number, conversationUrl?: string): Promise<Envelope> {
     if (!prompt.trim()) throw new InputError("prompt must not be empty");
     const validated = await validateFiles(files);
     const id = newRequestId();
@@ -90,6 +90,7 @@ export class Supervisor {
     this.log(id, "staged");
     try {
       await atomicWrite(path.join(directory, "prompt.md"), prompt);
+      if (conversationUrl) await atomicWrite(path.join(directory, "continue_url"), conversationUrl);
       await this.persistAttachments(id, validated);
     } catch (error) {
       this.db.setRequestStatus(id, "failed", "internal", errorMessage(error));
@@ -436,6 +437,12 @@ export class Supervisor {
   ): Promise<Envelope> {
     const deadline = Date.now() + Math.floor(timeoutSeconds * 1_000);
     const triedSlots = new Set<string>();
+    // GWP_ONLY_SLOT: 특정 슬롯에만 고정한다 (그 슬롯 외 전부 후보에서 제외).
+    // 그 슬롯이 사용 불가면 다른 슬롯으로 넘어가지 않고 pool_busy/recovering으로 대기한다.
+    const onlySlot = process.env.GWP_ONLY_SLOT?.trim();
+    if (onlySlot) {
+      for (const s of this.config.slots) if (s.id !== onlySlot) triedSlots.add(s.id);
+    }
     let sawLogin = false;
     let sawProviderLimit = false;
     for (;;) {
@@ -544,6 +551,7 @@ export class Supervisor {
   ): Promise<Envelope | null> {
     const prompt = await readFile(path.join(this.requestDir(request.id), "prompt.md"), "utf8");
     const files = await this.rpcFiles(request.id, slot);
+    const conversationUrl = await readFile(path.join(this.requestDir(request.id), "continue_url"), "utf8").catch(() => "");
     let sendLock;
     try {
       sendLock = await tryAcquireFileLock(this.sendLockPath(request.id));
@@ -569,7 +577,7 @@ export class Supervisor {
       let lastProgress: SendProgress | undefined;
       let lastLoggedStep: string | undefined;
       try {
-        const result = await client.call("send", { prompt, files }, {
+        const result = await client.call("send", { prompt, files, ...(conversationUrl ? { conversationUrl } : {}) }, {
           timeoutMs: SEND_RPC_MAX_MS,
           inactivityMs: SEND_RPC_INACTIVITY_MS,
           onProgress: (progress) => {
@@ -1221,7 +1229,7 @@ export function confirmSendAttempt(
     if (!attempt) throw new Error("confirmed send requires an armed attempt");
     const transition = db.transitionAttempt(requestId, attempt.attempt_no, ["armed"], "confirmed", {
       userTurnId: result.userTurnId,
-      assistantTurnId: result.assistantTurnId,
+      ...(result.assistantTurnId !== undefined ? { assistantTurnId: result.assistantTurnId } : {}),
     });
     if (!transition.changed) {
       if (transition.row.state === "confirmed" || transition.row.state === "reconciled") {

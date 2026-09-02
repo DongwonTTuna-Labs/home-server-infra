@@ -64,7 +64,9 @@ export async function sendMessage(
   let clickStarted = false;
   try {
     emit();
-    page = await session.newConversation();
+    page = params.conversationUrl
+      ? await session.open(params.conversationUrl)
+      : await session.newConversation();
     step("ensure_model");
     await ensurePro(page, labels);
     step("compose");
@@ -143,11 +145,14 @@ export async function sendMessage(
         && turn.domIndex > user.domIndex
       ));
       const conversationUrl = page.url();
-      if (user && assistant && session.isConversationUrl(conversationUrl)) {
+      // 착지 확정은 user 턴 + 비루트 대화 URL로 충분하다. assistant 턴은 Pro+대형 첨부에서
+      // 확정 창(300s) 안에 렌더되지 않을 수 있으므로 요구하지 않는다 — 있으면 넘기고,
+      // 없으면 poll이 생성 완료를 판정한다 (reconcile turn_anchor와 동일 기준, DESIGN §5.2).
+      if (user && session.isConversationUrl(conversationUrl)) {
         return {
           conversationUrl,
           userTurnId: user.dataMessageId,
-          assistantTurnId: assistant.dataMessageId,
+          ...(assistant ? { assistantTurnId: assistant.dataMessageId } : {}),
           ...(matchedBy ? { matchedBy } : {}),
         };
       }
