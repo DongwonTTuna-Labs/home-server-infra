@@ -26,6 +26,9 @@ export const ASSISTANT_TURN_SELECTOR = '[data-message-author-role="assistant"]';
 export const PANEL_DOWNLOAD_SELECTOR = [
   'button[aria-label="Download" i]',
   '[role="button"][aria-label="Download" i]',
+  // 계정 UI가 한국어면 미리보기 패널의 다운로드 버튼 aria-label이 "다운로드" 계열이다.
+  'button[aria-label*="다운로드"]',
+  '[role="button"][aria-label*="다운로드"]',
 ].join(",");
 export const STOP_PATTERN = /stop generating|stop responding|stop answering|stop-button|중지|정지/i;
 export const FILENAME_PATTERN = /[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu;
