@@ -21,6 +21,14 @@ export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
       }).end(filename === "numbers.txt" ? "1\n2\n3\n" : "report from fake ChatGPT\n");
       return;
     }
+    if (url.pathname === "/download/pack.zip") {
+      // 실측: 직접 다운로드 버튼은 content-disposition 파일명을 제네릭 "download"로 준다.
+      response.writeHead(200, {
+        "content-type": "application/zip",
+        "content-disposition": 'attachment; filename="download"',
+      }).end(Buffer.from("PK\u0003\u0004fake-zip-body"));
+      return;
+    }
     if (url.pathname === "/download/archive.tar.gz") {
       response.writeHead(200, {
         "content-type": "application/gzip",
@@ -227,6 +235,8 @@ const PAGE = String.raw`<!doctype html>
         ? 'ordinary answer'
         : currentScenario === 'artifacts' || currentScenario === 'artifacts-inline'
           ? 'artifact answer'
+      : currentScenario === 'artifacts-direct'
+        ? 'RouteFork_pack.zip 다운로드'
       : currentScenario === 'multi-tab'
         ? 'answer for ' + assistant.dataset.prompt
         : 'fake answer';
@@ -251,6 +261,9 @@ const PAGE = String.raw`<!doctype html>
     if (currentScenario === 'artifacts-inline') {
       assistant.append(download('/download/report.txt', 'report.txt'));
       assistant.append(download('/download/archive.tar.gz', 'archive.tar.gz'));
+    }
+    if (currentScenario === 'artifacts-direct') {
+      assistant.append(directDownload('/download/pack.zip', 'RouteFork_pack.zip'));
     }
     if (currentScenario === 'artifacts-delayed' || currentScenario === 'artifacts-empty') {
       setTimeout(() => assistant.append(fileEntity('/download/numbers.txt', 'numbers.txt', true)), 4000);
@@ -287,6 +300,22 @@ const PAGE = String.raw`<!doctype html>
     const block = document.createElement('div');
     block.append('Download', entity, '.');
     return block;
+  }
+  function directDownload(href, filename) {
+    // 실측: 생성 파일(zip 등)은 텍스트가 '<파일명> 다운로드'인 버튼으로 렌더되고,
+    // 클릭하면 미리보기 패널 없이 곧바로 다운로드가 시작된다. aria-label은 없다.
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'behavior-btn';
+    button.textContent = filename + ' 다운로드';
+    button.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.href = href;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    });
+    return button;
   }
   function download(href, filename) {
     const link = document.createElement('a');

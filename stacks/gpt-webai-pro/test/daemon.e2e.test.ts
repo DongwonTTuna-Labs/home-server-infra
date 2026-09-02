@@ -726,6 +726,20 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       } finally { await runtime.close(); }
     });
   }
+  await t.test("artifacts-direct downloads a direct-download button and recovers the on-screen filename", async () => {
+    const runtime = await setup("artifacts-direct");
+    try {
+      const prompt = "artifacts-direct";
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
+      const terminal = await runtime.rpc.call("poll", pollRequest(sent, prompt, 7_000));
+      assert.equal(terminal.state, "complete");
+      assert.deepEqual(terminal.artifactControls?.map((control) => control.label), ["RouteFork_pack.zip"]);
+      const saved = await runtime.rpc.call("download", { conversationUrl: sent.conversationUrl, controlIndex: 0 });
+      // 직접 다운로드 버튼: 클릭이 곧바로 다운로드를 내고, 제네릭 "download" 대신 화면 이름으로 저장된다.
+      assert.equal(saved.filename, "RouteFork_pack.zip");
+      assert.deepEqual(await readFile(saved.outboxPath), Buffer.from("PK\u0003\u0004fake-zip-body"));
+    } finally { await runtime.close(); }
+  });
   for (const [scenario, answer, waitMs] of [["artifacts-delayed", "numbers.txt.", 12_000],
     ["artifacts-empty", "", 6_000]] as const) {
     await t.test(`${scenario} discovers a delayed filename-only entity`, async () => {
