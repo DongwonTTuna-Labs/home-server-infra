@@ -3,8 +3,10 @@
 This stack owns the Codex relay application and database. Public routing for
 `relay-ai.dongwontuna.net` is owned by `stacks/tunnel-apps`.
 
-The application image is an operator-verified stable release pinned by both tag
-and OCI index digest. Both the application and Postgres are excluded from
+The application image is pinned by both tag and OCI index digest. The pin is
+currently an upstream **pre-release** (`1.25.0-beta.1`), kept on the preview
+track deliberately; treat every upgrade as an operator-verified change rather
+than a routine bump. Both the application and Postgres are excluded from
 Watchtower. Change the image only after the backup and migration preflight
 below succeeds; do not switch this stack to a mutable `latest` tag.
 
@@ -59,6 +61,26 @@ local per-account caps. Global admission limits and upstream/provider rate
 limits remain active, so this removes artificial `account_response_create_cap`
 and `account_stream_cap` failures without bypassing provider enforcement.
 
+## Telemetry
+
+v1.24.0 added anonymous usage telemetry that posts to
+`https://telemetry.tokmaxxing.com`. Its consent state defaults to `undecided`,
+and `undecided` resolves to **active** until someone answers the dashboard
+prompt, so an upgrade from v1.23.0 would start sending without an explicit
+decision. The stack therefore sets `CODEX_LB_TELEMETRY_ENABLED: "false"`, which
+resolves consent from the environment (`source=env`) and outranks any persisted
+dashboard answer. Delete that variable to hand the decision back to the
+dashboard; set it to `"true"` to opt in deliberately.
+
+## PostgreSQL Shared Memory
+
+The `postgres` service sets `shm_size: 1gb`. Docker's 64MB default for
+`/dev/shm` makes parallel hash joins abort with `could not resize shared memory
+segment`, which asyncpg surfaces as `DiskFullError` on the request path
+(upstream PR #1791, which set the same value in the upstream Compose file).
+`shm_size` is a tmpfs ceiling, not a reservation, so it costs nothing until
+PostgreSQL actually uses it.
+
 ## Backup Before Migration
 
 Run this from the repository root while PostgreSQL is healthy:
@@ -95,28 +117,48 @@ smoke test. Do not commit or attach the backup files to a PR.
 
 ## Migration Preflight
 
-v1.23.0 adds permanent hourly usage rollups; the startup migration backfills
-them from `request_logs`, so expect minutes of downtime on this dataset,
-comparable to the 1.21→1.22 useragent backfill. v1.23.0 also enables Auth
-Guardian (background OAuth token keepalive, 12h staleness gate) by default;
-`CODEX_LB_AUTH_GUARDIAN_ENABLED=false` is the opt-out if it ever misbehaves.
+The target Alembic head for the pinned release is
+`20260830_000000_add_quota_warmup_claim_expiry`. Never read a head off the
+migration file names: the graph is merged and the newest filename is routinely
+an ancestor rather than the head. Read it from the image instead:
 
-The target Alembic head for the pinned stable release is
-`20260806_120000_add_http_bridge_owner_process_epoch`. The v1.22.0 head is
-`20260722_000000_backfill_request_log_useragent_families`, the v1.21.0 head is
-`20260713_040000_add_account_refresh_claims`, and the prior beta.3 head is
-`20260711_030000_add_limit_warmup_idle_threshold`. Do not infer the head from
-migration file names: in the v1.23.0 graph the `20260808_...` autovacuum
-revision is an ancestor of the `20260806_120000` head. A historical 1.19 rollback
+```bash
+docker run --rm --entrypoint python \
+  ghcr.io/soju06/codex-lb:1.25.0-beta.1 -c "
+from alembic.script import ScriptDirectory
+from app.db.migrate import _build_alembic_config
+print(ScriptDirectory.from_config(
+    _build_alembic_config('sqlite+aiosqlite:///tmp.db')).get_heads())
+"
+```
+
+Known ancestor heads, newest first: v1.24.0
+`20260816_000000_add_model_source_embeddings`, v1.23.0
+`20260806_120000_add_http_bridge_owner_process_epoch`, v1.22.0
+`20260722_000000_backfill_request_log_useragent_families`, v1.21.0
+`20260713_040000_add_account_refresh_claims`, beta.3
+`20260711_030000_add_limit_warmup_idle_threshold`. A historical 1.19 rollback
 used `20260513_000000_add_accounts_alias` for both a true 1.19 schema and a
-1.20.1 superset schema. The revision string alone cannot distinguish them.
+1.20.1 superset schema; the revision string alone cannot distinguish them.
 
-Start PostgreSQL, pull the pinned images, and define read-only schema checkers:
+The v1.23.0 to v1.25.0-beta.1 jump adds no bulk backfill and completed in about
+five seconds on this dataset. That is unlike the v1.22 to v1.23 upgrade, whose
+hourly-rollup backfill ran for minutes; do not assume every future jump is
+cheap. v1.23.0 also enabled Auth Guardian (background OAuth token keepalive,
+12h staleness gate) by default; `CODEX_LB_AUTH_GUARDIAN_ENABLED=false` is the
+opt-out if it ever misbehaves.
+
+Stop the application, start PostgreSQL, pull the pinned images, and define
+read-only schema checkers. Stopping the application first keeps it from serving
+against a half-migrated schema; startup migration stays enabled only as the
+fallback for an unattended restart:
 
 ```bash
 set -euo pipefail
 COMPOSE=stacks/codex-lb/compose.yaml
-TARGET_HEAD=20260806_120000_add_http_bridge_owner_process_epoch
+TARGET_HEAD=20260830_000000_add_quota_warmup_claim_expiry
+V124_HEAD=20260816_000000_add_model_source_embeddings
+V123_HEAD=20260806_120000_add_http_bridge_owner_process_epoch
 V122_HEAD=20260722_000000_backfill_request_log_useragent_families
 V121_HEAD=20260713_040000_add_account_refresh_claims
 BETA3_HEAD=20260711_030000_add_limit_warmup_idle_threshold
@@ -126,6 +168,7 @@ PRE_BETA_HEAD=20260701_000000_add_weekly_pace_smoothing_minutes
 V119_IMAGE='ghcr.io/soju06/codex-lb:1.19.0@sha256:732cbb2d29b3f02ddacaf5aad6458e60fb926e58a5376cab1a288b9c866ea219'
 V1201_IMAGE='ghcr.io/soju06/codex-lb:1.20.1@sha256:e4ccfb16d4aa5f715e225db62862f8773667a492d486e9503e5491d2caff2052'
 
+docker compose -f "$COMPOSE" stop codex-lb
 docker compose -f "$COMPOSE" up -d postgres
 docker compose -f "$COMPOSE" pull codex-lb
 
@@ -150,7 +193,7 @@ Use this fail-closed state matrix:
 | --- | --- |
 | `TARGET_HEAD` | Run `db check`. Do not stamp backward or re-run migration manually. |
 | `none` and the `public` schema has zero tables | Run `db upgrade head`, then `db current` and `db check`. |
-| `V122_HEAD`, `V121_HEAD`, `BETA3_HEAD`, `BETA2_HEAD`, `STABLE_HEAD`, or `PRE_BETA_HEAD` | These are known ancestors. Run `db upgrade head` without stamping, then require `TARGET_HEAD` from `db current` and run `db check`. |
+| `V124_HEAD`, `V123_HEAD`, `V122_HEAD`, `V121_HEAD`, `BETA3_HEAD`, `BETA2_HEAD`, `STABLE_HEAD`, or `PRE_BETA_HEAD` | These are known ancestors. Run `db upgrade head` without stamping, then require `TARGET_HEAD` from `db current` and run `db check`. |
 | `20260513...`, 1.19 check passes and 1.20.1 check fails | This is an honest 1.19 schema. Run `db upgrade head` without stamping, then `db current` and `db check`. |
 | `20260513...`, 1.19 check fails and 1.20.1 check passes | This is the rollback-stamped 1.20.1 superset. Run `db stamp "$STABLE_HEAD"`, confirm with `db current`, then run `db upgrade head`, `db current`, and `db check`. |
 | Both schema checks pass, both fail, or the revision is unexpected | Stop. Do not stamp or upgrade until the physical schema and backup evidence are reconciled. |
@@ -179,15 +222,51 @@ The final `db check` must print both `migration_policy=ok` and
 docker compose -f stacks/codex-lb/compose.yaml up -d
 ```
 
+Changing `shm_size` recreates the `postgres` container. That is expected; the
+data lives on the volume.
+
 ## Verify
 
 ```sh
 curl -fsS http://127.0.0.1:2455/health/ready
-curl -fsS https://relay-ai.dongwontuna.net/health/ready
 curl -fsS -D - -o /dev/null http://127.0.0.1:2455/health/ready \
-  | grep -i '^x-app-version: 1.23.0'
+  | grep -i '^x-app-version: 1.25.0-beta.1'
+docker exec codex-lb env | grep '^CODEX_LB_TELEMETRY_ENABLED=false'
 ```
 
-Health alone is not release evidence. Finish with one real Codex response and
-confirm the matching request log reports a successful WebSocket upstream rather
-than an HTTP fallback.
+Check the public hostname from a browser session, not with a bare `curl`.
+`relay-ai.dongwontuna.net` sits behind Cloudflare Access, so an unauthenticated
+request to `/health/ready` answers `302` to the Access login. That redirect is
+edge policy owned by `stacks/tunnel-apps`, not an application fault.
+
+Health alone is not release evidence. Finish with one real Codex response
+through the public base URL and confirm the matching request log reports a
+WebSocket upstream rather than an HTTP fallback. Since v1.25.0-beta.1 the proxy
+falls back to HTTP transport when the upstream WebSocket is unavailable, so this
+check now separates a healthy path from a silently degraded one:
+
+```sh
+docker exec codex-lb-postgres psql -U codex_lb -d codex_lb -c \
+  "SELECT requested_at, model, transport, upstream_transport, status
+     FROM request_logs ORDER BY requested_at DESC LIMIT 5;"
+```
+
+Both `transport` and `upstream_transport` must read `websocket` with
+`status = success`.
+
+## Dashboard Staleness Note
+
+Between 2026-08-22 and this upgrade the host ran a locally rebuilt
+`codex-lb-local:1.23.0-status-resume-6dc2550` image whose only difference from
+upstream v1.23.0 was two React Query options on the dashboard status bar
+(`refetchOnWindowFocus: 'always'`, `refetchOnReconnect: 'always'`). That fork
+was never committed here, so the repository and the host had drifted. This
+upgrade returns the stack to a stock, digest-pinned upstream image and drops the
+fork.
+
+The upstream behaviour is therefore back: the status bar polls every 60s with
+`refetchIntervalInBackground: false` and the global default
+`refetchOnWindowFocus: false`, so after a backgrounded tab regains focus it can
+show up to a minute of stale status. Nothing else is affected — no request path,
+no data. Do not rebuild a private image for this; if it becomes annoying, send
+the two-line change upstream.

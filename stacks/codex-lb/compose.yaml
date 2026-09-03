@@ -2,9 +2,11 @@ name: codex-lb
 
 services:
   codex-lb:
-    # Operator-verified stable release, pinned by tag and OCI index digest.
-    # Keep this service out of Watchtower and follow README.md for upgrades.
-    image: ghcr.io/soju06/codex-lb:1.23.0@sha256:3b369ac16e03d31b940be35dd8e61583f9cbd74bfca5e92e4bd03bfec62e5b13
+    # Operator-verified preview release, pinned by tag and OCI index digest.
+    # This is an upstream pre-release; keep the previous stable image until the
+    # response smoke test passes and follow README.md for upgrades.
+    # Rollback image: ghcr.io/soju06/codex-lb:1.23.0@sha256:3b369ac16e03d31b940be35dd8e61583f9cbd74bfca5e92e4bd03bfec62e5b13
+    image: ghcr.io/soju06/codex-lb:1.25.0-beta.1@sha256:80bb39434f53a3743a982ca810c59fceb9a2e2dcfb0e76b4d2feebf3ecf1c507
     container_name: codex-lb
     pull_policy: missing
     restart: always
@@ -17,13 +19,17 @@ services:
       # revision 20260513 for two different physical schemas, so never stamp
       # that state by revision alone; use the README.md preflight matrix.
       CODEX_LB_DATABASE_MIGRATE_ON_STARTUP: "true"
+      # v1.24.0 added anonymous usage telemetry that is ACTIVE while consent is
+      # undecided. This relay is private, so opt out explicitly instead of
+      # relying on the dashboard consent prompt.
+      CODEX_LB_TELEMETRY_ENABLED: "false"
       # This is a single-user relay. Disable codex-lb's local per-account caps;
       # global admission limits and upstream/provider limits still apply.
       CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT: "0"
       CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT: "0"
-      # Since v1.23.0 the background-task engine mirrors these two settings
-      # (its own CODEX_LB_DATABASE_BACKGROUND_* knobs were removed upstream,
-      # issue #1340), so the worst case is 2x(pool+overflow) connections:
+      # The background-task engine mirrors these two settings (its own
+      # CODEX_LB_DATABASE_BACKGROUND_* knobs were removed upstream, issue
+      # #1340), so the worst case is 2x(pool+overflow) connections:
       # 2x(40+20)=120, under the PG server's max_connections (200 below) with
       # headroom left for migrations, backups, and psql.
       CODEX_LB_DATABASE_POOL_SIZE: "40"
@@ -43,8 +49,13 @@ services:
     container_name: codex-lb-postgres
     restart: always
     # Headroom above the app pools (main 60 + mirrored background 60 = 120 max
-    # clients as of v1.23.0).
+    # clients).
     command: ["postgres", "-c", "max_connections=200"]
+    # Docker's default 64MB /dev/shm makes parallel hash joins abort with
+    # "could not resize shared memory segment", surfaced as asyncpg
+    # DiskFullError on the request path (upstream PR #1791). This is a tmpfs
+    # ceiling, not a reservation.
+    shm_size: 1gb
     labels:
       # Pin the DB engine: never let watchtower auto-jump a Postgres major.
       com.centurylinklabs.watchtower.enable: "false"
