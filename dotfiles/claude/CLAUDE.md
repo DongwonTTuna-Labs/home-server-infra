@@ -288,20 +288,24 @@ laptop as `ssh home`. The rules below hold on both.
 
 Codex reads `~/.codex/AGENTS.md`; Claude Code reads `~/.claude/CLAUDE.md`. They
 are the same file, generated from one canon, so a rule stated here applies
-whichever tool is running. Each tool also has its own auxiliary directories:
-`~/.codex/skills/`, `~/.codex/prompts/`, `~/.codex/agents/`, and
-`~/.claude/skills/`, `~/.claude/rules/`. Read whichever belongs to the tool you
-are; `~/.claude/rules/` currently holds relay model selection
-(`codex-lb-models.md`), Google Workspace work (`gws-cli.md`), and where
-RouteFork work happens (`routefork-current.md`).
+whichever tool is running. Skills and prompts stay per tool —
+`~/.codex/skills/`, `~/.codex/prompts/`, `~/.codex/agents/` for Codex,
+`~/.claude/skills/` for Claude — because each tool loads its own.
 
-Runbooks live in `~/.codex/runbooks/` regardless of which tool is reading them.
-Load one only when the decision in front of you actually needs it:
+Reference documents are shared. They are ordinary files, so either tool can
+read them; only Claude auto-loads `~/.claude/rules/`, and Codex must open them
+itself. Load one only when the decision in front of you actually needs it:
 
-- `execution-policy.md` — PR state and project memory, spec drift and retired
-  attempts, planning shape, the long form of anomaly triage.
-- `gpt-webai-pro.md` — operating the ChatGPT Pro slot daemon.
-- `gptpro-review.md` — the gptpro-review stack.
+- `~/.codex/runbooks/execution-policy.md` — PR state and project memory, spec
+  drift and retired attempts, planning shape, the long form of anomaly triage.
+- `~/.codex/runbooks/gpt-webai-pro.md` — operating the ChatGPT Pro slot daemon.
+- `~/.codex/runbooks/gptpro-review.md` — the gptpro-review stack.
+- `~/.claude/rules/codex-lb-models.md` — which relay model to hand Codex, what
+  each account is entitled to, how to invoke it.
+- `~/.claude/rules/gws-cli.md` — any Google Workspace work (Gmail, Drive,
+  Calendar, Sheets, Docs) goes through the `gws` CLI; this has the traps.
+- `~/.claude/rules/routefork-current.md` — where RouteFork work happens; that
+  repository's own agent files take over from there.
 
 ## Persisting Knowledge
 
