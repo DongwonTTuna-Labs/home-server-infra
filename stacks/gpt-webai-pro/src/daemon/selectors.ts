@@ -8,6 +8,15 @@ export const COMPOSER_SELECTORS = [
 ] as const;
 export const INTELLIGENCE_PILL_SELECTOR = "form button[aria-haspopup]";
 export const INTELLIGENCE_OPTION_SELECTOR = '[role="menu"] [role="menuitemradio"]';
+// 2026-09 GPT-6 UI: 알약을 열면 나오는 피커 본문. 안에 모델 선택(menuitem "Select model" →
+// menuitemradio Latest/GPT-5.6 Sol/…)과 생각 강도 슬라이더([role=slider], 0..max, max=Pro)가 있다.
+export const INTELLIGENCE_PICKER_CONTENT_SELECTOR = '[data-testid="composer-intelligence-picker-content"]';
+export const POWER_SLIDER_SELECTOR = `${INTELLIGENCE_PICKER_CONTENT_SELECTOR} [role="slider"]`;
+export const POWER_STATUS_SELECTOR = '[data-testid="composer-model-picker-slider-simple-view"]';
+export const MODEL_SELECT_ITEM_SELECTOR = `${INTELLIGENCE_PICKER_CONTENT_SELECTOR} [role="menuitem"][aria-label="Select model" i]`;
+export const MODEL_VERSION_OPTION_SELECTOR = `${INTELLIGENCE_PICKER_CONTENT_SELECTOR} [role="menuitemradio"]`;
+// 버전 배지 토큰: "6", "5.5", "6.1" 처럼 숫자만으로 된 줄/단어.
+const VERSION_TOKEN = /^\d+(?:\.\d+)*$/u;
 export const SEND_BUTTON_SELECTORS = [
   'button[data-testid*="send" i]',
   'button[aria-label*="send" i]',
@@ -222,9 +231,20 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
 function normalizeLabel(value: string): string {
   return value.normalize("NFC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
 }
+/**
+ * 알약/라디오 라벨을 power 라벨로 정규화한다. 버전 배지("5.5" 둘째 줄, "6" 첫째 줄)는 제거한다.
+ *   "Pro" → "pro" / "Instant\n5.5" → "instant" / "6\nPro" → "pro" / "Extra  High" → "extra high"
+ */
 export function normalizeIntelligenceLabel(value: string): string {
-  const firstLine = value.normalize("NFC").trim().split(/\r?\n/u)[0] ?? "";
-  return firstLine.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+  const tokens = value.normalize("NFC").trim().split(/\s+/u).filter((token) => token.length > 0);
+  return tokens.filter((token) => !VERSION_TOKEN.test(token)).join(" ").toLocaleLowerCase();
+}
+/** 알약 라벨을 (버전, power)로 나눈다. "6\nPro" → {version:"6", power:"Pro"}, "Pro" → {version:null, power:"Pro"}. */
+export function parsePillLabel(value: string): { version: string | null; power: string; display: string } {
+  const tokens = value.normalize("NFC").trim().split(/\s+/u).filter((token) => token.length > 0);
+  const version = tokens.find((token) => VERSION_TOKEN.test(token)) ?? null;
+  const power = tokens.filter((token) => !VERSION_TOKEN.test(token)).join(" ");
+  return { version, power, display: tokens.join(" ") };
 }
 export function normalizeChipStem(value: string): string {
   return normalizeLabel(value)
@@ -247,19 +267,24 @@ export async function findIntelligencePill(
   timeoutMs = 20_000,
 ): Promise<Locator | null> {
   // 컨테이너 부팅 직후에는 컴포저 pill이 아직 hydrate되지 않았을 수 있어 폴링한다.
+  // 1순위: 라벨 집합과 정규화 일치하는 유일한 후보. 2순위(새 UI의 미지 라벨 대비): 텍스트가 있는
+  // aria-haspopup 버튼이 form 안에 하나뿐이면 그것 (첨부 "+" 버튼은 텍스트가 없어 제외된다).
   const wanted = new Set(intelligenceLabels.map(normalizeIntelligenceLabel));
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const candidates = page.locator(INTELLIGENCE_PILL_SELECTOR);
     const matches: Locator[] = [];
+    const textual: Locator[] = [];
     const count = await candidates.count();
     for (let index = 0; index < count; index += 1) {
       const candidate = candidates.nth(index);
       if (!await candidate.isVisible().catch(() => false)) continue;
       const label = await candidate.innerText().catch(() => "");
+      if (label.trim().length > 0) textual.push(candidate);
       if (wanted.has(normalizeIntelligenceLabel(label))) matches.push(candidate);
     }
     if (matches.length === 1) return matches[0]!;
+    if (matches.length === 0 && textual.length === 1) return textual[0]!;
     if (Date.now() >= deadline) return null;
     await page.waitForTimeout(500);
   }
@@ -281,9 +306,38 @@ export async function findIntelligenceOption(
   return matches.length === 1 ? matches[0]! : null;
 }
 export async function waitForIntelligenceMenu(page: Page, timeoutMs: number): Promise<boolean> {
-  return page.locator(INTELLIGENCE_OPTION_SELECTOR).first()
+  // 구 UI(라디오 목록)든 새 UI(피커 본문)든 하나가 보이면 열린 것이다.
+  return page.locator(`${INTELLIGENCE_OPTION_SELECTOR}, ${INTELLIGENCE_PICKER_CONTENT_SELECTOR}`).first()
     .waitFor({ state: "visible", timeout: timeoutMs })
     .then(() => true, () => false);
+}
+/** 새 UI의 생각 강도 슬라이더. 없으면 null (구 UI). */
+export async function findPowerSlider(page: Page): Promise<Locator | null> {
+  const slider = page.locator(POWER_SLIDER_SELECTOR).first();
+  return await slider.isVisible().catch(() => false) ? slider : null;
+}
+/** 슬라이더 옆 상태 문구 ("Pro, 5 of 5. Use Left and Right arrow keys…"). */
+export async function readPowerStatusText(page: Page): Promise<string> {
+  return page.locator(POWER_STATUS_SELECTOR).first().innerText().catch(() => "");
+}
+/** 새 UI의 "Select model" 항목(aria-expanded로 버전 라디오를 펼친다). 없으면 null. */
+export async function findModelSelectItem(page: Page): Promise<Locator | null> {
+  const item = page.locator(MODEL_SELECT_ITEM_SELECTOR).first();
+  return await item.isVisible().catch(() => false) ? item : null;
+}
+/** 피커 본문 안 모델 버전 라디오 중 라벨이 일치하는 유일한 것. */
+export async function findModelVersionOption(page: Page, label: string): Promise<Locator | null> {
+  const wanted = normalizeLabel(label);
+  const candidates = page.locator(MODEL_VERSION_OPTION_SELECTOR);
+  const matches: Locator[] = [];
+  const count = await candidates.count();
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const text = await candidate.innerText().catch(() => "");
+    if (normalizeLabel(text) === wanted) matches.push(candidate);
+  }
+  return matches.length === 1 ? matches[0]! : null;
 }
 export async function readCurrentModelLabel(
   page: Page,

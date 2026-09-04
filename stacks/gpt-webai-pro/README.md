@@ -98,7 +98,28 @@ runtime은 정지하지만 SQLite 요청·conversation URL·영속 profile은 �
 `status:"running"`, message `전송 진행 중(소유 프로세스 생존)`을 반환합니다.
 
 `status`는 슬롯 state/cooldown/최근 사용 시각/`activeRequests`와 비종결 요청을 자체 JSON으로
-출력합니다.
+출력합니다. 슬롯마다 주간 사용량 `weeklyUsed`(최근 7일 확정 전송 수), `weeklyLimit`
+(`config/slots.json`의 `weeklyLimit`, 슬롯별 `weeklyLimit`이 있으면 그것, 없으면 null=무제한),
+`weeklyResetAt`(한도에 닿았을 때 가장 오래된 전송이 7일 창 밖으로 나가 1건이 풀리는 시각, 그 외 null)도
+함께 나옵니다.
+
+## 모델 보장과 주간 한도
+
+전송 직전 daemon은 composer 알약이 `labels.json`의 `target`(기본 `Pro`)인지 보장합니다.
+2026-09 GPT-6 UI에서는 알약이 "6 / Pro"(모델 버전 + 생각 강도)이고, 메뉴 안에 생각 강도
+슬라이더(최대 = Pro)와 "Select model" 라디오(Latest / GPT-5.6 Sol / GPT-5.5)가 있습니다. daemon은
+슬라이더를 최대로 올리고 `labels.json`의 `modelVersion`(기본 `Latest` = 6)이 선택돼 있는지
+확인한 뒤 메뉴를 닫고 알약을 다시 읽어 검증합니다. 구 UI(단일 Intelligence 라디오)도 그대로
+지원합니다. 어느 UI에서도 다른 강도·모델로 대체하지 않으며, 목표를 만들 수 없으면
+`model_unavailable`입니다. 보장된 라벨(예: `6 Pro`)은 send 결과의 `modelLabel`로 돌아옵니다.
+
+ChatGPT Pro 계정의 주간 Pro 한도(현재 200회)는 SQLite `usage_events`에 계정(슬롯)별로 기록해
+관리합니다. 전송이 확정(confirmed/reconciled)될 때 요청당 1건을 남기고, 최근 7일 이동창 안의
+건수가 `weeklyLimit`에 닿은 슬롯은 새 요청 할당에서 제외됩니다. 쓸 수 있는 슬롯이 전부 한도에
+닿으면 envelope는 `recovering` / `errorKind: "weekly_limit"`이며 `message`에 가장 이른 리셋
+시각을 적습니다. 기존 session은 그 뒤 `resume`으로 이어갑니다. 제공자의 정확한 리셋 시각은
+공개돼 있지 않으므로 7일 이동창은 보수적 근사입니다. `GWP_ONLY_SLOT`으로 고정한 슬롯이 한도에
+닿아도 다른 슬롯으로 넘어가지 않습니다.
 `cleanup`은 기본이 dry-run이며, `--apply`일 때만 live CLI owner가 없는 managed runtime
 정지와 `needs_login` 재검사를 실제로 처리합니다. 요청/profile/쿠키는 삭제하지 않습니다.
 `release`는 요청을 `failed`로 강제 종결하고 live owner가 없는 슬롯 runtime을 정지합니다.
@@ -187,8 +208,11 @@ SQLite `db.sqlite`가 유일한 상태 진실입니다. `log.jsonl`은 사람용
 - `provider_limit`: 슬롯은 3분 cooldown에 들어갑니다. 기존 session을 나중에 `resume`합니다.
 - `pool_busy`: 세 슬롯이 동시성 한도에 찼거나 할당 불가 상태입니다. queue daemon은 없으므로
   `nextCommand`의 동일-session `resume`을 호출합니다.
-- `model_unavailable`: composer의 Intelligence picker에 `Pro` 라디오가 실제로 보이는지와
+- `model_unavailable`: 알약을 열었을 때 생각 강도 슬라이더가 최대(Pro)로 올라가는지, "Select
+  model"에 `labels.json`의 `modelVersion` 라디오가 있는지(구 UI라면 `Pro` 라디오가 보이는지)와
   `labels.json`을 확인합니다.
+- `weekly_limit`: 쓸 수 있는 모든 계정이 주간 한도에 닿았습니다. `status --json`의
+  `weeklyUsed`/`weeklyResetAt`을 보고 리셋 뒤 같은 session을 `resume`합니다.
 - `send_uncertain`: 새 `run`을 만들지 말고 반드시 기존 session을 `resume`합니다. reconcile도
   증명하지 못하면 ChatGPT의 열린 탭을 사람이 확인해야 합니다.
 - `daemon_unreachable`: `docker inspect gwp-slot-a`, `config/slots.json`의 포트,

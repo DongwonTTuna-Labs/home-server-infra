@@ -20,7 +20,14 @@ import type { Envelope, PollResult, PublicArtifact, ReadinessResult, ReconcileRe
 import { GwpDatabase } from "./db.js";
 import { DockerManager, mapContainerOutboxPath } from "./docker.js";
 import { RpcClient } from "./rpc-client.js";
-import { claimSlotForRequest, markSlotIdle, markSlotNeedsLogin, markSlotProviderLimit } from "./slots.js";
+import {
+  claimSlotForRequest,
+  markSlotIdle,
+  markSlotNeedsLogin,
+  markSlotProviderLimit,
+  resolveWeeklyLimits,
+  weeklyUsageFor,
+} from "./slots.js";
 const ACTIVE_STATUSES = new Set(["staged", "sending", "generating", "uncertain"]);
 const TERMINAL_STATUSES = new Set(["complete", "needs_user_action", "failed"]);
 const SEND_IN_PROGRESS_MESSAGE = "전송 진행 중(소유 프로세스 생존)";
@@ -111,6 +118,9 @@ export class Supervisor {
       cooldownUntil: number | null;
       lastUsedAt: number | null;
       activeRequests: number;
+      weeklyUsed: number;
+      weeklyLimit: number | null;
+      weeklyResetAt: number | null;
     }>;
     requests: Array<{
       id: string;
@@ -121,6 +131,7 @@ export class Supervisor {
     }>;
   }> {
     const now = Date.now();
+    const limits = resolveWeeklyLimits(this.config);
     return {
       ok: true,
       slots: this.db.listSlots().map((slot) => ({
@@ -130,6 +141,7 @@ export class Supervisor {
         cooldownUntil: slot.cooldown_until,
         lastUsedAt: slot.last_used_at,
         activeRequests: this.db.countActiveForSlot(slot.id),
+        ...weeklyStatus(weeklyUsageFor(this.db, slot.id, limits.get(slot.id) ?? null, now)),
       })),
       requests: this.db.listNonterminalRequests().map((request) => ({
         id: request.id,
@@ -461,6 +473,7 @@ export class Supervisor {
         continue;
       }
       if (!request.slot_id) {
+        const weeklyLimits = resolveWeeklyLimits(this.config);
         const claim = claimSlotForRequest(
           this.db,
           this.config.slots,
@@ -468,6 +481,7 @@ export class Supervisor {
           request.id,
           Date.now(),
           triedSlots,
+          weeklyLimits,
         );
         request = claim.request;
         if (request.status !== "staged") continue;
@@ -480,6 +494,15 @@ export class Supervisor {
                 && item.cooldown_until <= now)
           ) && this.db.countActiveForSlot(item.id) >= this.config.maxConcurrent);
           const hasProviderLimit = slots.some((item) => item.state === "provider_limit");
+          // 상태로는 쓸 수 있는데 주간 한도 때문에 빠진 슬롯만 남았으면 weekly_limit로 대기시킨다.
+          const usable = slots.filter((item) => !triedSlots.has(item.id) && (item.state === "idle"
+            || (item.state === "provider_limit" && item.cooldown_until !== null && item.cooldown_until <= now)));
+          const usages = usable.map((item) => weeklyUsageFor(this.db, item.id, weeklyLimits.get(item.id) ?? null, now));
+          if (usable.length > 0 && usages.every((usage) => usage.exhausted) && !hasCapacityBlocked) {
+            const resetAt = Math.min(...usages.map((usage) => usage.resetAt ?? Number.POSITIVE_INFINITY));
+            const when = Number.isFinite(resetAt) ? new Date(resetAt).toISOString() : "unknown";
+            return recoveringEnvelope(id, "weekly_limit", `all usable accounts reached the weekly limit; earliest reset at ${when}`);
+          }
           if ((sawProviderLimit || hasProviderLimit) && !hasCapacityBlocked) {
             return recoveringEnvelope(id, "provider_limit", "all currently usable accounts are cooling down");
           }
@@ -1237,12 +1260,14 @@ export function confirmSendAttempt(
       }
       throw new Error("confirmed send requires an armed attempt");
     }
+    const now = Date.now();
     db.connection.prepare(`
       UPDATE requests
       SET status = 'generating', conversation_url = ?, error_kind = NULL,
           error_detail = NULL, updated_at = ?
       WHERE id = ? AND status = 'sending'
-    `).run(result.conversationUrl, Date.now(), requestId);
+    `).run(result.conversationUrl, now, requestId);
+    recordUsageFor(db, requestId, result.modelLabel ?? null, now);
     return "confirmed";
   });
 }
@@ -1369,12 +1394,14 @@ export function applyReconcileResult(
         }
         throw new Error("reconcile requires an uncertain attempt");
       }
+      const now = Date.now();
       db.connection.prepare(`
         UPDATE requests
         SET status = 'generating', conversation_url = ?, error_kind = NULL,
             error_detail = NULL, updated_at = ?
         WHERE id = ? AND status = 'uncertain'
-      `).run(result.conversationUrl, Date.now(), requestId);
+      `).run(result.conversationUrl, now, requestId);
+      recordUsageFor(db, requestId, null, now);
       return "found";
     });
   }
@@ -1459,8 +1486,29 @@ function validateConfig(config: SlotsConfig): SlotsConfig {
       throw new InputError(`invalid or duplicate port for slot ${slot.id}`);
     }
     ports.add(slot.port);
+    if (slot.weeklyLimit !== undefined && !isWeeklyLimit(slot.weeklyLimit)) {
+      throw new InputError(`invalid weeklyLimit for slot ${slot.id}`);
+    }
+  }
+  if (config.weeklyLimit !== undefined && !isWeeklyLimit(config.weeklyLimit)) {
+    throw new InputError("invalid weeklyLimit");
   }
   return config;
+}
+function isWeeklyLimit(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1;
+}
+/** 확정된 전송을 주간 사용량 원장에 남긴다. 슬롯이 없는 요청(있을 수 없음)은 건너뛴다. */
+function recordUsageFor(db: GwpDatabase, requestId: string, modelLabel: string | null, now: number): void {
+  const slotId = db.getRequest(requestId)?.slot_id;
+  if (slotId) db.recordUsage(requestId, slotId, modelLabel, now);
+}
+function weeklyStatus(usage: ReturnType<typeof weeklyUsageFor>): {
+  weeklyUsed: number;
+  weeklyLimit: number | null;
+  weeklyResetAt: number | null;
+} {
+  return { weeklyUsed: usage.used, weeklyLimit: usage.limit, weeklyResetAt: usage.resetAt };
 }
 async function validateFiles(files: string[]): Promise<ValidatedFile[]> {
   const result: ValidatedFile[] = [];

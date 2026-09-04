@@ -68,7 +68,7 @@ export async function sendMessage(
       ? await session.open(params.conversationUrl)
       : await session.newConversation();
     step("ensure_model");
-    await ensurePro(page, labels);
+    const modelLabel = await ensurePro(page, labels);
     step("compose");
     await fillComposer(page, params.prompt);
     if (params.files.length > 0) {
@@ -152,6 +152,7 @@ export async function sendMessage(
         return {
           conversationUrl,
           userTurnId: user.dataMessageId,
+          modelLabel,
           ...(assistant ? { assistantTurnId: assistant.dataMessageId } : {}),
           ...(matchedBy ? { matchedBy } : {}),
         };

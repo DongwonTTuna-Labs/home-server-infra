@@ -18,6 +18,7 @@ import { startFakeChatGpt } from "./fake-chatgpt/server.js";
 const LABELS = {
   target: ["Pro"],
   intelligence: ["Instant", "Medium", "High", "Extra High", "Pro"],
+  modelVersion: "Latest",
 };
 // fake 페이지는 즉시 렌더되므로 렌더 대기를 짧게 잡아 zero-turn 케이스 테스트를 빠르게 한다.
 process.env.GWP_RECONCILE_RENDER_WAIT_MS = "1500";
@@ -514,6 +515,51 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
   });
   await t.test("model-missing is a pre-click error", async () => {
     const runtime = await setup("model-missing");
+    try {
+      await assert.rejects(
+        runtime.rpc.call("send", { prompt: "must not send", files: [] }),
+        (error: unknown) => error instanceof GwpError
+          && error.kind === "model_unavailable"
+          && error.phase === "pre_click",
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("gpt6 slider UI: send raises power to Pro, keeps Latest, and reports the model label", async () => {
+    const runtime = await setup("gpt6-slider");
+    try {
+      assert.equal((await runtime.rpc.call("readiness", undefined)).modelLabel, "6\nInstant");
+      const prompt = "hello from gpt6";
+      const sent = await runtime.rpc.call("send", { prompt, files: [] });
+      assert.equal(sent.modelLabel, "6 Pro");
+      assert.equal((await runtime.rpc.call("readiness", undefined)).modelLabel, "6\nPro");
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      assert.equal(await page.locator("#intelligence-pill").getAttribute("data-open-count"), "1");
+      assert.equal(await page.locator("#intelligence-pill").getAttribute("aria-expanded"), "false");
+      assert.equal(await page.locator("#power-slider").getAttribute("aria-valuenow"), "4");
+      assert.equal(await page.locator('[data-version="Latest"]').getAttribute("aria-checked"), "true");
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("gpt6 with a legacy model version checked switches to Latest before sending", async () => {
+    const runtime = await setup("gpt6-legacy-model");
+    try {
+      assert.equal((await runtime.rpc.call("readiness", undefined)).modelLabel, "6\nPro");
+      const sent = await runtime.rpc.call("send", { prompt: "already pro, wrong model", files: [] });
+      assert.equal(sent.modelLabel, "6 Pro");
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      assert.equal(await page.locator("#intelligence-pill").getAttribute("data-open-count"), "1");
+      assert.equal(await page.locator('[data-version="Latest"]').getAttribute("aria-checked"), "true");
+      assert.equal(await page.locator('[data-version="GPT-5.5"]').getAttribute("aria-checked"), "false");
+      assert.equal(await page.locator("#power-slider").getAttribute("aria-valuenow"), "4");
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("gpt6 slider that will not move is a pre-click model_unavailable", async () => {
+    const runtime = await setup("gpt6-slider-stuck");
     try {
       await assert.rejects(
         runtime.rpc.call("send", { prompt: "must not send", files: [] }),

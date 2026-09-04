@@ -66,11 +66,14 @@ test("status uses its own exact JSON shape rather than a request envelope", asyn
   const status = JSON.parse(result.stdout);
   assert.deepEqual(Object.keys(status), ["ok", "slots", "requests"]);
   assert.equal(status.ok, true);
-  assert.equal(status.slots.length, 3);
+  assert.equal(status.slots.length, 4);
   assert.deepEqual(
     Object.keys(status.slots[0]),
-    ["id", "account", "state", "cooldownUntil", "lastUsedAt", "activeRequests"],
+    ["id", "account", "state", "cooldownUntil", "lastUsedAt", "activeRequests", "weeklyUsed", "weeklyLimit", "weeklyResetAt"],
   );
   assert.equal(status.slots[0].activeRequests, 0);
+  assert.equal(status.slots[0].weeklyUsed, 0);
+  assert.equal(status.slots[0].weeklyLimit, 200);
+  assert.equal(status.slots[0].weeklyResetAt, null);
   assert.deepEqual(status.requests, []);
 });

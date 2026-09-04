@@ -91,7 +91,8 @@ const PAGE = String.raw`<!doctype html>
     app.innerHTML = '<section role="alert" data-testid="rate-limit">Too many requests. Try again later.</section>';
     return;
   }
-  const initialIntelligence = scenario === 'slow' ? 'Pro' : 'Instant';
+  const gpt6 = scenario.startsWith('gpt6');
+  const initialIntelligence = (scenario === 'slow' || scenario === 'gpt6-legacy-model') ? 'Pro' : 'Instant';
   const intelligenceLabels = scenario === 'model-missing'
     ? ['Instant', 'Medium', 'High', 'Extra High']
     : ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
@@ -102,15 +103,35 @@ const PAGE = String.raw`<!doctype html>
     '<button type="button" role="menuitemradio" data-intelligence="' + label + '" aria-checked="' +
       String(label === initialIntelligence) + '">' + intelligenceMarkup(label) + '</button>'
   )).join('');
-  app.innerHTML =
-    '<section id="conversation"></section>' +
-    '<form id="composer-form" onsubmit="return false">' +
-    '<button type="button" class="__composer-pill" id="intelligence-pill" aria-haspopup="menu" ' +
-      'aria-expanded="false" data-open-count="0">' + intelligenceMarkup(initialIntelligence) +
-      '<svg aria-hidden="true"></svg></button>' +
-    '<div id="chips"></div><input type="file" multiple aria-label="Attach files">' +
-    '<div id="prompt-textarea" contenteditable="true" role="textbox"></div>' +
-    '<button type="button" data-testid="send-button" aria-label="Send prompt">Send</button></form>' +
+  // 2026-09 GPT-6 UI 재현: 알약 "6\nPro", 피커 본문에 Select model(라디오 Latest/GPT-5.6 Sol/GPT-5.5)
+  // + 생각 강도 슬라이더(0..4, 4=Pro). 슬라이더 값은 즉시 적용되고 Escape로 닫는다.
+  const POWER_LEVELS = ['Instant', 'Light', 'Standard', 'Extended', 'Pro'];
+  const gpt6PillMarkup = (power) => '<span>6</span><br><span>' + power + '</span>';
+  const gpt6Versions = ['Latest', 'GPT-5.6 Sol', 'GPT-5.5'];
+  const gpt6InitialVersion = scenario === 'gpt6-legacy-model' ? 'GPT-5.5' : 'Latest';
+  const gpt6InitialPower = POWER_LEVELS.indexOf(initialIntelligence);
+  const gpt6Popper =
+    '<div data-radix-popper-content-wrapper id="intelligence-popper" hidden>' +
+      '<div role="menu" tabindex="-1">' +
+        '<div role="group" data-testid="composer-intelligence-picker-content">' +
+          '<div role="group"><div role="menuitem" aria-label="Select model" aria-expanded="false" tabindex="0" id="model-select">' +
+            '<span>6</span><span id="model-select-power">' + initialIntelligence + '</span></div></div>' +
+          '<div data-testid="composer-model-picker-slider-simple-view">' +
+            '<div role="menuitem" aria-label="Power" tabindex="0">' +
+              '<div role="slider" id="power-slider" tabindex="0" style="display:inline-block;width:160px;height:14px;background:#ccc" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' + gpt6InitialPower + '"></div>' +
+              '<span id="power-status">' + initialIntelligence + ', ' + (gpt6InitialPower + 1) + ' of 5.</span>' +
+              '<span>Use Left and Right arrow keys to adjust power.</span>' +
+            '</div></div>' +
+          '<div data-testid="composer-model-picker-slider-advanced-view"><div role="group">' +
+            gpt6Versions.map((version) => (
+              '<div role="menuitemradio" tabindex="0" data-version="' + version + '" aria-checked="' +
+                String(version === gpt6InitialVersion) + '"><div>' + version + '</div></div>'
+            )).join('') +
+          '</div></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  const legacyPopper =
     '<div data-radix-popper-content-wrapper id="intelligence-popper" hidden>' +
       '<div data-testid="composer-intelligence-picker-content" aria-label="Intelligence">' +
         '<div role="menu" aria-label="Intelligence">' + intelligenceRadios +
@@ -118,6 +139,17 @@ const PAGE = String.raw`<!doctype html>
         '</div>' +
       '</div>' +
     '</div>';
+  app.innerHTML =
+    '<section id="conversation"></section>' +
+    '<form id="composer-form" onsubmit="return false">' +
+    '<button type="button" id="composer-plus" aria-haspopup="menu" aria-label="Add files and more"><svg aria-hidden="true"></svg></button>' +
+    '<button type="button" class="__composer-pill" id="intelligence-pill" aria-haspopup="menu" ' +
+      'aria-expanded="false" data-open-count="0">' + (gpt6 ? gpt6PillMarkup(initialIntelligence) : intelligenceMarkup(initialIntelligence)) +
+      '<svg aria-hidden="true"></svg></button>' +
+    '<div id="chips"></div><input type="file" multiple aria-label="Attach files">' +
+    '<div id="prompt-textarea" contenteditable="true" role="textbox"></div>' +
+    '<button type="button" data-testid="send-button" aria-label="Send prompt">Send</button></form>' +
+    (gpt6 ? gpt6Popper : legacyPopper);
   const intelligencePill = document.getElementById('intelligence-pill');
   const intelligencePopper = document.getElementById('intelligence-popper');
   const intelligenceItems = Array.from(app.querySelectorAll('[role="menu"] [role="menuitemradio"]'));
@@ -126,15 +158,53 @@ const PAGE = String.raw`<!doctype html>
     intelligencePill.setAttribute('aria-expanded', 'true');
     setTimeout(() => { intelligencePopper.hidden = false; }, 100);
   });
-  for (const item of intelligenceItems) {
-    item.addEventListener('click', () => {
-      for (const candidate of intelligenceItems) candidate.setAttribute('aria-checked', 'false');
-      if (scenario !== 'model-check-fails') item.setAttribute('aria-checked', 'true');
-      const label = item.dataset.intelligence;
-      intelligencePill.innerHTML = intelligenceMarkup(label) + '<svg aria-hidden="true"></svg>';
-      intelligencePill.setAttribute('aria-expanded', 'false');
-      intelligencePopper.hidden = true;
+  if (gpt6) {
+    const slider = document.getElementById('power-slider');
+    const status = document.getElementById('power-status');
+    const headerPower = document.getElementById('model-select-power');
+    const setPower = (index) => {
+      const bounded = Math.max(0, Math.min(4, index));
+      slider.setAttribute('aria-valuenow', String(bounded));
+      status.textContent = POWER_LEVELS[bounded] + ', ' + (bounded + 1) + ' of 5.';
+      headerPower.textContent = POWER_LEVELS[bounded];
+      intelligencePill.innerHTML = gpt6PillMarkup(POWER_LEVELS[bounded]) + '<svg aria-hidden="true"></svg>';
+    };
+    slider.addEventListener('keydown', (event) => {
+      if (scenario === 'gpt6-slider-stuck') return;
+      const now = Number(slider.getAttribute('aria-valuenow'));
+      if (event.key === 'End') setPower(4);
+      else if (event.key === 'Home') setPower(0);
+      else if (event.key === 'ArrowRight') setPower(now + 1);
+      else if (event.key === 'ArrowLeft') setPower(now - 1);
+      else return;
+      event.preventDefault();
     });
+    const modelSelect = document.getElementById('model-select');
+    modelSelect.addEventListener('click', () => {
+      modelSelect.setAttribute('aria-expanded', modelSelect.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+    });
+    for (const item of intelligenceItems) {
+      item.addEventListener('click', () => {
+        for (const candidate of intelligenceItems) candidate.setAttribute('aria-checked', 'false');
+        item.setAttribute('aria-checked', 'true');
+      });
+    }
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || intelligencePopper.hidden) return;
+      intelligencePopper.hidden = true;
+      intelligencePill.setAttribute('aria-expanded', 'false');
+    });
+  } else {
+    for (const item of intelligenceItems) {
+      item.addEventListener('click', () => {
+        for (const candidate of intelligenceItems) candidate.setAttribute('aria-checked', 'false');
+        if (scenario !== 'model-check-fails') item.setAttribute('aria-checked', 'true');
+        const label = item.dataset.intelligence;
+        intelligencePill.innerHTML = intelligenceMarkup(label) + '<svg aria-hidden="true"></svg>';
+        intelligencePill.setAttribute('aria-expanded', 'false');
+        intelligencePopper.hidden = true;
+      });
+    }
   }
   const input = app.querySelector('input[type=file]');
   const chips = document.getElementById('chips');

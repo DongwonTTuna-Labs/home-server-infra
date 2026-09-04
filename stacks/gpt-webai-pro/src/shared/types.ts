@@ -54,15 +54,29 @@ export interface SlotConfig {
   account: string;
   port: number;
   unmanaged?: boolean;
+  // 계정별 주간(7일 이동창) 전송 한도. 없으면 SlotsConfig.weeklyLimit, 그것도 없으면 무제한.
+  weeklyLimit?: number;
 }
 export interface SlotsConfig {
   image: string;
   maxConcurrent: number;
   slots: SlotConfig[];
+  // 모든 슬롯의 기본 주간 전송 한도 (ChatGPT Pro 계정 주간 200회 등).
+  weeklyLimit?: number;
+}
+export interface UsageEventRow {
+  request_id: string;
+  slot_id: string;
+  model_label: string | null;
+  sent_at: number;
 }
 export interface LabelConfig {
+  // 허용되는 생각 강도(power) 라벨. 알약(pill)이 이 중 하나면 already_exact.
   target: string[];
+  // 알약 후보 식별에 쓰는 power 라벨 전집합 (버전 토큰 "6", "5.5"는 정규화에서 제거된다).
   intelligence: string[];
+  // 새 UI(2026-09 GPT-6)의 "Select model" 라디오에서 선택할 모델 버전. 없으면 검사하지 않는다.
+  modelVersion?: string;
 }
 export interface RpcFile {
   name: string;
@@ -112,6 +126,8 @@ export interface SendProgressNotification {
 export interface SendResult {
   conversationUrl: string;
   userTurnId: string;
+  // 전송 직전 보장된 모델 라벨(예: "6 Pro"). 주간 사용량 기록의 증거로 supervisor가 저장한다.
+  modelLabel?: string;
   // assistant 턴은 전송 착지 확정에 필수가 아니다 — user 턴 + 비루트 대화 URL이면 착지로 본다.
   // (reconcile의 turn_anchor와 동일 기준; 생성 완료는 poll이 별도로 판정한다.)
   assistantTurnId?: string;
