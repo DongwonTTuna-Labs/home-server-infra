@@ -342,8 +342,8 @@ import sys
 import tomllib
 
 EXPECTED_IMAGE = (
-    "ghcr.io/soju06/codex-lb:1.23.0@"
-    "sha256:3b369ac16e03d31b940be35dd8e61583f9cbd74bfca5e92e4bd03bfec62e5b13"
+    "ghcr.io/soju06/codex-lb:1.25.0-beta.1@"
+    "sha256:80bb39434f53a3743a982ca810c59fceb9a2e2dcfb0e76b4d2feebf3ecf1c507"
 )
 EXPECTED_PROVIDER = {
     "name": "openai",
@@ -378,6 +378,10 @@ require(
     str(environment.get("CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT")) == "0",
     "single-user codex-lb must disable the local per-account stream cap",
 )
+require(
+    str(environment.get("CODEX_LB_TELEMETRY_ENABLED")) == "false",
+    "codex-lb must keep upstream anonymous telemetry opted out",
+)
 ports = service.get("ports", [])
 require(len(ports) == 1, "codex-lb must expose exactly one port mapping")
 port = ports[0]
@@ -392,6 +396,10 @@ postgres = compose["services"]["postgres"]
 require(
     postgres.get("labels", {}).get("com.centurylinklabs.watchtower.enable") == "false",
     "codex-lb Postgres must remain excluded from Watchtower",
+)
+require(
+    str(postgres.get("shm_size")) == "1073741824",
+    "codex-lb Postgres must keep the 1gb /dev/shm ceiling",
 )
 
 with open(sys.argv[2], "rb") as handle:
