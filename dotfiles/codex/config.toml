@@ -1,6 +1,6 @@
-model = "gpt-5.5"
+model = "gpt-6-astra"
 model_provider = "codex-lb"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "max"
 plan_mode_reasoning_effort = "xhigh"
 approvals_reviewer = "user"
 
@@ -20,9 +20,6 @@ trust_level = "trusted"
 
 [plugins."github@openai-curated"]
 enabled = true
-
-[tui.model_availability_nux]
-"gpt-5.5" = 4
 
 [features]
 terminal_resize_reflow = true
