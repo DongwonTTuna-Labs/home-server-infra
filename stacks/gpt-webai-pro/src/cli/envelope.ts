@@ -33,7 +33,7 @@ export function runningEnvelope(sessionId: string, message: string | null = null
 }
 export function recoveringEnvelope(
   sessionId: string,
-  errorKind: "provider_limit" | "pool_busy",
+  errorKind: "provider_limit" | "pool_busy" | "weekly_limit",
   message: string,
 ): Envelope {
   const command = resumeCommand(sessionId);

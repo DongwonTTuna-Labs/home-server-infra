@@ -11,6 +11,9 @@ import {
   markSlotNeedsLogin,
   markSlotProviderLimit,
   PROVIDER_COOLDOWN_MS,
+  WEEK_MS,
+  resolveWeeklyLimits,
+  weeklyUsageFor,
 } from "../../src/supervisor/slots.js";
 import type { RequestStatus, SlotConfig } from "../../src/shared/types.js";
 const slots: SlotConfig[] = [
@@ -132,6 +135,44 @@ test("provider cooldown and needs-login states remain ineligible until recovered
   markSlotIdle(db, "slot-a");
   assert.equal(claimSlotForRequest(db, config, 3, blocked, 9_999_999).slot?.id, "slot-a");
   db.close();
+});
+test("weekly limits exclude exhausted slots on a 7-day sliding window and resolve per slot", async () => {
+  const db = await GwpDatabase.open(":memory:");
+  db.syncSlots(slots);
+  const limits = resolveWeeklyLimits({ weeklyLimit: 2, slots: [slots[0]!, { ...slots[1]!, weeklyLimit: 5 }, slots[2]!] });
+  assert.deepEqual([...limits.entries()], [["slot-a", 2], ["slot-b", 5], ["slot-c", 2]]);
+  assert.deepEqual([...resolveWeeklyLimits({ slots }).values()], [null, null, null]);
+  const now = 10 * WEEK_MS;
+  // slot-a: 2건 확정(한도 도달), slot-c: 1건은 창 밖(7일 전 이상), 1건은 창 안.
+  for (const [index, slotId, sentAt] of [[1, "slot-a", now - 1_000], [2, "slot-a", now - 2_000], [3, "slot-c", now - WEEK_MS - 1], [4, "slot-c", now - 5]] as const) {
+    const id = addRequest(db, index, slotId, "complete");
+    assert.equal(db.recordUsage(id, slotId, "6 Pro", sentAt), true);
+  }
+  const usageA = weeklyUsageFor(db, "slot-a", 2, now);
+  assert.deepEqual(usageA, { used: 2, limit: 2, resetAt: now - 2_000 + WEEK_MS, exhausted: true });
+  assert.deepEqual(weeklyUsageFor(db, "slot-c", 2, now), { used: 1, limit: 2, resetAt: null, exhausted: false });
+  assert.deepEqual(weeklyUsageFor(db, "slot-b", null, now), { used: 0, limit: null, resetAt: null, exhausted: false });
+  // 소진된 slot-a는 건너뛰고, 가장 오래 놀았던 슬롯 규칙에 따라 slot-b를 고른다.
+  const target = addRequest(db, 10);
+  assert.equal(claimSlotForRequest(db, slots, 3, target, now, new Set(), limits).slot?.id, "slot-b");
+  // 전부 소진이면 null.
+  const tight = resolveWeeklyLimits({ weeklyLimit: 1, slots });
+  db.recordUsage(addRequest(db, 11, "slot-b", "complete"), "slot-b", null, now - 10);
+  db.recordUsage(addRequest(db, 12, "slot-c", "complete"), "slot-c", null, now - 10);
+  assert.equal(claimSlotForRequest(db, slots, 3, addRequest(db, 13), now, new Set(), tight).slot, null);
+  // 창이 지나면 다시 후보가 된다.
+  assert.equal(claimSlotForRequest(db, slots, 3, addRequest(db, 14), now + WEEK_MS + 1, new Set(), tight).slot?.id, "slot-a");
+});
+test("slot config validates weeklyLimit as a positive integer", () => {
+  assert.throws(
+    () => validateConfig({ image: "test", maxConcurrent: 3, weeklyLimit: 0, slots }),
+    /invalid weeklyLimit/,
+  );
+  assert.throws(
+    () => validateConfig({ image: "test", maxConcurrent: 3, slots: [{ ...slots[0]!, weeklyLimit: 1.5 }] }),
+    /invalid weeklyLimit for slot slot-a/,
+  );
+  assert.equal(validateConfig({ image: "test", maxConcurrent: 3, weeklyLimit: 200, slots }).weeklyLimit, 200);
 });
 test("two database connections serialize claims without exceeding capacity", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-slot-race-"));

@@ -126,6 +126,25 @@ state root: `${GPT_WEBAI_PRO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/gp
 
 ## 4. 데이터 모델 (SQLite)
 
+### 4.0 주간 사용량 원장 `usage_events` (user_version 3, 2026-09-05)
+
+```sql
+CREATE TABLE usage_events (
+  request_id  TEXT PRIMARY KEY REFERENCES requests(id),
+  slot_id     TEXT NOT NULL REFERENCES slots(id),
+  model_label TEXT,            -- send 결과의 modelLabel (예: '6 Pro'), reconcile 확정은 NULL
+  sent_at     INTEGER NOT NULL
+);
+CREATE INDEX usage_events_slot_sent ON usage_events (slot_id, sent_at);
+```
+
+- 기록 시점: `confirmSendAttempt`(confirmed)와 `applyReconcileResult`(reconciled) — 전송이 확정된 순간
+  요청당 1건(`INSERT OR IGNORE`). 이미 확정된 요청의 재확정·resume은 계상하지 않는다.
+- 집계: `weeklyUsageFor(slot)` = `sent_at >= now − 7d` 건수. 한도는 `slots.json`의 `weeklyLimit`(공통) /
+  `slot.weeklyLimit`(개별), 없으면 무제한. 한도에 닿은 슬롯은 `selectSlot`에서 제외되고, 상태로는
+  쓸 수 있는 슬롯이 전부 한도에 닿으면 envelope `recovering`/`weekly_limit`(+가장 이른 리셋 시각).
+- v2→v3 이관은 표 추가만 한다. 과거 전송은 증거가 없으므로 소급 계상하지 않는다.
+
 better-sqlite3, `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;`
 동시 CLI 호출 간 DB 배타는 SQLite 트랜잭션(`BEGIN IMMEDIATE`)으로 해결한다.
 락 파일은 모두 kernel flock 생존 증명이다. 요청별 `send.lock`은 §5.2의 전송 임계구역,
@@ -441,7 +460,30 @@ supervisor `RpcClient.call`은 옵션 `{timeoutMs, inactivityMs, onProgress}`로
 `reconcile_cache_hit`). 2026-07-29 이전엔 daemon이 무로그라 스톨 지점을 밖에서 알 수
 없었다.
 
-### 6.3 Pro 보장 (`actions/model.ts`) — 2026-07-27 실측 DOM 기준
+### 6.3a GPT-6 UI의 Pro 보장 (`actions/model.ts`) — 2026-09-05 실측 DOM 기준
+
+2026-09 UI는 **모델 버전 + 생각 강도(power)** 2축이다 (라이브 실측, slot-b):
+- 알약(`form button[aria-haspopup]`, `__composer-pill`) 텍스트 `"6\nPro"` — 첫 줄 버전, 둘째 줄 power.
+  메뉴가 열려 있는 동안 알약 텍스트는 `"Thinking effort"`로 바뀐다.
+- 피커 본문 `[data-testid="composer-intelligence-picker-content"]` 안:
+  - `[role=menuitem][aria-label="Select model"]` (텍스트 "6 Pro", `aria-expanded`) → 펼치면/곁에
+    `[data-testid="composer-model-picker-slider-advanced-view"]`의 `menuitemradio` `Latest`(=6, checked) /
+    `GPT-5.6 Sol` / `GPT-5.5`.
+  - `[data-testid="composer-model-picker-slider-simple-view"]`의 `[role=menuitem][aria-label=Power]` 안
+    `[role=slider]` (`aria-valuemin=0`, `aria-valuemax=4`; 0=Instant "1 of 5" … 4=Pro "5 of 5") + 상태 문구
+    `"Pro, 5 of 5. Use Left and Right arrow keys to adjust power."`. 키보드 `Home`/`End`/`←`/`→`로 조정되고
+    값은 즉시 적용된다(메뉴를 닫아도 유지).
+- 절차: 알약 라벨을 (버전, power)로 파싱. power가 `target`이고 버전 토큰이 없으면(구 UI) 즉시 done.
+  새 UI(버전 토큰 있음)는 power가 이미 `Pro`여도 메뉴를 열어 `modelVersion`(Latest) 라디오를 확인한다.
+  power가 목표가 아니면 슬라이더에 `End`(안 먹으면 `→` 반복) → 상태 문구의 첫 토큰이 `Pro`인지 확인 →
+  `Latest`가 checked가 아니면 클릭 → `Escape`로 닫기(최대 2회, 5s) → 알약 재확인 `"6\nPro"`.
+- 라벨 정규화는 **모든 줄의 버전 토큰(`^\d+(\.\d+)*$`)을 제거**한 뒤 소문자 비교 — `"6\nPro"`→`pro`,
+  `"Instant\n5.5"`→`instant`. 알약 후보가 라벨 집합에 없으면(미지의 중간 power 이름) form 안의
+  **텍스트가 있는 유일한 `aria-haspopup` 버튼**을 알약으로 본다(첨부 `+` 버튼은 텍스트가 없다).
+- 반환값 = 표시 라벨(`"6 Pro"`). send 결과 `modelLabel`로 supervisor에 전달되어 주간 사용량 원장의 증거가 된다.
+- `labels.json`: `{"target":["Pro"],"intelligence":[…],"modelVersion":"Latest"}`. **다른 power/모델로의 fallback 금지.**
+
+### 6.3 Pro 보장 (구 UI, `actions/model.ts`) — 2026-07-27 실측 DOM 기준
 
 현 ChatGPT UI는 model/effort 2단계가 아니라 **단일 "Intelligence" 라디오**다
 (라이브 실측: Instant 5.5 / Medium / High / Extra High / Pro + 기타 menuitem).

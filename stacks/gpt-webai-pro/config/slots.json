@@ -1,6 +1,7 @@
 {
   "image": "home-server/gpt-webai-pro-slot:latest",
   "maxConcurrent": 3,
+  "weeklyLimit": 200,
   "slots": [
     { "id": "slot-a", "account": "a", "port": 19301 },
     { "id": "slot-b", "account": "b", "port": 19302 },

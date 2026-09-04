@@ -9,6 +9,7 @@ import type {
   SendAttemptState,
   SlotConfig,
   SlotRow,
+  UsageEventRow,
 } from "../shared/types.js";
 const SLOTS_DDL = `
 CREATE TABLE slots (
@@ -18,6 +19,16 @@ CREATE TABLE slots (
                  ('idle','needs_login','provider_limit')),
   cooldown_until INTEGER, last_used_at INTEGER
 );`;
+// 주간 사용량 원장: 확정(confirmed/reconciled)된 전송 1건 = 1행. request_id가 기본키라
+// 재확정·resume에서 중복 계상되지 않는다. 7일 이동창 집계는 (slot_id, sent_at) 색인으로 한다.
+const USAGE_DDL = `
+CREATE TABLE usage_events (
+  request_id  TEXT PRIMARY KEY REFERENCES requests(id),
+  slot_id     TEXT NOT NULL REFERENCES slots(id),
+  model_label TEXT,
+  sent_at     INTEGER NOT NULL
+);
+CREATE INDEX usage_events_slot_sent ON usage_events (slot_id, sent_at);`;
 const DDL = `
 CREATE TABLE requests (
   id            TEXT PRIMARY KEY,
@@ -48,6 +59,7 @@ CREATE TABLE artifacts (
   PRIMARY KEY (request_id, filename)
 );
 ${SLOTS_DDL}
+${USAGE_DDL}
 `;
 type RequestPatch = Partial<Pick<
   RequestRow,
@@ -70,24 +82,28 @@ export class GwpDatabase {
     connection.pragma("busy_timeout = 5000");
     connection.pragma("foreign_keys = ON");
     const current = Number(connection.pragma("user_version", { simple: true }));
-    if (current > 2) {
+    if (current > 3) {
       connection.close();
       throw new Error(`unsupported database user_version ${current}`);
     }
-    if (current < 2) {
+    if (current < 3) {
       connection.exec("BEGIN IMMEDIATE");
       try {
         if (current === 0) connection.exec(DDL);
-        else connection.exec(`
-          ALTER TABLE slots RENAME TO slots_v1;
-          ${SLOTS_DDL}
-          INSERT INTO slots (id, account, state, cooldown_until, last_used_at)
-          SELECT id, account, CASE state WHEN 'busy' THEN 'idle' ELSE state END,
-                 cooldown_until, last_used_at
-          FROM slots_v1;
-          DROP TABLE slots_v1;
-        `);
-        connection.pragma("user_version = 2");
+        else {
+          if (current === 1) connection.exec(`
+            ALTER TABLE slots RENAME TO slots_v1;
+            ${SLOTS_DDL}
+            INSERT INTO slots (id, account, state, cooldown_until, last_used_at)
+            SELECT id, account, CASE state WHEN 'busy' THEN 'idle' ELSE state END,
+                   cooldown_until, last_used_at
+            FROM slots_v1;
+            DROP TABLE slots_v1;
+          `);
+          // v2 → v3: 주간 사용량 원장 추가 (기존 행은 계상하지 않는다 — 과거 전송은 증거가 없다).
+          connection.exec(USAGE_DDL);
+        }
+        connection.pragma("user_version = 3");
         connection.exec("COMMIT");
       } catch (error) {
         connection.exec("ROLLBACK");
@@ -295,6 +311,33 @@ export class GwpDatabase {
   }
   listSlots(): SlotRow[] {
     return this.connection.prepare("SELECT * FROM slots ORDER BY id").all() as SlotRow[];
+  }
+  /** 확정된 전송을 주간 사용량 원장에 1건 기록한다. 같은 요청은 한 번만 계상된다. */
+  recordUsage(requestId: string, slotId: string, modelLabel: string | null, now = Date.now()): boolean {
+    const result = this.connection.prepare(`
+      INSERT OR IGNORE INTO usage_events (request_id, slot_id, model_label, sent_at)
+      VALUES (?, ?, ?, ?)
+    `).run(requestId, slotId, modelLabel, now);
+    return result.changes === 1;
+  }
+  /** since(포함) 이후 슬롯의 확정 전송 수. */
+  countUsageSince(slotId: string, since: number): number {
+    const row = this.connection.prepare(`
+      SELECT COUNT(*) AS n FROM usage_events WHERE slot_id = ? AND sent_at >= ?
+    `).get(slotId, since) as { n: number };
+    return row.n;
+  }
+  /** since(포함) 이후 가장 오래된 전송 시각 — 이동창에서 다음으로 빠져나갈 시각의 근거. */
+  oldestUsageSince(slotId: string, since: number): number | null {
+    const row = this.connection.prepare(`
+      SELECT MIN(sent_at) AS t FROM usage_events WHERE slot_id = ? AND sent_at >= ?
+    `).get(slotId, since) as { t: number | null };
+    return row.t;
+  }
+  listUsage(slotId: string, since = 0): UsageEventRow[] {
+    return this.connection.prepare(`
+      SELECT * FROM usage_events WHERE slot_id = ? AND sent_at >= ? ORDER BY sent_at
+    `).all(slotId, since) as UsageEventRow[];
   }
   listNonterminalRequests(): RequestRow[] {
     return this.connection.prepare(`
