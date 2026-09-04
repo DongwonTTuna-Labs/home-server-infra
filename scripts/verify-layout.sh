@@ -60,6 +60,16 @@ required=(
   dotfiles/codex/runbooks/execution-policy.md
   dotfiles/codex/runbooks/gpt-webai-pro.md
   dotfiles/codex/runbooks/gptpro-review.md
+  dotfiles/codex/skills/codex-goal-contract/SKILL.md
+  dotfiles/codex/skills/gh-pr-review-loop/SKILL.md
+  dotfiles/codex/skills/home-server-ops-rollout/SKILL.md
+  dotfiles/codex/prompts/controlled-boldness.md
+  dotfiles/codex/prompts/gpt-delegation-prelude.md
+  dotfiles/codex/agents/explorer.toml
+  dotfiles/codex/agents/plan.toml
+  dotfiles/claude/skills/adversarial-gate-loop/SKILL.md
+  dotfiles/claude/skills/fable-sol-loop/SKILL.md
+  dotfiles/claude/skills/fable-sol-loop/appserver-sol.py
   dotfiles/claude/CLAUDE.md
   stacks/gpt-webai-pro/AGENTS.md
 )

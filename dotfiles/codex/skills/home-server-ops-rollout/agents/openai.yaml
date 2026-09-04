@@ -1,0 +1,4 @@
+interface:
+  display_name: "Home Server Ops Rollout"
+  short_description: "Plan and validate local MCP, systemd, and mirror automation work"
+  default_prompt: "Use $home-server-ops-rollout to ground local ops work in this Ubuntu host, then implement and validate MCP, systemd, service, or mirror changes."

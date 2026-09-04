@@ -5,9 +5,12 @@ laptop as `ssh home`. The rules below hold on both.
 
 Codex reads `~/.codex/AGENTS.md`; Claude Code reads `~/.claude/CLAUDE.md`. They
 are the same file, generated from one canon, so a rule stated here applies
-whichever tool is running. Skills and prompts stay per tool —
-`~/.codex/skills/`, `~/.codex/prompts/`, `~/.codex/agents/` for Codex,
-`~/.claude/skills/` for Claude — because each tool loads its own.
+whichever tool is running. Skills, prompts, and agent definitions are
+loaded per tool — `~/.codex/skills/`, `~/.codex/prompts/`, `~/.codex/agents/`
+for Codex, `~/.claude/skills/` for Claude. The hand-authored ones shared by
+both machines are tracked in the same repository as this canon and installed by
+the same script; vendored skills and the symlinks into `~/.agents/skills/` are
+owned by their installers and are not.
 
 Reference documents are shared. They are ordinary files, so either tool can
 read them; only Claude auto-loads `~/.claude/rules/`, and Codex must open them

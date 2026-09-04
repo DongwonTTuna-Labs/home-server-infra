@@ -32,12 +32,16 @@ codex/
     execution-policy.md PR state, planning, anomaly triage, completion
     gpt-webai-pro.md    ChatGPT Pro slot daemon, client side
     gptpro-review.md    the gptpro-review stack
+  skills/               hand-authored Codex skills -> ~/.codex/skills/<name>/
+  prompts/              slash prompts -> ~/.codex/prompts/   (whole directory)
+  agents/               subagent definitions -> ~/.codex/agents/  (whole directory)
   config.toml           home-server Codex config baseline
   rules/default.rules   Codex command allowlist
 
 claude/
   CLAUDE.md             GENERATED -> ~/.claude/CLAUDE.md  (identical to AGENTS.md)
   rules/                Claude-only references -> ~/.claude/rules/
+  skills/               hand-authored Claude skills shared by both machines
 
 bin/
   build-agent-docs.py   canon + adapter header -> the two generated files
@@ -115,11 +119,26 @@ documented ways — it reaches the relay over
 `https://relay-ai.dongwontuna.net/backend-api/codex` with
 `CODEX_LB_LOCAL_API_KEY` instead of loopback with `CODEX_LB_HOME_API_KEY`.
 
-Skill directories (`~/.codex/skills/`, `~/.claude/skills/`) are not yet
-tracked. They are still out of sync between the machines — the laptop's Codex
-skills are a superset of the home server's — and unifying them is a separate
-job. `~/.codex/prompts/` and `~/.codex/agents/` are likewise untracked, as is
-the `runbooks/gpt-webai-pro-deepresearch/` directory.
+Skills are split by who owns them. Hand-authored skills that both machines use
+are tracked here and installed as whole directories: for Codex
+`codex-goal-contract`, `gh-pr-review-loop`, `home-server-ops-rollout`; for
+Claude `adversarial-gate-loop`, `fable-sol-loop`. Everything else under a skills
+directory is deliberately left alone:
+
+- `~/.agents/skills/` and the symlinks pointing into it from `~/.claude/skills/`
+  are owned by a skill installer (`.skill-lock.json`); track them there, not here.
+- Vendored skills that ship a `LICENSE.txt` — `cloudflare-deploy`,
+  `test-case-author`, `playwright`, `gh-fix-ci` — come from a marketplace and
+  are reinstalled from it.
+- `chronicle` reads the macOS screen and only makes sense on the laptop.
+- `~/.codex/skills/.system/` is Codex's own.
+
+`~/.codex/prompts/` and `~/.codex/agents/` are tracked as whole directories: a
+file that appears there and is not in the repository is treated as a
+post-install edit and blocks the next install until it is either added to the
+repository or removed. The `runbooks/gpt-webai-pro-deepresearch/` directory and
+the laptop-only Claude skills (`chatgpt-deep-research`, `clean-arch-auditor`,
+`page-builder`, `skill-forge`, the `i18n-*` set) remain untracked.
 
 The two Korean runbooks were adopted verbatim rather than translated. The
 laptop's `gpt-webai-pro.md` was a strict superset of the home server's — seven
