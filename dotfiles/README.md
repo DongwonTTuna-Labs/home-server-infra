@@ -16,18 +16,18 @@ Now there is one canon in git, and the per-tool files are generated from it.
 ## Layout
 
 ```
-agent-rules/            the canon — tool-agnostic rules, one topic per file
+agent-rules/            the canon — one topic per file, no per-tool text
   00-core.md            communication, invariants, autonomy, evidence, scope, reporting
-  10-engineering.md     anomalies, tests, implementation, pushing
+  10-engineering.md     anomalies, tests, code review, implementation, pushing
   20-delegation.md      subagents, GPT/ChatGPT delegation
   30-repo-artifacts.md  no home-grown integrity layers
   40-changing-these-rules.md  where to write a rule change, and where not to
+  50-environment.md     the machines, where files live, runbook index, macOS shell
   adapters/
-    codex-header.md     Codex-only preamble (runbook index, precedence)
-    claude-header.md    Claude-only preamble (rules dir, memory policy, macOS shell)
+    preamble.md         the identity block both files open with
 
 codex/
-  AGENTS.md             GENERATED -> ~/.codex/AGENTS.md
+  AGENTS.md             GENERATED -> ~/.codex/AGENTS.md  (identical to CLAUDE.md)
   runbooks/             conditional runbooks -> ~/.codex/runbooks/
     execution-policy.md PR state, planning, anomaly triage, completion
     gpt-webai-pro.md    ChatGPT Pro slot daemon, client side
@@ -36,7 +36,7 @@ codex/
   rules/default.rules   Codex command allowlist
 
 claude/
-  CLAUDE.md             GENERATED -> ~/.claude/CLAUDE.md
+  CLAUDE.md             GENERATED -> ~/.claude/CLAUDE.md  (identical to AGENTS.md)
   rules/                Claude-only references -> ~/.claude/rules/
 
 bin/
@@ -45,13 +45,21 @@ bin/
 ```
 
 Neither Codex nor Claude Code can include another file at load time, so the
-shared rules have to be physically present in both `AGENTS.md` and `CLAUDE.md`.
-Generating them is what keeps them identical.
+rules have to be physically present in both `AGENTS.md` and `CLAUDE.md`.
+
+The two files are rendered from the same canon and written **byte-identical**,
+and `verify-layout.sh` fails if they ever diverge. An earlier draft gave each
+tool its own header and footer; almost nothing in them was actually
+tool-specific — the macOS shell traps hit Codex exactly as hard, and Claude can
+read the runbooks under `~/.codex/runbooks/` perfectly well. What was left did
+not justify maintaining two documents, so there is now one. Anything genuinely
+specific to one tool goes in that tool's own directory: `~/.claude/rules/` for
+Claude, a runbook for Codex.
 
 ## Three layers
 
-1. **Always loaded** — `AGENTS.md` / `CLAUDE.md`. Decisions every session
-   needs. No project-specific contracts.
+1. **Always loaded** — `AGENTS.md` / `CLAUDE.md`, one document under two
+   names. Decisions every session needs. No project-specific contracts.
 2. **Conditional runbooks** — `~/.codex/runbooks/`. Loaded when the decision in
    front of the agent needs them.
 3. **Project-local** — an `AGENTS.md` in the repository it governs, such as
