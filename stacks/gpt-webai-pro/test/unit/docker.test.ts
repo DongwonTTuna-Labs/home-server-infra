@@ -1,9 +1,39 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CONTAINER_OUTBOX, DockerManager, mapContainerOutboxPath, rotateDaemonToken } from "../../src/supervisor/docker.js";
+import { CONTAINER_OUTBOX, DockerManager, inspectOwnedContainer, mapContainerOutboxPath, rotateDaemonToken } from "../../src/supervisor/docker.js";
+test("container ownership accepts only the same canonical profile, inbox, and outbox", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-container-owner-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const manager = new DockerManager(path.join(directory, "state"), "test-image");
+  const paths = manager.paths("slot-a");
+  await Promise.all([paths.profile, paths.inbox, paths.outbox].map((source) => mkdir(source, { recursive: true })));
+  const alias = path.join(directory, "profile-alias");
+  await symlink(paths.profile, alias, "dir");
+  const inspection = {
+    Id: "owned-container",
+    State: { Running: true, StartedAt: "2026-09-05T00:00:00Z" },
+    Mounts: [
+      { Type: "bind", Source: alias, Destination: "/profile" },
+      { Type: "bind", Source: paths.inbox, Destination: "/inbox" },
+      { Type: "bind", Source: paths.outbox, Destination: "/outbox" },
+    ],
+  };
+  assert.deepEqual(await inspectOwnedContainer(inspection, paths), {
+    id: "owned-container", exists: true, running: true, startedAt: 1788566400000,
+  });
+  const foreign = path.join(directory, "foreign");
+  await mkdir(foreign);
+  for (const destination of ["/profile", "/inbox", "/outbox"]) {
+    const mismatched = inspection.Mounts.map((mount) => mount.Destination === destination ? { ...mount, Source: foreign } : mount);
+    await assert.rejects(inspectOwnedContainer({ ...inspection, Mounts: mismatched }, paths), /container ownership mismatch/);
+  }
+  await assert.rejects(inspectOwnedContainer({ ...inspection, Mounts: [] }, paths), /container ownership mismatch/);
+  await assert.rejects(inspectOwnedContainer({ ...inspection, Mounts: [...inspection.Mounts, inspection.Mounts[0]!] }, paths), /container ownership mismatch/);
+  await assert.rejects(inspectOwnedContainer({ ...inspection, Id: undefined }, paths), /ownership cannot be established/);
+});
 test("slot container create args publish only the authenticated daemon TCP port", () => {
   const manager = new DockerManager("/state", "test-image", "http://fake-chatgpt.invalid");
   const token = "a".repeat(32);
