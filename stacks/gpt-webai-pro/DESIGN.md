@@ -358,13 +358,27 @@ sending/armed 요청)을 만나면 — 반드시 해당 요청의 `send.lock` fl
      **앵커 없이 텍스트 매칭만으로 판정하는데 동일 프롬프트 탭이 하나라도 있으면(단일이든
      복수든) 재전송 금지** — anchor가 소실된 오매칭도 중복을 낳으므로 fail-closed. 중복보다
      uncertain이 낫다.
-   - 증명 불가(Chrome 사망·탭 소실·앵커 소실·모호) → uncertain 유지, envelope
-     needs_user_action에 상황 설명. 사람이 ChatGPT에서 직접 확인하는 것이 최후 수단.
+   - 증명 불가(Chrome 사망·탭 소실·앵커 소실·모호) → uncertain 유지. 호출 예산이 충분하면
+     같은 owner가 read-only reconcile을 기본 최대 3회 추가 시도하며 간격은 20초다.
+     각 대기 전 간격의 두 배 이상이 남아 있어야 하고, 대기 후 예산을 다시 확인한다.
+     `GWP_INLINE_RECONCILE_TRIES`는 유한한 음이 아닌 정수만 허용하며 0은 비활성,
+     잘못된 값은 기본 3회다. `GWP_INLINE_RECONCILE_BACKOFF_MS`로 간격을 설정한다.
+     성공 시 기존 confirm/reconcile 트랜잭션에서만 사용량을 한 번 기록한다. 횟수·예산
+     소진 시 needs_user_action envelope와 같은 세션의 resumeCommand를 반환한다.
+     추가 관측은 부재 증명이 아니며 재전송·원장 계상 조건을 바꾸지 않는다.
 
 ### 5.4 resume 일반 규칙
 
 `resume`은 상태 기반 멱등 재진입이다: staged→전송부터, uncertain→reconcile,
 generating→poll 재개, complete→저장된 envelope 재출력. 어떤 상태에서 몇 번 불러도 안전.
+
+`run`/`resume`은 먼저 `owner.lock`을 시도한다. 다른 owner가 살아 있으면 DB·daemon·runtime을
+바꾸지 않고 결과를 기다린다. 기본 확인 간격은 `GWP_OWNER_ATTACH_POLL_MS=2000`이며 마지막
+대기는 남은 예산 이내로 제한한다. 완료 관측 시 저장된 envelope를 반환하고, lock이 풀리면
+남은 예산으로 처리를 이어받는다. 대기 예산 소진 뒤에는 lock을 다시 시도하지 않고
+`running`을 반환한다. 최초 timeout=0 호출의 즉시 lock 획득 시도는 한 번 허용한다.
+대기 예산과 이후 처리 예산은 하나의 절대 deadline을 공유하며, lock을 얻지 않은 호출은
+runtime cleanup을 하지 않는다. `release`와 내부 `send.lock`의 non-block 규칙은 유지한다.
 
 **reap — 방치 요청 자동 전진 (2026-07-30, 2026-08-15 운영 수정)**: 비종결 상태는
 supervisor 프로세스가 돌 때만 전진한다 — 소유 세션이 running envelope 후 resume을

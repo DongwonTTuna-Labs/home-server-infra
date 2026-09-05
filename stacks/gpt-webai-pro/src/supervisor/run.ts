@@ -40,6 +40,28 @@ function envMs(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
+export async function waitForOwnerLock<Lock>(options: {
+  tryLock: () => Promise<Lock | null>;
+  isTerminal: () => boolean;
+  deadline: number;
+  pollMs: number;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+}): Promise<{ kind: "acquired"; lock: Lock } | { kind: "terminal" } | { kind: "timeout" }> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  let firstAttempt = true;
+  while (firstAttempt || now() < options.deadline) {
+    firstAttempt = false;
+    const lock = await options.tryLock();
+    if (lock) return { kind: "acquired", lock };
+    if (options.isTerminal()) return { kind: "terminal" };
+    const remaining = options.deadline - now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(options.pollMs, remaining));
+  }
+  return { kind: options.isTerminal() ? "terminal" : "timeout" };
+}
 interface ValidatedFile {
   source: string;
   name: string;
@@ -427,10 +449,18 @@ export class Supervisor {
     }
     const initial = this.requireRequest(id);
     if (TERMINAL_STATUSES.has(initial.status)) return this.envelopeFor(initial);
-    const ownerLock = await tryAcquireFileLock(this.ownerLockPath(id));
-    if (!ownerLock) return runningEnvelope(id, SEND_IN_PROGRESS_MESSAGE);
+    const deadline = Date.now() + Math.floor(timeoutSeconds * 1_000);
+    const attachment = await waitForOwnerLock({
+      tryLock: () => tryAcquireFileLock(this.ownerLockPath(id)),
+      isTerminal: () => TERMINAL_STATUSES.has(this.requireRequest(id).status),
+      deadline,
+      pollMs: envMs("GWP_OWNER_ATTACH_POLL_MS", 2_000),
+    });
+    if (attachment.kind === "terminal") return this.envelopeFor(this.requireRequest(id));
+    if (attachment.kind === "timeout") return runningEnvelope(id, SEND_IN_PROGRESS_MESSAGE);
+    const ownerLock = attachment.lock;
     try {
-      return await this.continueOwned(id, timeoutSeconds);
+      return await this.continueOwned(id, deadline);
     } finally {
       const current = this.db.getRequest(id);
       if (current?.slot_id) {
@@ -445,9 +475,8 @@ export class Supervisor {
   }
   private async continueOwned(
     id: string,
-    timeoutSeconds: number,
+    deadline: number,
   ): Promise<Envelope> {
-    const deadline = Date.now() + Math.floor(timeoutSeconds * 1_000);
     const triedSlots = new Set<string>();
     // GWP_ONLY_SLOT: 특정 슬롯에만 고정한다 (그 슬롯 외 전부 후보에서 제외).
     // 그 슬롯이 사용 불가면 다른 슬롯으로 넘어가지 않고 pool_busy/recovering으로 대기한다.
@@ -457,12 +486,28 @@ export class Supervisor {
     }
     let sawLogin = false;
     let sawProviderLimit = false;
+    let inlineReconcileTries = 0;
+    const configuredRetries = Number(process.env.GWP_INLINE_RECONCILE_TRIES ?? "3");
+    const maxInlineRetries = Number.isSafeInteger(configuredRetries) && configuredRetries >= 0
+      ? configuredRetries
+      : 3;
+    const inlineBackoffMs = envMs("GWP_INLINE_RECONCILE_BACKOFF_MS", 20_000);
+    const retryUncertainInline = async (outcome: Envelope): Promise<boolean> => {
+      if (outcome.errorKind !== "send_uncertain"
+        || inlineReconcileTries >= maxInlineRetries
+        || deadline - Date.now() < inlineBackoffMs * 2
+        || this.requireRequest(id).status !== "uncertain") return false;
+      inlineReconcileTries += 1;
+      this.log(id, "uncertain", `inline reconcile retry ${inlineReconcileTries}/${maxInlineRetries}`);
+      await new Promise<void>((resolve) => setTimeout(resolve, inlineBackoffMs));
+      return Date.now() < deadline;
+    };
     for (;;) {
       let request = this.requireRequest(id);
       if (TERMINAL_STATUSES.has(request.status)) return this.envelopeFor(request);
       if (request.status === "sending" || request.status === "uncertain") {
         const outcome = await this.recoverSendState(request, deadline);
-        if (outcome) return outcome;
+        if (outcome && !await retryUncertainInline(outcome)) return outcome;
         continue;
       }
       if (request.status === "generating") {
@@ -547,13 +592,11 @@ export class Supervisor {
         markSlotIdle(this.db, slot.id);
         const outcome = await this.send(request, slot, client);
         client = null;
-        if (outcome) return outcome;
+        if (outcome && !await retryUncertainInline(outcome)) return outcome;
       } catch (error) {
         if (client) await client.close().catch(() => undefined);
         const current = this.requireRequest(id);
         if (current.status === "sending" || current.status === "uncertain") {
-          const outcome = await this.recoverSendState(current, deadline);
-          if (outcome) return outcome;
           continue;
         }
         if (isDirectNetworkFailure(error)) {

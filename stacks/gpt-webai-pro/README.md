@@ -34,7 +34,7 @@ ln -sfn "$PWD/bin/gpt-webai-pro" ~/.local/bin/gptpro
 `${GPT_WEBAI_PRO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/gpt-webai-pro}`입니다.
 이미지 이름, 슬롯당 동시성, 슬롯/계정/loopback 포트 매핑은 `config/slots.json`, UI의
 Intelligence 라벨과 단일 `Pro` 목표는 `config/labels.json`에서 관리합니다. 기본 구성은
-`slot-a`, `slot-b`, `slot-c` 세 계정과 포트 19301–19303입니다.
+`slot-a`, `slot-b`, `slot-c`, `slot-d` 네 계정과 포트 19301–19304입니다.
 
 컨테이너 이미지는 다음과 같이 빌드합니다.
 
@@ -49,7 +49,7 @@ docker build -f container/Dockerfile -t home-server/gpt-webai-pro-slot:latest .
 서로를 로그아웃시킬 수 있습니다.
 
 비종결 요청이 없는 슬롯을 골라 로그인 모드를 시작합니다. 기본 슬롯의 noVNC 주소는 각각
-`slot-a`=19901, `slot-b`=19902, `slot-c`=19903입니다.
+`slot-a`=19901, `slot-b`=19902, `slot-c`=19903, `slot-d`=19904입니다.
 
 ```bash
 gpt-webai-pro login --slot slot-a
@@ -62,7 +62,7 @@ readiness를 확인해 최대 15분 기다립니다. `ready`가 되면 컨테이
 noVNC URL·대기 경과는 stderr로 스트리밍하고 stdout에는 최종 JSON 한 객체만 출력합니다.
 성공은 exit 0, 타임아웃과 daemon 오류도 관찰 결과이므로 exit 0, SIGINT/SIGTERM은 정리 후
 exit 130, 잘못된 슬롯이나 active 요청이 있는 사용법 오류는 exit 2입니다. 계정마다
-`slot-b`, `slot-c`에도 같은 절차를 반복합니다.
+`slot-b`, `slot-c`, `slot-d`에도 같은 절차를 반복합니다.
 
 ```json
 {"ok":true,"slot":"slot-a","state":"ready","novncUrl":"http://127.0.0.1:19901/vnc.html"}
@@ -94,8 +94,36 @@ timeout은 실패가 아니라 `status:"running"`이며, 같은 `sessionId`의 `
 사용해야 합니다. CLI owner가 끝나면 같은 슬롯에 다른 live owner가 없는 Chromium
 runtime은 정지하지만 SQLite 요청·conversation URL·영속 profile은 보존되므로 다음
 `resume`이 그대로 이어갑니다. 전송 여부가 불확실한 요청은 즉시 다시 보내지 않고
-`resume`의 read-only reconcile을 거칩니다. 살아 있는 run/resume과 동시에 호출하면 상태를 바꾸지 않고
-`status:"running"`, message `전송 진행 중(소유 프로세스 생존)`을 반환합니다.
+`resume`의 read-only reconcile을 거칩니다. 살아 있는 run/resume 또는 reaper와 동시에
+호출하면, 다른 소유자의 DB 상태나 runtime을 바꾸지 않고 호출 시간 예산 안에서 기다립니다.
+소유자가 완료하면 저장된 envelope를 반환하고, 먼저 lock을 놓으면 남은 예산으로 이어받습니다.
+예산이 끝나도록 점유 중이면 `status:"running"`, message
+`전송 진행 중(소유 프로세스 생존)`을 반환합니다. `release`는 대기하지 않습니다.
+
+전송 후 `send_uncertain`이 발생해도 시간 예산이 충분하면 같은 호출에서 read-only
+reconcile을 추가로 시도합니다. 기본 최대 3회, 간격 20초이며 각 대기 전에 간격의 두 배
+이상이 남아 있어야 합니다. 횟수나 예산을 소진하면 `uncertain` 상태와 같은 세션의
+`resumeCommand`를 보존합니다. 반복 관측만으로 재전송을 허용하지 않으며 기존의 명시적인
+부재 증명 규칙만 attempt 2를 허용합니다. 설정은 호출 시작 시 읽습니다.
+
+| 환경 변수 | 기본값 | 의미 |
+|---|---|---|
+| `GWP_OWNER_ATTACH_POLL_MS` | 2000 | owner 결과·lock 확인 간격, 남은 대기 예산으로 제한 |
+| `GWP_INLINE_RECONCILE_TRIES` | 3 | 추가 reconcile 횟수, 0이면 비활성; 잘못된 값은 기본값 |
+| `GWP_INLINE_RECONCILE_BACKOFF_MS` | 20000 | 추가 reconcile 전 대기 간격 |
+
+### 소스 통합과 운영 배포
+
+PR 머지는 저장소의 소스 통합이며 운영 배포가 아닙니다. 호스트 CLI/supervisor는
+실행 링크가 가리키는 작업본의 `dist`를 쓰고, 브라우저 daemon은 Docker 이미지 안의
+`/app/dist`를 쓰므로 각각의 빌드가 다를 수 있습니다. `git pull`이나 호스트 빌드만으로
+daemon이 교체되지는 않습니다. 배포는 별도 승인 후 진행하고, 운영 작업본의 미커밋 변경을
+보존한 채 검증된 동일 소스로 호스트와 이미지를 준비해야 합니다. 미배포 심층 리서치
+수정과 `--deep-research` 옵션은 이 통합 범위에 포함하지 않습니다.
+
+현재 main의 주간 사용량 원장은 DB v3를 사용합니다. 이 코드를 기존 운영 state에 실행하면
+DB가 갱신될 수 있고 구 v2 호스트는 v3 DB를 열 수 없으므로, 운영 실행 전 DB·profile을
+안전하게 보존하고 롤백 절차까지 확인해야 합니다. PR 검증에는 격리된 테스트 state만 씁니다.
 
 `status`는 슬롯 state/cooldown/최근 사용 시각/`activeRequests`와 비종결 요청을 자체 JSON으로
 출력합니다. 슬롯마다 주간 사용량 `weeklyUsed`(최근 7일 확정 전송 수), `weeklyLimit`

@@ -191,6 +191,20 @@ function deferred<T>(): {
   });
   return { promise, resolve, reject };
 }
+function configureRecovery(context: TestContext, retries = "3"): void {
+  for (const [name, value] of Object.entries({
+    GWP_INLINE_RECONCILE_TRIES: retries,
+    GWP_INLINE_RECONCILE_BACKOFF_MS: "10",
+    GWP_OWNER_ATTACH_POLL_MS: "10",
+  })) {
+    const previous = process.env[name];
+    process.env[name] = value;
+    context.after(() => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    });
+  }
+}
 async function seedStagedRequest(
   supervisor: Supervisor,
   directory: string,
@@ -393,6 +407,98 @@ test("send WebSocket loss -> uncertain -> reconcile found -> complete without re
   assert.equal(resumed.status, "complete");
   assert.equal(sendCalls, 1);
   assert.equal(supervisor.db.latestAttempt(first.sessionId!)?.state, "reconciled");
+});
+test("inline recovery completes an ambiguous send in the same call and accounts for it once", async (context) => {
+  configureRecovery(context);
+  let sendCalls = 0;
+  let reconcileCalls = 0;
+  const { supervisor } = await fixture(context, [{
+    id: "slot-01",
+    account: "a",
+    handler: standardHandler((method) => {
+      if (method === "send") {
+        sendCalls += 1;
+        return DROP;
+      }
+      if (method === "reconcile") {
+        reconcileCalls += 1;
+        if (reconcileCalls === 1) return { found: false, proven: false };
+        return {
+          found: true,
+          proven: true,
+          conversationUrl: "https://chatgpt.com/c/inline-recovery",
+          userTurnId: "inline-user",
+          assistantTurnId: "inline-assistant",
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    }),
+  }]);
+  const result = await supervisor.run("recover without another command", [], 5);
+  assert.equal(result.status, "complete");
+  assert.equal(result.answer, "mock answer");
+  assert.equal(sendCalls, 1);
+  assert.equal(reconcileCalls, 2);
+  assert.equal(supervisor.db.latestAttempt(result.sessionId!)?.attempt_no, 1);
+  assert.equal(supervisor.db.latestAttempt(result.sessionId!)?.state, "reconciled");
+  assert.equal(supervisor.db.countUsageSince("slot-01", 0), 1);
+  const repeated = await supervisor.resume(result.sessionId!, 5);
+  assert.equal(repeated.status, "complete");
+  assert.equal(supervisor.db.countUsageSince("slot-01", 0), 1);
+});
+test("inline recovery is bounded and never resends an unproven attempt", async (context) => {
+  for (const [setting, expectedReconciles] of [["2", 2], ["0", 0], ["NaN", 3], ["Infinity", 3], ["0.5", 3]] as const) {
+    await context.test(`retry setting ${setting}`, async (subtest) => {
+      configureRecovery(subtest, setting);
+      let sendCalls = 0;
+      let reconcileCalls = 0;
+      const { supervisor } = await fixture(subtest, [{
+        id: "slot-01",
+        account: "a",
+        handler: standardHandler((method) => {
+          if (method === "send") {
+            sendCalls += 1;
+            return DROP;
+          }
+          if (method === "reconcile") {
+            reconcileCalls += 1;
+            return { found: false, proven: false };
+          }
+          throw new Error(`unexpected ${method}`);
+        }),
+      }]);
+      const result = await supervisor.run("do not resend without evidence", [], 5);
+      assert.equal(result.status, "needs_user_action");
+      assert.equal(result.errorKind, "send_uncertain");
+      assert.equal(supervisor.db.getRequest(result.sessionId!)?.status, "uncertain");
+      assert.equal(supervisor.db.latestAttempt(result.sessionId!)?.attempt_no, 1);
+      assert.equal(sendCalls, 1);
+      assert.equal(reconcileCalls, expectedReconciles);
+      assert.equal(supervisor.db.countUsageSince("slot-01", 0), 0);
+    });
+  }
+});
+test("inline recovery leaves an uncertain send resumable when its call has no remaining budget", async (context) => {
+  configureRecovery(context);
+  let reconcileCalls = 0;
+  const { supervisor } = await fixture(context, [{
+    id: "slot-01",
+    account: "a",
+    handler: standardHandler((method) => {
+      if (method === "send") return DROP;
+      if (method === "reconcile") {
+        reconcileCalls += 1;
+        return { found: false, proven: false };
+      }
+      throw new Error(`unexpected ${method}`);
+    }),
+  }]);
+  const result = await supervisor.run("no inline retry budget", [], 0);
+  assert.equal(result.status, "needs_user_action");
+  assert.equal(result.errorKind, "send_uncertain");
+  assert.match(result.resumeCommand ?? "", new RegExp(result.sessionId!));
+  assert.equal(reconcileCalls, 0);
+  assert.equal(supervisor.db.countUsageSince("slot-01", 0), 0);
 });
 test("post-click confirmation miss persists its pending tab and reconciles without re-click", async (t) => {
   const pendingUrl = "https://chatgpt.com/c/WEB:landed-before-confirmation";
@@ -835,6 +941,7 @@ test("poll promotes an assistant placeholder id and sends the observed id on the
   assert.equal(supervisor.db.getRequest(result.sessionId!)?.conversation_url, conversationUrl);
 });
 test("concurrent generating resumes finalize artifacts once and never revert complete", async (t) => {
+  configureRecovery(t);
   let sendCalls = 0;
   let downloadCalls = 0;
   const { supervisor, directory } = await fixture(t, [{
@@ -879,16 +986,12 @@ test("concurrent generating resumes finalize artifacts once and never revert com
     supervisor.resume(first.sessionId!, 2),
     second.resume(first.sessionId!, 2),
   ]);
-  const settled = await Promise.all(raced.map((result) => (
-    result.status === "running"
-      ? supervisor.resume(first.sessionId!, 2)
-      : Promise.resolve(result)
-  )));
-  assert.deepEqual(settled.map((result) => result.status), ["complete", "complete"]);
+  assert.deepEqual(raced.map((result) => result.status), ["complete", "complete"]);
   assert.equal(supervisor.db.getRequest(first.sessionId!)?.status, "complete");
   assert.equal(supervisor.db.listArtifacts(first.sessionId!).length, 1);
   assert.equal(sendCalls, 1);
   assert.equal(downloadCalls, 1);
+  assert.equal(supervisor.db.countUsageSince("slot-01", 0), 1);
 });
 test("request-level attachments survive pool wait and duplicate basenames are staged deterministically", async (t) => {
   let receivedFiles: unknown[] = [];
