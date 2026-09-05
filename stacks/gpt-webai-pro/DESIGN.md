@@ -1,6 +1,6 @@
 # gpt-webai-pro — 설계 (v2, from scratch)
 
-ChatGPT **Pro Extended** 웹 위임 자동화의 2세대 구현.
+ChatGPT 웹 위임 자동화의 2세대 구현. 일반 위임은 **Pro**, 이미지 배치는 **Xhigh**를 사용한다.
 1세대(`stacks/gpt-webai-slot-pool`, PR #72)의 동작하는 개념(중복 전송 방지, send-reconcile,
 시맨틱 셀렉터, 슬롯 풀)을 유지하되, 그 복잡도의 근원 두 가지 —
 **(a) stateless per-exec 프로바이더가 만든 상태 증명(해시 바인딩) 문제**,
@@ -25,7 +25,7 @@ MANIFEST 해시 봉인, 정본 바이트 동결, 결정 addendum 체인은 **의
 - UI 리디자인에 강한 시맨틱 셀렉터. 셀렉터는 한 파일에 모아 한 곳만 고치면 되게 한다.
 
 **비범위 (구현 금지)**
-- xhigh/Thinking 경로 전체. **Pro Extended 단일 튜플만 존재한다.** (`gptxhigh`는 폐기)
+- 일반 텍스트 요청의 임의 모델/Thinking 전환. 전용 `image-batch`만 Xhigh를 사용한다. (`gptxhigh` 실행기는 폐기 상태 유지)
 - 이벤트 소싱, append-only 저널, projection, snapshot, HEAD CAS.
 - content-addressed ID, 해시 파생 바인딩, canonical-JSON 바이트 비교, fencing token, dead-owner proof.
 - Rust. 다른 언어 미러 계약. R12/R13 호환 레이어.
@@ -53,7 +53,7 @@ gptpro (thin bash) ──▶ gpt-webai-pro CLI (TypeScript, 단명 프로세스)
    원천적으로 없다. v1의 rootBindingHash/PageBindingEcho에 해당하는 것은 **아무것도 없다**.
 2. **supervisor(CLI)가 유일한 기록자다.** daemon은 브라우저 사실을 관찰·수행해 RPC 응답으로
    돌려줄 뿐, 디스크에 진실을 쓰지 않는다 (evidence 스크린샷 제외). SQLite는 CLI만 쓴다.
-3. **작게.** 의존성 4개(playwright-core, better-sqlite3, ws, typescript+tsx dev). 목표 규모
+3. **작게.** 런타임 의존성은 playwright-core, better-sqlite3, ws, sharp다. 목표 규모
    전체 8k 라인 이하 (테스트 포함).
 
 ## 2. 디렉토리 레이아웃
@@ -78,7 +78,7 @@ stacks/gpt-webai-pro/
     daemon/main.ts           # WS 서버 + RPC 디스패치 (컨테이너 안에서 실행)
     daemon/browser.ts        # CDP 접속, Page/탭 관리
     daemon/selectors.ts      # 모든 DOM 셀렉터 + 라벨 매칭 (단일 파일, §6)
-    daemon/actions/model.ts  #   Pro Extended 보장
+    daemon/actions/model.ts  #   기본 Pro / 이미지 Xhigh 보장
     daemon/actions/send.ts   #   첨부 + 전송 + 턴 시작 확인
     daemon/actions/poll.ts   #   생성 완료 감시 + 답변 추출
     daemon/actions/download.ts # artifact 컨트롤 발견 + 다운로드
@@ -196,6 +196,26 @@ config 동기화 시 config에 없는 슬롯 행은 비종결 요청이 참조�
 (과거 requests.slot_id 문자열은 이력으로 그대로 둔다).
 
 `log.jsonl`은 디버깅 편의용 append 로그이고 진실이 아니다. 복구는 항상 SQLite 기준.
+
+### 4.1 이미지 배치 (user_version 4)
+
+`image_batches(id, created_at)`와 `image_chunks(batch_id, ordinal, request_id, items_json)`를
+추가한다. 청크당 1–5개 ID/프롬프트를 저장하고 `(batch_id, ordinal)` 및 `request_id`가
+유일하다. 입력 프롬프트와 첨부를 요청 디렉터리에 먼저 복사한 뒤 배치와 모든 child request를
+한 SQLite transaction으로 생성한다. 미완성 입력은 staged로 노출되지 않는다.
+v3→v4는 새 두 표만 추가하고 기존 요청·전송·사용량을 보존한다.
+
+배치 `owner.lock`은 순차 실행을 직렬화하며 각 child는 기존 요청 `owner.lock`, `send.lock`,
+`send_attempts`를 그대로 사용한다. 배치 전체가 하나의 제한 시간을 공유한다. 시간이 끝나면
+다음 청크를 보내지 않는다. 재개는 저장된 child ID만 사용하고 완료한 청크를 재전송하지 않는다.
+이미지 다운로드의 재시도 제한은 supervisor finalization 호출당 2회다. daemon 수명 전체의
+재시도 횟수 제한을 이미지에 적용하면 같은 응답의 다운로드 재개가 막히므로 적용하지 않는다.
+한 이미지가 두 번 실패하면 해당 청크의 수집을 멈추고 재개를 요구한다. 저장된 원본은
+유지하고 미저장 이미지부터 다시 받는다.
+전송 재확인 RPC에도 이미지 수량을 전달해 최초 전송과 같은 공백 정규화·접기 버튼
+제외 규칙으로 기존 사용자 턴을 찾는다. 불일치·모호한 턴은 재전송의 근거가 아니다.
+다운로드는 원본 선택 직전마다 예상 수량과 전체 이미지 디코딩을 다시 검사한다.
+poll 이후 앞쪽 썸네일이 빠진 갤러리를 순번으로 저장하지 않고 원래 응답의 복구를 기다린다.
 
 ## 5. 요청 수명주기와 전송 멱등성 (시스템의 심장)
 
@@ -410,9 +430,12 @@ systemd timer는 부팅 5분 후 시작하고 **서비스가 끝난 뒤** 10분�
     같은 DOM 노드에서 파생** (v1 hydration 버그의 교훈, `lib/session-rebind.mjs`)
   - 생성 중 판정: accessible name `/stop generating|stop responding|중지|정지/i` 버튼 존재
   - 첨부 칩: composer form 스코프에서 파일명 토큰 정규식
-    `/[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu` + remove 버튼 accessible name 앵커,
-    action 라벨(remove|delete|attach|…) 요소는 시드에서 제외 (v1 `lib/commands/upload-only.mjs`
-    최종본 — 이 로직은 라이브 검증 완료본이므로 그대로 이식)
+    `/[^\s:/\\"'<>|]+\.[a-z0-9]{1,8}\b/iu`과 accessible name을 확인한다.
+    PNG는 파일명을 가진 `role=group`을 개별 칩의 경계로 삼는다. 본문 텍스트가 없는
+    이미지 타일을 ZIP·프롬프트까지 포함한 큰 부모로 합치지 않는다. 기존 텍스트 파일
+    칩은 파일명과 버튼이 있는 부모를 사용한다. 개수·이름의 다중집합, busy 상태와
+    이미지 디코딩 준비를 모두 만족해야 전송하며, UI 재명명의 `(1)` 앞 공백은 선택적이다.
+    불일치는 `pre_click`으로 남기고 main 범위의 화면·접근성 진단 경로를 기록한다.
   - 모델 피커: `[data-testid="model-switcher-dropdown-button"]` 계열 + 라벨 매칭
 
 ### 6.2 RPC 프로토콜
@@ -439,8 +462,8 @@ supervisor가 슬롯당 32-hex 토큰을 `slots/<slotId>/daemon.token`(0600)에 
 | `readiness` | – | `{state:'ready'\|'needs_login'\|'provider_limit'\|'unknown', modelLabel}` | 로그인 UI/rate-limit UI 감지 |
 | `send` | `{prompt, files:[{name,containerPath}]}` | `{conversationUrl, userTurnId, assistantTurnId}` | §5.2. 내부에서 model 보장+첨부+클릭+턴확인 |
 | `reconcile` | `{promptSha256, conversationUrl?}` | `{found, conversationUrl?, userTurnId?, assistantTurnId?, proven:boolean}` | §5.3. 절대 클릭하지 않는 읽기 전용 |
-| `poll` | `{conversationUrl, promptSha256, userTurnId?, assistantTurnId?, waitMs≤60000}` | `{state:'generating'\|'complete', currentUrl, assistantTurnId?, answerMarkdown?, answerSha256?, artifactControls?:[{index,label}]}` | identity/URL §6.5, 완료 판정 §7 |
-| `download` | `{conversationUrl, controlIndex}` | `{filename, outboxPath, sha256, sizeBytes}` | 컨트롤당 1회, outbox에 저장 |
+| `poll` | `{conversationUrl, promptSha256, userTurnId?, assistantTurnId?, waitMs≤60000, imageCount?}` | `{state:'generating'\|'complete', currentUrl, assistantTurnId?, answerMarkdown?, answerSha256?, artifactControls?:[{index,label}]}` | identity/URL §6.5, 완료 판정 §7 |
+| `download` | `{conversationUrl, controlIndex, assistantTurnId?, imageCount?, userTurnId?}` | `{filename, outboxPath, sha256, sizeBytes}` | 컨트롤당 1회, outbox에 저장 |
 
 **daemon 동시성 규칙 (탭 멀티플렉싱)**: 브라우저를 **변경**하는 RPC(send, reconcile의
 네비게이션 구간, download, closeConversation)는 단일 **mutation 큐**로 직렬
@@ -586,6 +609,44 @@ download/file/attachment(한국어 포함) 힌트가 있거나 정제 본문이 
 500ms 간격으로 지연 렌더를 재관찰한다. 힌트가 없는 일반 답변은 유예 없이 즉시 complete한다.
 poll deadline이 먼저 오면 빈 artifact로 종결하지 않고 generating을 반환해 다음 poll에서 잇는다.
 
+### 이미지 세트의 완료와 다운로드 (2026-09-05 실측)
+
+세션 `inspect`도 전송이 확인된 userTurnId를 전달하고 열린 탭에서 그 사용자 메시지를
+먼저 찾는다. 전송 직후 `WEB:` 주소가 실제 주소로 바뀌어도 오래된 주소로 새 탭을 열지
+않는다. 재접속한 페이지에서 해당 메시지를 확인하지 못하면 빈 홈 화면을 성공 증거로
+저장하지 않고 진단 오류를 반환한다. 진단은 프롬프트 전송이나 생성 중단을 하지 않는다.
+
+이미지 배치는 새 대화 하나당 사용자 턴 하나를 계약으로 한다. 확정 userTurnId와 유일한
+사용자 턴이 다르거나 후속 사용자 턴이 추가되면 수집을 거부한다. 이 경계 안에서 이미지가
+텍스트 assistant 메시지 노드의 형제로 렌더되는 경우도 수집한다.
+
+현재 이미지 세트 UI는 큰 `div[role=button]` 미리보기와 `button` 썸네일 N개다.
+각 썸네일에 `img[alt="Generated image"]`가 세 겹으로 들어 있으므로 img 수를 세지 않는다.
+단일 이미지의 `Generated image: 제목` 라벨도 같은 생성 이미지로 식별한다.
+단일 이미지 뷰어의 dialog 이름도 해당 제목이므로 공통 `Image tools` 그룹으로 식별한다.
+이미지 전송 확정은 문단·줄바꿈 공백을 정규화한 전체 프롬프트도 비교한다. 짧은 이미지
+입력의 공백 렌더 차이로 불필요하게 확정 창이 끝날 때까지 기다리는 일을 막는다.
+사용자 턴 뒤의 접기·펼치기 버튼은 해당 DOM 컨트롤의 실제 텍스트가 접미사로 일치할 때만
+프롬프트 비교에서 제외한다. 일반 텍스트 위임의 판독 규칙에는 적용하지 않는다.
+썸네일이 있으면 썸네일 버튼, 없으면 개별 미리보기를 센다. stop 부재, 응답 복사 액션,
+실제 이미지 로드, 3초 동안 안정된 개수를 확인한다. 본문 텍스트가 없어도 이미지 응답은 완료된다.
+복사 액션은 영어·한국어 공통 selector를 쓰되 마지막 이미지 뒤로 범위를 좁혀 사용자 메시지의
+복사 버튼을 완료 증거로 사용하지 않는다. 이미지 없는 텍스트 응답은 assistant anchor를 쓴다.
+대화 재개 직후 `Generated image` 미리보기만 있고 이미지가 로드되지 않은 상태는 계속
+generating으로 남긴다. Copy response가 보여도 빈 갤러리를 0장 완료로 취급하지 않는다.
+갤러리 이름조차 없는 빈 assistant도 같은 원칙이다. 이미지 없는 텍스트 응답은 원문을 보존해
+미완료 사유를 확인할 수 있게 한다. 전체 컨트롤 수가 예상 수와 같기 전에는 입력 ID를
+이미지 순서에 결속하거나 다운로드하지 않는다. 일부 썸네일 누락으로 순서가 밀리는 것을 막는다.
+
+다운로드는 요청의 user anchor를 다시 확인하고 썸네일을 순서대로 선택한다. 큰 미리보기가
+선택한 썸네일의 이미지로 바뀐 뒤 원본 뷰어를 연다. `Save` 클릭 전에 다운로드 이벤트를
+등록한다. 단일 이미지는 직접 다운로드되며, 다중 세트는 `Save` 메뉴의 `Download image`를
+누른다. `Download N images in this series`와 정확히 구분한다.
+일반 파일 패널의 `Download`와 구분하며 기존 download 이벤트 경로로 파일을 저장하고
+뷰어를 닫는다. URL은 비교에만 쓰고 구성·fetch하지 않는다. 파일명은 입력 ID와 실제 디코딩한
+확장자를 사용하므로 공급자의 동일 파일명이 서로 덮어쓰지 않는다. 의미·순서·문자 품질은
+실제 산출물을 보는 검수가 필요하다. 일반 텍스트 다운로드는 지정 assistant anchor를 벗어나지 않는다.
+
 **artifact 컨트롤 발견 (2026-07-28 실 DOM 기준)**: 현 ChatGPT는 인라인 `a[download]`가
 아니라 **답변 본문의 "파일 엔티티" 버튼**으로 파일을 노출한다 (실측: `<button
 aria-label="numbers.txt" class="behavior-btn …">numbers.txt</button>`, 파일 아이콘 svg 포함).
@@ -607,7 +668,7 @@ supervisor는 `/outbox/` 경계 안의 경로만 슬롯의 host bind mount
 반환한 host 경로를 그대로 사용한다. 유효하게 매핑된 managed outbox 파일은 저장 성공과
 검증/저장 실패 모두 정리해 `.gwp-*` 임시 파일이나 최종명이 슬롯 outbox에 남지 않게 한다.
 
-**artifact 실패 정책**: 컨트롤당 최대 2회 시도. 그래도 실패하면 — 성공한 artifact는 전부
+**일반 파일의 artifact 실패 정책**: 컨트롤당 최대 2회 시도. 그래도 실패하면 — 성공한 artifact는 전부
 보존(행+파일), 요청은 **complete로 종결**하되 envelope `message`에 실패 컨트롤
 수/라벨을 명기한다(`errorKind`는 null 유지). 수 시간짜리 Pro 답변을 다운로드 플레이크에
 인질 잡지 않는다.

@@ -27,13 +27,13 @@ const MENU_CLOSE_MS = 5_000;
  *   아니면 메뉴에서 `target` 라디오를 클릭해 aria-checked를 확인한다.
  * - 새 UI(2026-09, GPT-6): 알약이 "6\nPro"(버전 + power). 메뉴 안에 생각 강도 슬라이더
  *   ([role=slider] 0..max, max=Pro)와 "Select model" 라디오(Latest/GPT-5.6 Sol/…)가 있다.
- *   보이는 Power 입력점에 ArrowRight를 보내 최대(=Pro)로 올리고, `labels.modelVersion`(기본 Latest) 라디오가 켜져
+ *   보이는 Power 입력점에 방향 키를 보내 최대에서 sliderOffsetFromMax만큼 아래로 맞추고, `labels.modelVersion`(기본 Latest) 라디오가 켜져
  *   있는지 확인·선택한 뒤 메뉴를 닫고 알약을 재검증한다.
  *
  * 어느 경우에도 다른 power/모델로의 대체는 없다 — 목표를 만들 수 없으면 model_unavailable.
- * 반환값은 표시용 라벨("6 Pro" / "Pro")로 주간 사용량 기록의 증거가 된다.
+ * 반환값은 표시용 라벨("6 Pro" / "Extra High" / "6 Extended")로 주간 사용량 기록의 증거가 된다.
  */
-export async function ensurePro(page: Page, labels: LabelConfig): Promise<string> {
+export async function ensureIntelligence(page: Page, labels: LabelConfig): Promise<string> {
   const targets = new Set(labels.target.map(normalizeIntelligenceLabel));
   try {
     const pill = await findIntelligencePill(page, labels.intelligence);
@@ -51,7 +51,7 @@ export async function ensurePro(page: Page, labels: LabelConfig): Promise<string
     const power = await findPowerControl(page);
     let legacySelectionConfirmed = false;
     if (power) {
-      if (!powerExact) await raisePowerToMax(page, power);
+      if (!powerExact) await setPower(page, power, labels.sliderOffsetFromMax ?? 0);
       const status = await readPowerStatusText(page);
       const statusPower = normalizeIntelligenceLabel(status.split(/[,.]/u)[0] ?? "");
       if (!targets.has(statusPower)) {
@@ -83,19 +83,23 @@ export async function ensurePro(page: Page, labels: LabelConfig): Promise<string
     throw new GwpError("model_unavailable", String(error), { phase: "pre_click", cause: error });
   }
 }
-async function raisePowerToMax(page: Page, { input, slider }: PowerControl): Promise<void> {
+async function setPower(page: Page, { input, slider }: PowerControl, offset: number): Promise<void> {
   const minimum = Number(await slider.getAttribute("aria-valuemin") ?? Number.NaN);
   const maximum = Number(await slider.getAttribute("aria-valuemax") ?? Number.NaN);
   const current = Number(await slider.getAttribute("aria-valuenow") ?? Number.NaN);
-  if (![minimum, maximum, current].every(Number.isInteger)
-    || minimum > current || current > maximum || maximum - minimum > 20) {
-    throw new Error("power slider has invalid bounds or current value");
+  if (![minimum, maximum, current, offset].every(Number.isInteger)
+    || minimum > current || current > maximum || maximum - minimum > 20
+    || offset < 0 || offset > maximum - minimum) {
+    throw new Error("power slider has invalid bounds, current value, or target offset");
   }
-  for (let next = current + 1; next <= maximum; next += 1) {
-    await input.press("ArrowRight");
+  const target = maximum - offset;
+  const direction = Math.sign(target - current);
+  for (let value = current; value !== target;) {
+    value += direction;
+    await input.press(direction > 0 ? "ArrowRight" : "ArrowLeft");
     await page.waitForFunction(
       ({ selector, value }) => document.querySelector(selector)?.getAttribute("aria-valuenow") === String(value),
-      { selector: POWER_SLIDER_SELECTOR, value: next },
+      { selector: POWER_SLIDER_SELECTOR, value },
       { timeout: SLIDER_SETTLE_MS },
     );
   }

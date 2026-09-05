@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { errorMessage } from "../shared/errors.js";
-import { isRequestId } from "../shared/ids.js";
+import { isImageBatchId, isRequestId } from "../shared/ids.js";
 import type { Envelope } from "../shared/types.js";
 import {
   InputError,
@@ -25,6 +25,8 @@ const COMMANDS = new Set([
   "login",
   "keepalive",
   "reap",
+  "inspect",
+  "image-batch",
 ]);
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const command = COMMANDS.has(argv[0] ?? "") ? argv.shift()! : "run";
@@ -52,6 +54,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return exitCode;
   };
   try {
+    if (command === "image-batch") {
+      let manifest: string | undefined;
+      let batch: string | undefined;
+      let timeout = defaultTimeoutSeconds();
+      const files: string[] = [];
+      for (let i = 0; i < argv.length; i += 1) {
+        if (argv[i] === "--manifest") manifest = requireValue(argv, ++i, "--manifest");
+        else if (argv[i] === "--batch") batch = requireValue(argv, ++i, "--batch");
+        else if (argv[i] === "--file") files.push(requireValue(argv, ++i, "--file"));
+        else if (argv[i] === "--timeout-seconds") timeout = parseTimeout(requireValue(argv, ++i, "--timeout-seconds"));
+        else throw new InputError(`unexpected image-batch argument: ${argv[i]}`);
+      }
+      if (Boolean(manifest) === Boolean(batch) || (batch && (!isImageBatchId(batch) || files.length))) {
+        throw new InputError("image-batch requires --manifest PATH [--file PATH] or --batch img_ID");
+      }
+      const input: unknown = manifest ? JSON.parse(await readFile(manifest, "utf8")) : undefined;
+      supervisor = await Supervisor.open();
+      const result = batch ? await supervisor.resumeImageBatch(batch, timeout) : await supervisor.runImageBatch(input, files, timeout);
+      return emitJson(result, result.chunks.some((chunk) => chunk.result.hardFailure) ? 1 : 0);
+    }
     if (command === "run") {
       const parsed = await parseRun(argv);
       if (!parsed.prompt.trim()) {
@@ -71,6 +93,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       if (argv.some((item) => item !== "--json")) throw new InputError("status accepts only --json");
       supervisor = await Supervisor.open();
       return emitJson(await supervisor.status(), 0);
+    }
+    if (command === "inspect") {
+      const options: { slotId?: string; sessionId?: string; openTools?: boolean; selectImageTool?: boolean; imagePrompt?: string; openImageIndex?: number } = {};
+      for (let i = 0; i < argv.length; i += 1) {
+        if (argv[i] === "--slot") options.slotId = requireValue(argv, ++i, "--slot");
+        else if (argv[i] === "--session") options.sessionId = requireValue(argv, ++i, "--session");
+        else if (argv[i] === "--open-tools") options.openTools = true;
+        else if (argv[i] === "--select-image-tool") options.selectImageTool = true;
+        else if (argv[i] === "--image-prompt-file") options.imagePrompt = await readFile(requireValue(argv, ++i, "--image-prompt-file"), "utf8");
+        else if (argv[i] === "--open-image-index") {
+          options.openImageIndex = Number(requireValue(argv, ++i, "--open-image-index"));
+          if (!Number.isInteger(options.openImageIndex) || options.openImageIndex < 0) throw new InputError("image index must be a non-negative integer");
+        }
+        else throw new InputError(`unexpected inspect argument: ${argv[i]}`);
+      }
+      if (Boolean(options.slotId) === Boolean(options.sessionId) || (options.sessionId && (options.openTools || options.selectImageTool || options.imagePrompt))) {
+        throw new InputError("inspect requires --slot ID [--open-tools] or --session req_ID");
+      }
+      supervisor = await Supervisor.open();
+      return emitJson({ ok: true, ...await supervisor.inspect(options) }, 0);
     }
     if (command === "cleanup") {
       const apply = parseCleanup(argv);

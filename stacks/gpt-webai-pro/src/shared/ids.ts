@@ -5,3 +5,9 @@ export function newRequestId(): string {
 export function isRequestId(value: string): boolean {
   return /^req_[0-9a-f]{16}$/.test(value);
 }
+export function newImageBatchId(): string {
+  return `img_${randomBytes(8).toString("hex")}`;
+}
+export function isImageBatchId(value: string): boolean {
+  return /^img_[0-9a-f]{16}$/.test(value);
+}

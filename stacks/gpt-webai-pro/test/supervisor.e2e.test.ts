@@ -9,12 +9,123 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
-import { sha256File, sha256Text } from "../src/shared/fsx.js";
+import sharp from "sharp";
+import { sha256File, sha256Text, tryAcquireFileLock } from "../src/shared/fsx.js";
 import type { SlotConfig } from "../src/shared/types.js";
 import { CONTAINER_OUTBOX } from "../src/supervisor/docker.js";
 import { InputError, LoginInterruptedError, LoginTimeoutError, Supervisor } from "../src/supervisor/run.js";
 import { markSlotNeedsLogin, markSlotProviderLimit } from "../src/supervisor/slots.js";
 const DROP = Symbol("drop connection");
+
+test("image batches persist 5+4 children and resume a missing download without resending", async (t) => {
+  let sends = 0;
+  let allowFirstDownload = false;
+  let allowLastDownload = false;
+  let allControlsPresent = false;
+  let firstRequest = "";
+  const counts: number[] = [];
+  const downloadIndices: number[] = [];
+  const png = await sharp({ create: { width: 512, height: 512, channels: 3, background: "#345678" } }).png().toBuffer();
+  const { supervisor, directory } = await fixture(t, [{ id: "slot-a", account: "a", handler: async (method, params) => {
+    if (method === "readiness") return { state: "ready", modelLabel: "Extra High" };
+    if (method === "send") {
+      sends += 1;
+      counts.push(Number(params?.imageCount));
+      return { conversationUrl: `https://chatgpt.com/c/images-${sends}`, userTurnId: `user-${sends}`, assistantTurnId: `assistant-${sends}`, modelLabel: "Extra High" };
+    }
+    if (method === "poll") return { ...complete("", pollUrl(params)), assistantTurnId: `assistant-${sends}`,
+      artifactControls: Array.from({ length: Number(params?.imageCount) - (allControlsPresent ? 0 : 1) }, (_, index) => ({ index, label: "Download image" })) };
+    if (method === "download") {
+      assert.equal(params?.assistantTurnId, `assistant-${sends}`);
+      downloadIndices.push(Number(params?.controlIndex));
+      if (sends === 1 && params?.controlIndex === 0 && !allowFirstDownload) throw new Error("image viewer save failed");
+      if (sends === 2 && params?.controlIndex === 3 && !allowLastDownload) throw new Error("temporary download failure");
+      const outboxPath = path.join(directory, `download-${sends}-${params?.controlIndex}.png`);
+      await writeFile(outboxPath, png);
+      return { filename: "image.png", outboxPath, sizeBytes: png.length, sha256: await sha256File(outboxPath) };
+    }
+    if (method === "closeConversation") return { ok: true };
+    throw new Error(`unexpected method ${method}`);
+  } }]);
+  const manifest = { images: Array.from({ length: 9 }, (_, i) => ({ id: `design-${i + 1}`, prompt: `Image ${i + 1}` })) };
+  const staged = await supervisor.runImageBatch(manifest, [], 0);
+  assert.equal(sends, 0);
+  assert.equal(staged.chunks.length, 2);
+  firstRequest = staged.chunks[0]!.result.sessionId!;
+  const missingControl = await supervisor.resumeImageBatch(staged.batchId, 30);
+  assert.equal(missingControl.status, "needs_user_action");
+  assert.equal(missingControl.downloadedImages, 0, "do not bind prompt IDs while a gallery control is missing");
+  assert.deepEqual(downloadIndices, []);
+  allControlsPresent = true;
+  const stopped = await supervisor.resumeImageBatch(staged.batchId, 30);
+  assert.equal(stopped.status, "needs_user_action");
+  assert.equal(stopped.downloadedImages, 0);
+  assert.deepEqual(downloadIndices, [0, 0], "stop this chunk after an image exhausts its download attempts");
+  assert.equal(sends, 1);
+  allowFirstDownload = true;
+  const partial = await supervisor.resumeImageBatch(staged.batchId, 30);
+  assert.equal(partial.status, "needs_user_action");
+  assert.equal(partial.downloadedImages, 8);
+  assert.deepEqual(counts, [5, 4]);
+  allowLastDownload = true;
+  const done = await supervisor.resumeImageBatch(staged.batchId, 30);
+  assert.equal(done.status, "complete");
+  assert.equal(done.downloadedImages, 9);
+  assert.equal(sends, 2);
+  assert.equal(done.chunks[0]!.result.sessionId, firstRequest);
+  assert.equal(new Set(done.artifacts.map((item) => item.filename)).size, 9);
+  assert.deepEqual(done.artifacts.map((item) => item.promptId), manifest.images.map((item) => item.id));
+});
+
+test("image batch contention and post-click loss resume the same child without a second send", async (t) => {
+  configureRecovery(t, "0");
+  let sends = 0;
+  const { supervisor } = await fixture(t, [{ id: "slot-a", account: "a", handler: standardHandler((method, params) => {
+    if (method === "send") { sends += 1; return DROP; }
+    if (method === "reconcile") {
+      assert.equal(params?.imageCount, 1);
+      return { found: true, proven: true, conversationUrl: "https://chatgpt.com/c/recovered-image", userTurnId: "u-image", assistantTurnId: "a-image" };
+    }
+    throw new Error(`unexpected ${method}`);
+  }) }]);
+  const staged = await supervisor.runImageBatch({ images: [{ id: "one", prompt: "draw one original image" }] }, [], 0);
+  const lock = await tryAcquireFileLock(path.join(supervisor.stateDir, "image-batches", staged.batchId, "owner.lock"));
+  assert.ok(lock);
+  try {
+    const waiting = await supervisor.resumeImageBatch(staged.batchId, 1);
+    assert.match(waiting.message!, /already being processed/);
+    assert.equal(sends, 0);
+  } finally { await lock.release(); }
+  // This case tests reconciliation and send identity, not a one-second deadline.
+  // Parallel Chromium suites can consume that deadline before the recovery poll.
+  const uncertain = await supervisor.resumeImageBatch(staged.batchId, 30);
+  assert.equal(uncertain.chunks[0]!.result.errorKind, "send_uncertain");
+  const recovered = await supervisor.resumeImageBatch(staged.batchId, 30);
+  assert.equal(sends, 1);
+  assert.equal(recovered.status, "needs_user_action");
+  assert.equal(recovered.chunks[0]!.result.errorKind, "image_incomplete");
+  assert.equal(recovered.downloadedImages, 0);
+  assert.equal(supervisor.db.latestAttempt(staged.chunks[0]!.result.sessionId!)?.state, "reconciled");
+});
+
+test("image polling connection loss remains resumable without regenerating", async (t) => {
+  let sends = 0;
+  let polls = 0;
+  const { supervisor } = await fixture(t, [{ id: "slot-a", account: "a", handler: (method, params) => {
+    if (method === "readiness") return { state: "ready", modelLabel: "Extra High" };
+    if (method === "send") { sends += 1; return { conversationUrl: "https://chatgpt.com/c/image-reconnect", userTurnId: "u", assistantTurnId: "a" }; }
+    if (method === "poll") return ++polls === 1 ? DROP : complete("No images available", pollUrl(params));
+    if (method === "closeConversation") return { ok: true };
+    throw new Error(`unexpected ${method}`);
+  } }]);
+  const first = await supervisor.runImageBatch({ images: [{ id: "one", prompt: "draw one image" }] }, [], 1);
+  assert.equal(first.status, "needs_user_action");
+  assert.equal(first.chunks[0]!.result.errorKind, "image_poll_failed");
+  const second = await supervisor.resumeImageBatch(first.batchId, 1);
+  assert.equal(second.chunks[0]!.result.errorKind, "image_incomplete");
+  assert.equal(sends, 1);
+  assert.equal(polls, 2);
+});
 class MockRpcError extends Error {
   constructor(
     readonly kind: string,

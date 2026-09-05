@@ -46,7 +46,7 @@ const ARTIFACT_CONTROL_SELECTOR = [
   "button",
   '[role="button"]',
 ].join(",");
-const COPY_CONTROL_SELECTOR = [
+export const COPY_CONTROL_SELECTOR = [
   '[data-testid*="copy" i]',
   '[aria-label*="copy" i]',
   '[aria-label*="복사" i]',
@@ -83,7 +83,7 @@ export interface ChipObservation {
 }
 export interface ArtifactControlLocator {
   locator: Locator;
-  kind: "inline" | "entity";
+  kind: "inline" | "entity" | "image";
   label: string;
 }
 function normalizeMarkdown(value: string, preserveFenceLanguages: boolean): string {
@@ -212,12 +212,18 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
       ? duplicate[1] + " " + duplicate[2]
       : (accessibleName.match(filename)?.[0] || "").trim();
     if (!match) return null;
-    let root = seed.matches('button,[role="button"]') ? seed.parentElement : seed;
-    while (root) {
-      const hasControl = Boolean(root.querySelector('button,[role="button"]'));
-      const showsName = filename.test(root.innerText || root.textContent || "");
-      if (hasControl && showsName && visible(root)) break;
-      root = root.parentElement;
+    // 이미지 타일은 본문 글자 없이 group의 접근성 이름과 제거 버튼에만 파일명을 둔다.
+    const group = seed.closest('[role="group"][aria-label]');
+    let root = group && filename.test(group.getAttribute("aria-label") || "") ? group : null;
+    if (root && (!visible(root) || !root.querySelector('button,[role="button"]'))) return null;
+    if (!root) {
+      root = seed.matches('button,[role="button"]') ? seed.parentElement : seed;
+      while (root) {
+        const hasControl = Boolean(root.querySelector('button,[role="button"]'));
+        const showsName = filename.test(root.innerText || root.textContent || "");
+        if (hasControl && showsName && visible(root)) break;
+        root = root.parentElement;
+      }
     }
     if (!root) return null;
     const rootPath = domPath(root);
@@ -225,7 +231,10 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
     if (!rootPath || !seedPath) return null;
     const busy = root.getAttribute("aria-busy") === "true"
       || Boolean(root.querySelector('[role="progressbar"],[aria-busy="true"]'));
-    return { filename: match, complete: !busy, rootPath, seedPath };
+    const imagePending = Array.from(root.querySelectorAll("img")).some(image => (
+      !image.complete || image.naturalWidth === 0 || image.naturalHeight === 0
+    ));
+    return { filename: match, complete: !busy && !imagePending, rootPath, seedPath };
   }).filter(Boolean);
 })()`;
 function normalizeLabel(value: string): string {
@@ -249,7 +258,7 @@ export function parsePillLabel(value: string): { version: string | null; power: 
 export function normalizeChipStem(value: string): string {
   return normalizeLabel(value)
     .replace(/\.[a-z0-9]{1,8}$/u, "")
-    .replace(/ \(([1-9]|[1-9][0-9])\)$/u, "");
+    .replace(/\s*\(([1-9]|[1-9][0-9])\)$/u, "");
 }
 export async function visibleFirst(
   page: Page,
@@ -386,15 +395,23 @@ export async function readTurnsShallow(page: Page): Promise<TurnMeta[]> {
     return { role, dataMessageId, domIndex };
   }).filter((item): item is Omit<TurnObservation, "text"> => item !== null));
 }
-export async function readTurnTextById(page: Page, dataMessageId: string): Promise<string | null> {
-  return page.locator(TURN_SELECTOR).evaluateAll((nodes, expected) => {
+export async function readTurnTextById(page: Page, dataMessageId: string, excludeUiToggle = false): Promise<string | null> {
+  return page.locator(TURN_SELECTOR).evaluateAll((nodes, { expected, excludeUiToggle }) => {
     for (const node of nodes) {
       const element = node as HTMLElement;
       if (element.getAttribute("data-message-id") !== expected) continue;
-      return (element.innerText || element.textContent || "").trim();
+      let text = (element.innerText || element.textContent || "").trim();
+      if (excludeUiToggle) {
+        // 실 이미지 user 턴의 Show more/Show less는 프롬프트 뒤에 붙는 UI 버튼이다.
+        // 버튼의 실제 텍스트가 접미사로 일치할 때만 제외해 프롬프트 본문은 보존한다.
+        const toggle = element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-toggle"]');
+        const label = (toggle?.innerText || toggle?.textContent || "").trim();
+        if (label && text.endsWith(label)) text = text.slice(0, -label.length).trimEnd();
+      }
+      return text;
     }
     return null;
-  }, dataMessageId);
+  }, { expected: dataMessageId, excludeUiToggle });
 }
 export async function readAssistantAnswer(page: Page, assistantTurnId?: string): Promise<string> {
   let turn = await assistantLocator(page, assistantTurnId);
@@ -493,9 +510,10 @@ export async function answerActionVisible(
 export async function artifactControlLocators(
   page: Page,
   assistantTurnId?: string,
+  strict = false,
 ): Promise<ArtifactControlLocator[]> {
   let turn = await assistantLocator(page, assistantTurnId);
-  if (!turn && assistantTurnId) turn = await assistantLocator(page);
+  if (!turn && assistantTurnId && !strict) turn = await assistantLocator(page);
   if (!turn) return [];
   const candidates = turn.locator(ARTIFACT_CONTROL_SELECTOR);
   const result: ArtifactControlLocator[] = [];

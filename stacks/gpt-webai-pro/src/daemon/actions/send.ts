@@ -18,7 +18,9 @@ import {
   visibleFirst,
 } from "../selectors.js";
 import type { BrowserSession } from "../browser.js";
-import { ensurePro } from "./model.js";
+import { ensureIntelligence } from "./model.js";
+import { composeImagePrompt, imageLabels, imageSentTurnMatches } from "./images.js";
+import { captureInspection } from "./inspect.js";
 const HEARTBEAT_MS = 2_500;
 // 관측이 경량(readTurnsShallow, 텍스트는 매칭 후보만)이라 짧은 주기를 유지할 수 있다.
 const CONFIRM_POLL_MS = 250;
@@ -28,6 +30,7 @@ export async function sendMessage(
   params: SendParams,
   labels: LabelConfig,
   onProgress?: SendProgressEmitter,
+  outboxDir?: string,
 ): Promise<SendResult> {
   const startedAt = Date.now();
   const state = {
@@ -64,19 +67,27 @@ export async function sendMessage(
   let clickStarted = false;
   try {
     emit();
+    if (params.imageCount !== undefined && (!Number.isInteger(params.imageCount) || params.imageCount < 1 || params.imageCount > 5)) {
+      throw new GwpError("compose_failed", "imageCount must be from 1 through 5", { phase: "pre_click" });
+    }
+    if (params.imageCount && params.conversationUrl) throw new GwpError("compose_failed", "image batches require a new conversation", { phase: "pre_click" });
     page = params.conversationUrl
       ? await session.open(params.conversationUrl)
       : await session.newConversation();
     step("ensure_model");
-    const modelLabel = await ensurePro(page, labels);
+    let modelLabel = await ensureIntelligence(page, params.imageCount ? imageLabels(labels) : labels);
     step("compose");
-    await fillComposer(page, params.prompt);
+    if (params.imageCount) {
+      step("select_image_tool");
+      await composeImagePrompt(page, params.prompt);
+    } else await fillComposer(page, params.prompt);
     if (params.files.length > 0) {
       step("attach");
       await attachFiles(page, params.files.map((file) => file.containerPath));
       step("verify_chips");
       await waitForExpectedChips(page, params.files.map((file) => file.name), 30_000);
     }
+    if (params.imageCount) modelLabel = await ensureIntelligence(page, imageLabels(labels));
     step("baseline");
     const baseline = await readTurnsShallow(page);
     const baselineIds = new Set(baseline.map((turn) => turn.dataMessageId));
@@ -116,9 +127,10 @@ export async function sendMessage(
       let user: (typeof newUsers)[number] | undefined;
       let matchedBy: SendResult["matchedBy"];
       for (const candidate of newUsers) {
-        const text = await readTurnTextById(page, candidate.dataMessageId);
+        const text = await readTurnTextById(page, candidate.dataMessageId, Boolean(params.imageCount));
         if (text === null) continue;
-        if (renderedTurnMatchesPrompt(text, params.prompt)) {
+        if (renderedTurnMatchesPrompt(text, params.prompt)
+          || (params.imageCount && imageSentTurnMatches(text, params.prompt))) {
           user = candidate;
           matchedBy = "strict";
           break;
@@ -167,9 +179,13 @@ export async function sendMessage(
     );
   } catch (error) {
     const gwp = error instanceof GwpError ? error : null;
+    const diagnostic = gwp?.kind === "chip_mismatch" && page && outboxDir
+      ? await captureInspection(page, outboxDir)
+        .then(result => `; attachment diagnostic: ${result.snapshotPath}`, cause => `; attachment capture failed: ${String(cause)}`)
+      : "";
     throw new GwpError(
       gwp?.kind ?? (clickStarted ? "click_uncertain" : "compose_failed"),
-      gwp?.detail ?? String(error),
+      (gwp?.detail ?? String(error)) + diagnostic,
       {
         // Entering send.click() transfers authority irrevocably to post-click.
         phase: clickStarted ? "post_click" : gwp?.phase ?? "pre_click",
