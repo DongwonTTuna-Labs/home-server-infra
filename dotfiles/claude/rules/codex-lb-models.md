@@ -4,10 +4,10 @@ Which model to hand Codex when delegating — especially through orca
 orchestration or a worktree handoff. The relay is the `model_providers.codex-lb`
 block in `~/.codex/config.toml`.
 
-Current default on both machines: **`gpt-6-astra`, effort `high`** (user
-instruction, 2026-09-05 — it went max → high → max → high that day; before
-astra, sol at xhigh on the laptop and max on the home server). The `sol` rule
-below still says `max`; that is sol-specific and unaffected.
+Current default on both machines: **`gpt-6-astra`, effort `max`** (user
+instruction, 2026-09-05; it flipped between max and high several times that
+day and settled on max — check the live config before assuming). Before astra,
+sol ran at xhigh on the laptop and max on the home server.
 
 Endpoints differ by machine and the keys are not interchangeable: the laptop
 goes to `https://relay-ai.dongwontuna.net/backend-api/codex` with
