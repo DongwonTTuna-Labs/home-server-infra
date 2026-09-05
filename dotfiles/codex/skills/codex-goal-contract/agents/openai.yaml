@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Goal Contract"
+  short_description: "Draft evidence-based Codex goal contracts"
+  default_prompt: "Use $codex-goal-contract to turn this work into a strong evidence-based Codex Goal."

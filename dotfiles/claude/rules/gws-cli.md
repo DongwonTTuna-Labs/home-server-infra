@@ -4,13 +4,14 @@
 (https://github.com/googleworkspace/cli). claude.ai Gmail MCP 커넥터, 브라우저 자동화,
 개별 API 직접 호출은 gws가 안 될 때의 보조 수단일 뿐이다.
 
-## 설치·인증 상태 (2026-09-01 확인)
+## 설치·인증 상태 (2026-09-05 재확인)
 
 - 설치: npm 전역 `@googleworkspace/cli` (`gws` 명령, v0.22.5). 업데이트: `npm i -g @googleworkspace/cli`.
 - GCP 프로젝트: `gws-ttuna0790-260607`, OAuth 클라이언트 구성 완료 (`~/.config/gws/client_secret.json`).
 - 계정: **ttuna0790@gmail.com**, `gws auth login --full`로 전체 스코프 동의 완료
   (drive·spreadsheets·gmail.modify·calendar·documents·presentations·tasks·pubsub·cloud-platform).
 - 자격증명은 키링 암호화 저장. 상태 확인: `gws auth status` (`token_valid` 확인).
+  2026-09-05 실측: `token_valid: true`, refresh token 보유, 스코프 14개, 활성 API 47개.
 - 토큰 만료/철회 시: `gws auth login --full` 재실행 → 브라우저 인증. **CDP 자동화 Chrome에서는
   구글이 로그인을 차단**("브라우저가 안전하지 않을 수 있습니다") — 반드시 사용자의 일반
   브라우저에서 인증 URL을 열게 한다. 콜백은 localhost 포트로 gws가 수신.

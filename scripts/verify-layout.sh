@@ -54,12 +54,22 @@ required=(
   dotfiles/agent-rules/20-delegation.md
   dotfiles/agent-rules/30-repo-artifacts.md
   dotfiles/agent-rules/40-changing-these-rules.md
-  dotfiles/agent-rules/adapters/codex-header.md
-  dotfiles/agent-rules/adapters/claude-header.md
+  dotfiles/agent-rules/50-environment.md
+  dotfiles/agent-rules/adapters/preamble.md
   dotfiles/codex/AGENTS.md
   dotfiles/codex/runbooks/execution-policy.md
   dotfiles/codex/runbooks/gpt-webai-pro.md
   dotfiles/codex/runbooks/gptpro-review.md
+  dotfiles/codex/skills/codex-goal-contract/SKILL.md
+  dotfiles/codex/skills/gh-pr-review-loop/SKILL.md
+  dotfiles/codex/skills/home-server-ops-rollout/SKILL.md
+  dotfiles/codex/prompts/controlled-boldness.md
+  dotfiles/codex/prompts/gpt-delegation-prelude.md
+  dotfiles/codex/agents/explorer.toml
+  dotfiles/codex/agents/plan.toml
+  dotfiles/claude/skills/adversarial-gate-loop/SKILL.md
+  dotfiles/claude/skills/fable-sol-loop/SKILL.md
+  dotfiles/claude/skills/fable-sol-loop/appserver-sol.py
   dotfiles/claude/CLAUDE.md
   stacks/gpt-webai-pro/AGENTS.md
 )

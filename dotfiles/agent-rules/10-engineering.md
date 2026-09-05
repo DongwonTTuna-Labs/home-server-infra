@@ -74,6 +74,9 @@ Run `git push` only after the requested scope is complete, verification passed,
 and no decision or blocker is outstanding. On this setup a push triggers
 downstream automation, so a premature push is expensive, not merely untidy.
 
+Immediately before pushing, confirm three things: the scope of the change, the
+branch you are pushing to, and the verification result.
+
 Never push an intermediate checkpoint, a partial fix, or unverified work. If
 the user asks for a push while something is still unfinished or unverified, say
 what is missing instead of pushing.

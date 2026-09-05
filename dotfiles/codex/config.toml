@@ -1,6 +1,7 @@
 model = "gpt-6-astra"
 model_provider = "codex-lb"
 model_reasoning_effort = "max"
+suppress_unstable_features_warning = true
 plan_mode_reasoning_effort = "xhigh"
 approvals_reviewer = "user"
 

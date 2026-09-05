@@ -16,28 +16,32 @@ Now there is one canon in git, and the per-tool files are generated from it.
 ## Layout
 
 ```
-agent-rules/            the canon — tool-agnostic rules, one topic per file
+agent-rules/            the canon — one topic per file, no per-tool text
   00-core.md            communication, invariants, autonomy, evidence, scope, reporting
-  10-engineering.md     anomalies, tests, implementation, pushing
+  10-engineering.md     anomalies, tests, code review, implementation, pushing
   20-delegation.md      subagents, GPT/ChatGPT delegation
   30-repo-artifacts.md  no home-grown integrity layers
   40-changing-these-rules.md  where to write a rule change, and where not to
+  50-environment.md     the machines, where files live, runbook index, macOS shell
   adapters/
-    codex-header.md     Codex-only preamble (runbook index, precedence)
-    claude-header.md    Claude-only preamble (rules dir, memory policy, macOS shell)
+    preamble.md         the identity block both files open with
 
 codex/
-  AGENTS.md             GENERATED -> ~/.codex/AGENTS.md
+  AGENTS.md             GENERATED -> ~/.codex/AGENTS.md  (identical to CLAUDE.md)
   runbooks/             conditional runbooks -> ~/.codex/runbooks/
     execution-policy.md PR state, planning, anomaly triage, completion
     gpt-webai-pro.md    ChatGPT Pro slot daemon, client side
     gptpro-review.md    the gptpro-review stack
+  skills/               hand-authored Codex skills -> ~/.codex/skills/<name>/
+  prompts/              slash prompts -> ~/.codex/prompts/   (whole directory)
+  agents/               subagent definitions -> ~/.codex/agents/  (whole directory)
   config.toml           home-server Codex config baseline
   rules/default.rules   Codex command allowlist
 
 claude/
-  CLAUDE.md             GENERATED -> ~/.claude/CLAUDE.md
+  CLAUDE.md             GENERATED -> ~/.claude/CLAUDE.md  (identical to AGENTS.md)
   rules/                Claude-only references -> ~/.claude/rules/
+  skills/               hand-authored Claude skills shared by both machines
 
 bin/
   build-agent-docs.py   canon + adapter header -> the two generated files
@@ -45,13 +49,21 @@ bin/
 ```
 
 Neither Codex nor Claude Code can include another file at load time, so the
-shared rules have to be physically present in both `AGENTS.md` and `CLAUDE.md`.
-Generating them is what keeps them identical.
+rules have to be physically present in both `AGENTS.md` and `CLAUDE.md`.
+
+The two files are rendered from the same canon and written **byte-identical**,
+and `verify-layout.sh` fails if they ever diverge. An earlier draft gave each
+tool its own header and footer; almost nothing in them was actually
+tool-specific — the macOS shell traps hit Codex exactly as hard, and Claude can
+read the runbooks under `~/.codex/runbooks/` perfectly well. What was left did
+not justify maintaining two documents, so there is now one. Anything genuinely
+specific to one tool goes in that tool's own directory: `~/.claude/rules/` for
+Claude, a runbook for Codex.
 
 ## Three layers
 
-1. **Always loaded** — `AGENTS.md` / `CLAUDE.md`. Decisions every session
-   needs. No project-specific contracts.
+1. **Always loaded** — `AGENTS.md` / `CLAUDE.md`, one document under two
+   names. Decisions every session needs. No project-specific contracts.
 2. **Conditional runbooks** — `~/.codex/runbooks/`. Loaded when the decision in
    front of the agent needs them.
 3. **Project-local** — an `AGENTS.md` in the repository it governs, such as
@@ -107,11 +119,26 @@ documented ways — it reaches the relay over
 `https://relay-ai.dongwontuna.net/backend-api/codex` with
 `CODEX_LB_LOCAL_API_KEY` instead of loopback with `CODEX_LB_HOME_API_KEY`.
 
-Skill directories (`~/.codex/skills/`, `~/.claude/skills/`) are not yet
-tracked. They are still out of sync between the machines — the laptop's Codex
-skills are a superset of the home server's — and unifying them is a separate
-job. `~/.codex/prompts/` and `~/.codex/agents/` are likewise untracked, as is
-the `runbooks/gpt-webai-pro-deepresearch/` directory.
+Skills are split by who owns them. Hand-authored skills that both machines use
+are tracked here and installed as whole directories: for Codex
+`codex-goal-contract`, `gh-pr-review-loop`, `home-server-ops-rollout`; for
+Claude `adversarial-gate-loop`, `fable-sol-loop`. Everything else under a skills
+directory is deliberately left alone:
+
+- `~/.agents/skills/` and the symlinks pointing into it from `~/.claude/skills/`
+  are owned by a skill installer (`.skill-lock.json`); track them there, not here.
+- Vendored skills that ship a `LICENSE.txt` — `cloudflare-deploy`,
+  `test-case-author`, `playwright`, `gh-fix-ci` — come from a marketplace and
+  are reinstalled from it.
+- `chronicle` reads the macOS screen and only makes sense on the laptop.
+- `~/.codex/skills/.system/` is Codex's own.
+
+`~/.codex/prompts/` and `~/.codex/agents/` are tracked as whole directories: a
+file that appears there and is not in the repository is treated as a
+post-install edit and blocks the next install until it is either added to the
+repository or removed. The `runbooks/gpt-webai-pro-deepresearch/` directory and
+the laptop-only Claude skills (`chatgpt-deep-research`, `clean-arch-auditor`,
+`page-builder`, `skill-forge`, the `i18n-*` set) remain untracked.
 
 The two Korean runbooks were adopted verbatim rather than translated. The
 laptop's `gpt-webai-pro.md` was a strict superset of the home server's — seven

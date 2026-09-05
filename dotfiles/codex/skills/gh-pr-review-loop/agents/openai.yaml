@@ -1,0 +1,4 @@
+interface:
+  display_name: "GH PR Review Loop"
+  short_description: "Resolve PR review threads and keep Codex review loops moving"
+  default_prompt: "Use $gh-pr-review-loop to inspect unresolved PR review threads, resolve stale comments, apply valid suggestions, and re-check PR status."
