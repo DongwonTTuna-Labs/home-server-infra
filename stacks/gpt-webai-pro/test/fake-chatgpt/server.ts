@@ -1,13 +1,23 @@
 import { createServer, type Server } from "node:http";
 import { pathToFileURL } from "node:url";
+import sharp from "sharp";
 export interface FakeChatGpt {
   port: number;
   baseUrl(scenario: string): string;
   close(): Promise<void>;
 }
 export async function startFakeChatGpt(port = 0): Promise<FakeChatGpt> {
+  const imageFiles = await Promise.all(["#993322", "#229933", "#332299", "#aa8800", "#0088aa"].map((background) => (
+    sharp({ create: { width: 512, height: 384, channels: 3, background } }).png().toBuffer()
+  )));
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const imageIndex = url.pathname.match(/^\/(preview|download)\/image-([0-4])\.png$/u);
+    if (imageIndex) {
+      response.writeHead(200, { "content-type": "image/png",
+        ...(imageIndex[1] === "download" ? { "content-disposition": 'attachment; filename="image.png"' } : {}) }).end(imageFiles[Number(imageIndex[2])]);
+      return;
+    }
     if (url.pathname === "/c/WEB:stale-root"
       && url.searchParams.get("scenario") === "root-redirect") {
       response.writeHead(302, { location: "/?scenario=root-redirect&redirected=1" }).end();
@@ -154,6 +164,22 @@ const PAGE = String.raw`<!doctype html>
     '<button type="button" data-testid="send-button" aria-label="Send prompt">Send</button></form>' +
     (gpt6 ? gpt6Popper : legacyPopper);
   const intelligencePill = document.getElementById('intelligence-pill');
+  // 2026-09-05 실 UI: + 메뉴는 group/text, Create image는 편집기 안에 도구 표시를 넣는다.
+  const plus = document.getElementById('composer-plus');
+  plus.addEventListener('click', () => {
+    plus.setAttribute('aria-expanded', 'true');
+    const group = document.createElement('div');
+    group.setAttribute('role', 'group');
+    const option = document.createElement('span');
+    option.textContent = 'Create image';
+    option.addEventListener('click', () => {
+      document.getElementById('prompt-textarea').replaceChildren('Create image ');
+      plus.setAttribute('aria-expanded', 'false');
+      group.remove();
+    });
+    group.append(option);
+    app.append(group);
+  });
   const intelligencePopper = document.getElementById('intelligence-popper');
   const intelligenceItems = Array.from(app.querySelectorAll('[role="menu"] [role="menuitemradio"]'));
   intelligencePill.addEventListener('click', () => {
@@ -259,6 +285,7 @@ const PAGE = String.raw`<!doctype html>
       // user 턴 마크다운 렌더로 문법 문자가 문서 전체에서 소실되는 실측 모드(2026-07-29).
       renderedPrompt = prompt.replace(/\*\*/g, '').replace(/\x60/g, '');
     }
+    if (scenario === 'image-single') renderedPrompt = prompt.replace(/\s+/g, ' ');
     const conversation = document.getElementById('conversation');
     const user = document.createElement('div');
     user.setAttribute('data-message-author-role', 'user');
@@ -267,6 +294,12 @@ const PAGE = String.raw`<!doctype html>
       ? Array.from(chips.querySelectorAll('span')).map((node) => node.textContent + '\nFile').join('\n')
       : '';
     user.textContent = attachmentPrefix ? attachmentPrefix + '\n' + renderedPrompt : renderedPrompt;
+    if (scenario === 'image-single') {
+      const toggle = document.createElement('button');
+      toggle.dataset.testid = 'collapsible-user-message-toggle';
+      toggle.textContent = 'Show moreShow less';
+      user.append(toggle);
+    }
     const assistant = document.createElement('div');
     assistant.setAttribute('data-message-author-role', 'assistant');
     assistant.setAttribute('data-message-id', scenario === 'assistant-id-rebind'
@@ -331,6 +364,73 @@ const PAGE = String.raw`<!doctype html>
     const actionBar = document.createElement('div');
     actionBar.append(copy);
     assistant.parentElement.append(actionBar);
+    if (currentScenario === 'image-set' || currentScenario === 'image-single') {
+      assistant.textContent = '';
+      const gallery = document.createElement('div');
+      let selected = 0;
+      const preview = document.createElement('div');
+      preview.setAttribute('role', 'button');
+      const previewImage = document.createElement('img');
+      previewImage.alt = currentScenario === 'image-single' ? 'Generated image: Seongsu Alley and Workshop Walk' : 'Generated image';
+      preview.setAttribute('aria-label', previewImage.alt);
+      previewImage.src = '/preview/image-0.png';
+      previewImage.width = 256;
+      previewImage.height = 192;
+      preview.append(previewImage);
+      preview.addEventListener('click', () => {
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-label', currentScenario === 'image-single' ? 'Seongsu Alley and Workshop Walk' : 'Media viewer');
+        const imageTools = document.createElement('div');
+        imageTools.setAttribute('role', 'group'); imageTools.setAttribute('aria-label', 'Image tools');
+        dialog.append(imageTools);
+        const button = document.createElement('button');
+        button.setAttribute('aria-label', 'Save');
+        button.textContent = 'Save';
+        button.addEventListener('click', () => {
+          if (currentScenario === 'image-single') {
+            const link = document.createElement('a');
+            link.href = '/download/image-' + selected + '.png'; link.download = 'image.png';
+            dialog.append(link); link.click(); link.remove();
+            return;
+          }
+          const menu = document.createElement('div');
+          menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Save');
+          const item = document.createElement('button');
+          item.setAttribute('role', 'menuitem'); item.textContent = 'Download image';
+          item.addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.href = '/download/image-' + selected + '.png';
+            link.download = 'image.png';
+            dialog.append(link); link.click(); link.remove(); menu.remove();
+          });
+          const series = document.createElement('button'); series.setAttribute('role', 'menuitem');
+          series.textContent = 'Download 5 images in this series';
+          menu.append(item, series); dialog.append(menu);
+        });
+        dialog.append(button);
+        app.append(dialog);
+        const close = (event) => { if (event.key === 'Escape') { dialog.remove(); document.removeEventListener('keydown', close); } };
+        document.addEventListener('keydown', close);
+      });
+      gallery.append(preview);
+      for (let index = 0; index < (currentScenario === 'image-single' ? 0 : 5); index += 1) {
+        const thumbnail = document.createElement('button');
+        thumbnail.dataset.imageIndex = String(index);
+        for (let layer = 0; layer < 3; layer += 1) {
+          const image = document.createElement('img'); image.alt = 'Generated image';
+          image.src = '/preview/image-' + index + '.png'; image.width = 24; image.height = 18;
+          thumbnail.append(image);
+        }
+        thumbnail.addEventListener('click', () => {
+          setTimeout(() => { selected = index; previewImage.src = '/preview/image-' + index + '.png'; }, 150);
+        });
+        gallery.append(thumbnail);
+      }
+      // 실 이미지 세트는 텍스트 메시지 노드 밖에 렌더된다.
+      assistant.parentElement.append(gallery);
+      assistant.parentElement.append(actionBar);
+    }
     if (currentScenario === 'assistant-id-rebind') {
       assistant.setAttribute(
         'data-message-id',

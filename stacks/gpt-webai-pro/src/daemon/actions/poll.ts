@@ -3,6 +3,7 @@ import { GwpError } from "../../shared/errors.js";
 import { sha256Text } from "../../shared/fsx.js";
 import type { PollParams, PollResult } from "../../shared/types.js";
 import type { BrowserSession } from "../browser.js";
+import { generatedImageControls, generatedImagesLoaded, imageAnswerActionVisible } from "./images.js";
 import {
   assistantAfter,
   answerActionVisible,
@@ -29,6 +30,7 @@ export async function pollConversation(
     throw new Error("poll promptSha256 must be 64 lower-hex characters");
   }
   const page = await bindPollPage(session, params, openConversation);
+  if (params.imageCount !== undefined) return pollImages(page, params);
   const deadline = Date.now() + params.waitMs;
   let stableText = "";
   let stableSince = 0;
@@ -76,6 +78,39 @@ export async function pollConversation(
   } while (Date.now() <= deadline);
   return { state: "generating", currentUrl: page.url(),
     ...(observedAssistantTurnId ? { assistantTurnId: observedAssistantTurnId } : {}) };
+}
+async function pollImages(page: Page, params: PollParams): Promise<PollResult> {
+  if (!params.userTurnId || !Number.isInteger(params.imageCount) || params.imageCount! < 1 || params.imageCount! > 5) {
+    throw new GwpError("turn_not_found", "image poll requires a confirmed user turn and imageCount from 1 through 5");
+  }
+  const deadline = Date.now() + params.waitMs;
+  let stableCount = -1;
+  let stableAnswer = "";
+  let stableSince = 0;
+  do {
+    const controls = await generatedImageControls(page, params.userTurnId);
+    const turns = await readTurns(page);
+    const assistant = matchingAssistant(turns, matchingUser(turns, params), params.assistantTurnId);
+    const answer = assistant ? await readAssistantAnswer(page, assistant.dataMessageId) : "";
+    const complete = !await generationActive(page)
+      && await imageAnswerActionVisible(page, controls, assistant?.dataMessageId)
+      && await generatedImagesLoaded(page, controls)
+      // 단일 이미지 재개 시에는 갤러리 이름도 아직 없는 빈 응답이 먼저 보인다.
+      && (controls.length > 0 || Boolean(answer.trim()));
+    if (complete) {
+      if (controls.length !== stableCount || answer !== stableAnswer) {
+        stableCount = controls.length; stableAnswer = answer; stableSince = Date.now();
+      }
+      else if (Date.now() - stableSince >= (controls.length ? STABLE_GAP_MS : ARTIFACT_GRACE_MS)) return {
+        state: "complete", currentUrl: page.url(), answerMarkdown: answer, answerSha256: sha256Text(answer),
+        ...(assistant?.dataMessageId ? { assistantTurnId: assistant.dataMessageId } : {}),
+        artifactControls: controls.map((_, index) => ({ index, label: `Generated image ${index + 1}` })),
+      };
+    } else { stableCount = -1; stableSince = 0; }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(Math.min(250, Math.max(1, deadline - Date.now())));
+  } while (Date.now() <= deadline);
+  return { state: "generating", currentUrl: page.url() };
 }
 async function settledArtifactControls(
   page: Page, assistantTurnId: string, artifactHint: boolean, pollDeadline: number,

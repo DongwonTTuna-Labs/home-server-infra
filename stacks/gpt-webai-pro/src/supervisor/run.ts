@@ -2,7 +2,8 @@ import { access, copyFile, readFile, readdir, rm, stat } from "node:fs/promises"
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { actionEnvelope, completeEnvelope, failedEnvelope, networkFailureEnvelope, recoveringEnvelope, runningEnvelope } from "../cli/envelope.js";
-import { GwpError, errorMessage, isDirectNetworkFailure, type PublicErrorKind } from "../shared/errors.js";
+import { GwpError, InputError, errorMessage, isDirectNetworkFailure, type PublicErrorKind } from "../shared/errors.js";
+export { InputError } from "../shared/errors.js";
 import {
   acquireFileLock,
   appendJsonLine,
@@ -15,8 +16,9 @@ import {
   tryAcquireFileLock,
   type FileLock,
 } from "../shared/fsx.js";
-import { newRequestId } from "../shared/ids.js";
-import type { Envelope, PollResult, PublicArtifact, ReadinessResult, ReconcileResult, RequestRow, RpcFile, SendProgress, SendResult, SlotConfig, SlotState, SlotsConfig } from "../shared/types.js";
+import { isImageBatchId, newImageBatchId, newRequestId } from "../shared/ids.js";
+import type { Envelope, ImageBatchEnvelope, ImagePrompt, PollResult, PublicArtifact, ReadinessResult, ReconcileResult, RequestRow, RpcFile, SendProgress, SendResult, SlotConfig, SlotState, SlotsConfig } from "../shared/types.js";
+import { imageChunkPrompt, inspectImageFile, parseImageManifest, splitImageChunks } from "./image-batch.js";
 import { GwpDatabase } from "./db.js";
 import { DockerManager, mapContainerOutboxPath } from "./docker.js";
 import { RpcClient } from "./rpc-client.js";
@@ -39,6 +41,9 @@ const SEND_RPC_INACTIVITY_MS = envMs("GWP_SEND_INACTIVITY_MS", 120_000);
 function envMs(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+function validateTimeout(value: number): void {
+  if (!Number.isFinite(value) || value < 0) throw new InputError("timeout-seconds must be a non-negative number");
 }
 export async function waitForOwnerLock<Lock>(options: {
   tryLock: () => Promise<Lock | null>;
@@ -65,9 +70,6 @@ export async function waitForOwnerLock<Lock>(options: {
 interface ValidatedFile {
   source: string;
   name: string;
-}
-export class InputError extends Error {
-  override readonly name = "InputError";
 }
 export class LoginTimeoutError extends Error {
   override readonly name = "LoginTimeoutError";
@@ -130,6 +132,99 @@ export class Supervisor {
   async resume(id: string, timeoutSeconds: number): Promise<Envelope> {
     if (!this.db.getRequest(id)) throw new InputError(`unknown session: ${id}`);
     return this.continue(id, timeoutSeconds);
+  }
+  async runImageBatch(manifest: unknown, files: string[], timeoutSeconds: number): Promise<ImageBatchEnvelope> {
+    const { images } = parseImageManifest(manifest);
+    validateTimeout(timeoutSeconds);
+    const validated = await validateFiles(files);
+    const id = newImageBatchId();
+    const chunks = splitImageChunks(images).map((items, index) => ({
+      requestId: newRequestId(), items, prompt: imageChunkPrompt(id, index, items),
+    }));
+    // DB에 staged를 노출하기 전에 모든 입력을 복사한다. 도중 중단된 디렉터리는 전송되지 않는다.
+    for (const chunk of chunks) {
+      await atomicWrite(path.join(this.requestDir(chunk.requestId), "prompt.md"), chunk.prompt);
+      await this.persistAttachments(chunk.requestId, validated);
+    }
+    this.db.createImageBatch(id, chunks.map((chunk) => ({ ...chunk, promptSha256: sha256Text(chunk.prompt.trim()) })));
+    this.log(chunks[0]!.requestId, "staged", `image batch ${id}: ${chunks.length} chunks, ${images.length} images, Xhigh`);
+    return this.resumeImageBatch(id, timeoutSeconds);
+  }
+  async resumeImageBatch(id: string, timeoutSeconds: number): Promise<ImageBatchEnvelope> {
+    validateTimeout(timeoutSeconds);
+    if (!isImageBatchId(id) || !this.db.imageChunks(id).length) throw new InputError(`unknown image batch: ${id}`);
+    const lock = await tryAcquireFileLock(path.join(this.stateDir, "image-batches", id, "owner.lock"));
+    if (!lock) return this.imageBatchEnvelope(id, "batch is already being processed");
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    try {
+      for (const chunk of this.db.imageChunks(id)) {
+        if (this.requireRequest(chunk.request_id).status === "complete") continue;
+        if (Date.now() >= deadline) break;
+        const result = await this.continue(chunk.request_id, Math.max(0, deadline - Date.now()) / 1_000);
+        if (result.status !== "complete") return this.imageBatchEnvelope(id, result.message, result);
+      }
+      return this.imageBatchEnvelope(id);
+    } finally { await lock.release(); }
+  }
+  private imageItems(requestId: string): ImagePrompt[] | undefined {
+    const chunk = this.db.imageChunkForRequest(requestId);
+    return chunk ? JSON.parse(chunk.items_json) as ImagePrompt[] : undefined;
+  }
+  private async imageBatchEnvelope(id: string, message: string | null = null, latest?: Envelope): Promise<ImageBatchEnvelope> {
+    const chunks: ImageBatchEnvelope["chunks"] = [];
+    const artifacts: ImageBatchEnvelope["artifacts"] = [];
+    for (const chunk of this.db.imageChunks(id)) {
+      const items = this.imageItems(chunk.request_id)!;
+      const result = latest?.sessionId === chunk.request_id ? latest : await this.envelopeFor(this.requireRequest(chunk.request_id));
+      chunks.push({ index: chunk.ordinal + 1, imageIds: items.map((item) => item.id), result });
+      for (const item of items) {
+        const artifact = this.db.listArtifacts(chunk.request_id).find((entry) => entry.filename.startsWith(`${item.id}.`));
+        if (artifact) artifacts.push({ promptId: item.id, filename: artifact.filename, path: artifact.path, sha256: artifact.sha256, sizeBytes: artifact.size_bytes });
+      }
+    }
+    const allComplete = chunks.every((chunk) => chunk.result.status === "complete");
+    return {
+      ok: chunks.every((chunk) => chunk.result.ok),
+      status: allComplete ? "complete" : latest?.status ?? chunks.find((chunk) => chunk.result.status !== "complete")?.result.status ?? "running",
+      batchId: id, resumeCommand: `gpt-webai-pro image-batch --batch ${id}`,
+      expectedImages: chunks.reduce((sum, chunk) => sum + chunk.imageIds.length, 0),
+      downloadedImages: artifacts.length, chunks, artifacts, message,
+    };
+  }
+  async inspect(options: { slotId?: string; sessionId?: string; openTools?: boolean; selectImageTool?: boolean; imagePrompt?: string; openImageIndex?: number }) {
+    const request = options.sessionId ? this.requireRequest(options.sessionId) : null;
+    if (request && (!request.slot_id || !request.conversation_url)) {
+      throw new InputError("session has no confirmed conversation to inspect");
+    }
+    if (options.openImageIndex !== undefined && (!request || !this.imageItems(request.id))) throw new InputError("--open-image-index requires an image batch session");
+    const slot = this.requireSlotConfig(request?.slot_id ?? options.slotId ?? "");
+    if (!request && this.db.countActiveForSlot(slot.id) > 0) throw new InputError("slot has active requests; inspect a specific session");
+    const activityLock = await tryAcquireFileLock(this.slotActivityLockPath(slot.id));
+    if (!activityLock) throw new InputError("slot is in use; retry inspection after the current browser operation");
+    let client: RpcClient | null = null;
+    let wasRunning: boolean | null = null;
+    try {
+      if (slot.unmanaged !== true) wasRunning = (await this.docker.inspect(slot.id)).running;
+      client = await this.connectDaemon(slot);
+      const result = await client.call("inspect", {
+        ...(request?.conversation_url ? { conversationUrl: request.conversation_url } : {}),
+        ...(options.openTools ? { openTools: true } : {}),
+        ...(options.selectImageTool ? { selectImageTool: true } : {}),
+        ...(options.imagePrompt ? { imagePrompt: options.imagePrompt } : {}),
+        ...(options.openImageIndex !== undefined ? { openImageIndex: options.openImageIndex, userTurnId: this.db.latestAttempt(request!.id)!.user_turn_id! } : {}),
+      }, 60_000);
+      return {
+        ...result,
+        screenshotPath: slot.unmanaged === true ? result.screenshotPath
+          : mapContainerOutboxPath(result.screenshotPath, this.docker.paths(slot.id).outbox),
+        snapshotPath: slot.unmanaged === true ? result.snapshotPath
+          : mapContainerOutboxPath(result.snapshotPath, this.docker.paths(slot.id).outbox),
+      };
+    } finally {
+      if (client) await client.close();
+      await activityLock.release();
+      if (wasRunning === false) await this.stopSlotIfNoLiveOwners(slot, undefined, true);
+    }
   }
   async status(): Promise<{
     ok: true;
@@ -643,7 +738,8 @@ export class Supervisor {
       let lastProgress: SendProgress | undefined;
       let lastLoggedStep: string | undefined;
       try {
-        const result = await client.call("send", { prompt, files, ...(conversationUrl ? { conversationUrl } : {}) }, {
+        const imageCount = this.imageItems(request.id)?.length;
+        const result = await client.call("send", { prompt, files, ...(conversationUrl ? { conversationUrl } : {}), ...(imageCount ? { imageCount } : {}) }, {
           timeoutMs: SEND_RPC_MAX_MS,
           inactivityMs: SEND_RPC_INACTIVITY_MS,
           onProgress: (progress) => {
@@ -861,6 +957,7 @@ export class Supervisor {
           ...(attempt.user_turn_id ? { userTurnId: attempt.user_turn_id } : {}),
           ...(attempt.assistant_turn_id ? { assistantTurnId: attempt.assistant_turn_id } : {}),
           waitMs: Math.min(60_000, Math.max(0, remaining)),
+          ...(this.imageItems(request.id) ? { imageCount: this.imageItems(request.id)!.length } : {}),
         }, Math.min(65_000, Math.max(5_000, remaining + 5_000)));
         current = this.updateConversationPointer(current, result.currentUrl);
         if (result.assistantTurnId && attempt.user_turn_id) {
@@ -938,14 +1035,22 @@ export class Supervisor {
         await client.close().catch(() => undefined);
         return this.envelopeFor(current);
       }
+      const imageItems = this.imageItems(request.id);
       if (result.answerMarkdown === undefined || !result.answerSha256
-        || sha256Text(result.answerMarkdown) !== result.answerSha256 || (!result.answerMarkdown && !result.artifactControls?.length)) {
+        || sha256Text(result.answerMarkdown) !== result.answerSha256 || (!imageItems && !result.answerMarkdown && !result.artifactControls?.length)) {
         throw new Error("daemon returned an invalid complete answer");
       }
       const answerPath = path.join(this.requestDir(request.id), "answer.md");
       await atomicWrite(answerPath, result.answerMarkdown);
       const failedControls: string[] = [];
-      for (const control of result.artifactControls ?? []) {
+      const controls = result.artifactControls ?? [];
+      // 일부 썸네일이 아직 없으면 뒤 이미지의 index가 앞당겨질 수 있다.
+      // 전체 개수를 확인하기 전에는 응답 순서에 입력 ID를 결속하지 않는다.
+      const canBindImageIds = !imageItems || controls.length === imageItems.length;
+      for (const [outputIndex, control] of (canBindImageIds ? controls : []).entries()) {
+        const imageItem = imageItems?.[outputIndex];
+        if (imageItems && !imageItem) continue;
+        if (imageItem && this.db.listArtifacts(request.id).some((item) => item.filename.startsWith(`${imageItem.id}.`))) continue;
         let stored = false;
         let lastFailure = "";
         for (let attempt = 1; attempt <= 2 && !stored; attempt += 1) {
@@ -953,18 +1058,33 @@ export class Supervisor {
             const downloaded = await client.call("download", {
               conversationUrl: this.requireRequest(request.id).conversation_url!,
               controlIndex: control.index,
+              ...(control.assistantTurnId ?? result.assistantTurnId ? { assistantTurnId: control.assistantTurnId ?? result.assistantTurnId } : {}),
+              ...(imageItems ? { imageCount: imageItems.length } : {}),
+              ...(imageItems && this.db.latestAttempt(request.id)?.user_turn_id ? { userTurnId: this.db.latestAttempt(request.id)!.user_turn_id! } : {}),
             }, 45_000);
-            await this.storeArtifact(request, slot, downloaded);
+            await this.storeArtifact(request, slot, downloaded, imageItem?.id);
             stored = true;
           } catch (error) {
             lastFailure = errorMessage(error);
           }
         }
-        if (!stored) failedControls.push(`${control.label}: ${lastFailure}`);
+        if (!stored) {
+          failedControls.push(`${control.label}: ${lastFailure}`);
+          if (imageItems) break;
+        }
       }
       const artifactMessage = failedControls.length > 0
         ? `${failedControls.length} artifact control(s) failed after two attempts: ${failedControls.join("; ")}`
         : null;
+      if (imageItems && ((result.artifactControls?.length ?? 0) !== imageItems.length
+        || this.db.listArtifacts(request.id).length !== imageItems.length || failedControls.length)) {
+        const message = `expected ${imageItems.length} images; observed ${result.artifactControls?.length ?? 0} controls, saved ${this.db.listArtifacts(request.id).length}. ${artifactMessage ?? "Resume to recheck this response; no regeneration is sent."}`;
+        this.db.updateRequest(request.id, { error_kind: "image_incomplete", error_detail: message });
+        await client.close();
+        return { ...actionEnvelope(request.id, "image_incomplete", message, true),
+          ...(result.answerMarkdown ? { answer: result.answerMarkdown, answerPath, answerSha256: result.answerSha256 } : {}),
+          artifacts: this.publicArtifacts(request.id) };
+      }
       const completed = this.db.connection.prepare(`
         UPDATE requests
         SET status = 'complete', answer_sha256 = ?, error_kind = NULL,
@@ -992,6 +1112,13 @@ export class Supervisor {
     try {
       const current = this.requireRequest(requestId);
       if (current.status !== "generating") return this.envelopeFor(current);
+      if (this.imageItems(requestId)) {
+        this.db.updateRequest(requestId, { error_kind: "image_poll_failed", error_detail: detail });
+        // 이미 전송된 이미지 요청의 브라우저/연결 오류는 생성 재시도의 근거가 아니다.
+        return errorKind === "network_disconnected"
+          ? { ...networkFailureEnvelope(requestId, detail), resumeCommand: `gpt-webai-pro resume --session ${requestId}`, artifacts: this.publicArtifacts(requestId) }
+          : { ...actionEnvelope(requestId, "image_poll_failed", detail, true), artifacts: this.publicArtifacts(requestId) };
+      }
       this.db.connection.prepare(`
         UPDATE requests
         SET status = 'failed', error_kind = ?, error_detail = ?, updated_at = ?
@@ -1009,13 +1136,14 @@ export class Supervisor {
     request: RequestRow,
     slot: SlotConfig,
     downloaded: { filename: string; outboxPath: string; sha256: string; sizeBytes: number },
+    imageId?: string,
   ): Promise<void> {
     const managed = slot.unmanaged !== true;
     const source = managed
       ? mapContainerOutboxPath(downloaded.outboxPath, this.docker.paths(slot.id).outbox)
       : downloaded.outboxPath;
     try {
-      const filename = path.basename(downloaded.filename);
+      let filename = path.basename(downloaded.filename);
       if (!filename || filename !== downloaded.filename || filename === "." || filename === "..") {
         throw new Error("daemon returned an unsafe artifact filename");
       }
@@ -1023,6 +1151,7 @@ export class Supervisor {
         || await fileSize(source) !== downloaded.sizeBytes) {
         throw new Error("artifact metadata does not match outbox bytes");
       }
+      if (imageId) filename = `${imageId}.${(await inspectImageFile(source)).extension}`;
       const target = path.join(this.requestDir(request.id), "artifacts", filename);
       try {
         await access(target);
@@ -1126,11 +1255,19 @@ export class Supervisor {
       }
       return failedEnvelope(request.id, request.error_kind ?? "internal", request.error_detail ?? "request failed");
     }
-    if (request.status === "generating") return runningEnvelope(request.id);
+    if (request.status === "generating") return {
+      ...(["image_incomplete", "image_poll_failed"].includes(request.error_kind ?? "")
+        ? actionEnvelope(request.id, request.error_kind, request.error_detail ?? "images are incomplete", true)
+        : runningEnvelope(request.id)),
+      artifacts: this.publicArtifacts(request.id),
+    };
     if (request.status === "uncertain") {
       return actionEnvelope(request.id, "send_uncertain", request.error_detail ?? "send state is uncertain", true);
     }
     return recoveringEnvelope(request.id, "pool_busy", "request is waiting for a slot");
+  }
+  private publicArtifacts(requestId: string): PublicArtifact[] {
+    return this.db.listArtifacts(requestId).map((item) => ({ filename: item.filename, path: item.path, sha256: item.sha256, sizeBytes: item.size_bytes }));
   }
   private async releaseRuntime(request: RequestRow, client: RpcClient | null = null): Promise<void> {
     if (!request.slot_id || ACTIVE_STATUSES.has(request.status)) return;
@@ -1492,6 +1629,7 @@ function defaultStateDir(): string {
   return path.join(base, "gpt-webai-pro");
 }
 function defaultConfigPath(): string {
+  if (process.env.GWP_CONFIG_PATH) return path.resolve(process.env.GWP_CONFIG_PATH);
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../config/slots.json");
 }
 function isValidConversationPointer(value: string): boolean {

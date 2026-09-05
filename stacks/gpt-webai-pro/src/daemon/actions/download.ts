@@ -5,6 +5,8 @@ import { GwpError } from "../../shared/errors.js";
 import { fileSize, mkdirp, sha256File } from "../../shared/fsx.js";
 import type { DownloadParams, DownloadResult } from "../../shared/types.js";
 import type { BrowserSession } from "../browser.js";
+import { imagePreviewControl, imageViewer } from "./images.js";
+import { captureInspection } from "./inspect.js";
 import {
   FILENAME_PATTERN,
   PANEL_DOWNLOAD_SELECTOR,
@@ -26,13 +28,37 @@ export class ArtifactDownloader {
     session: BrowserSession,
     params: DownloadParams,
   ): Promise<DownloadResult> {
-    const key = `${params.conversationUrl}\n${params.controlIndex}`;
+    const key = `${params.conversationUrl}\n${params.assistantTurnId ?? "latest"}\n${params.controlIndex}`;
     const attempt = (this.attempts.get(key) ?? 0) + 1;
-    if (attempt > 2) throw new GwpError("artifact_failed", "artifact control exceeded two attempts");
-    this.attempts.set(key, attempt);
+    // 이미지 모드는 supervisor가 호출당 2회 제한한다. resume의 다운로드 재시도는 허용한다.
+    if (!params.imageCount) {
+      if (attempt > 2) throw new GwpError("artifact_failed", "artifact control exceeded two attempts");
+      this.attempts.set(key, attempt);
+    }
     const page = await session.findConversationPage(params.conversationUrl)
       ?? await session.open(params.conversationUrl);
-    const controls = await artifactControlLocators(page);
+    if (params.imageCount) {
+      if (!params.userTurnId) throw new GwpError("artifact_failed", "image download requires its confirmed user turn");
+      // 중단된 다운로드가 뷰어를 남겼더라도 새 생성 없이 원래 갤러리에서 재개한다.
+      await page.keyboard.press("Escape");
+      const preview = await imagePreviewControl(page, params.userTurnId, params.controlIndex);
+      try {
+        await preview.click();
+        // 2026-09-05 실측: 이미지 원본 뷰어는 파일 패널과 달리 Save 버튼이다.
+        const viewer = imageViewer(page);
+        await viewer.waitFor({ state: "visible", timeout: 10_000 });
+        const save = viewer.getByRole("button", { name: /^(Save|저장)$/u });
+        return await downloadArtifactControl(page, { locator: save, kind: "image", label: `image-${params.controlIndex + 1}.png` }, this.outboxDir, params.controlIndex);
+      } catch (error) {
+        const diagnostic = await captureInspection(page, this.outboxDir)
+          .then(result => result.snapshotPath, cause => `capture failed: ${String(cause)}`);
+        throw new GwpError("artifact_failed", `${String(error)}; image diagnostic: ${diagnostic}`, { cause: error });
+      } finally {
+        // 원본 뷰어를 닫아 다음 썸네일을 같은 대화에서 선택한다.
+        await page.keyboard.press("Escape");
+      }
+    }
+    const controls = await artifactControlLocators(page, params.assistantTurnId, true);
     const control = controls[params.controlIndex];
     if (!control) throw new GwpError("artifact_failed", `artifact control ${params.controlIndex} is absent`);
     return downloadArtifactControl(page, control, this.outboxDir, params.controlIndex);
@@ -66,6 +92,24 @@ export async function downloadArtifactControl(
   }
 }
 async function triggerDownload(page: Page, control: ArtifactControlLocator): Promise<Download> {
+  if (control.kind === "image") {
+    // 단일 이미지 Save는 직접 다운로드, 다중 세트 Save는 메뉴를 연다.
+    // 어느 쪽이든 Save 클릭 전에 이벤트를 등록해 원본을 놓치지 않는다.
+    const event = page.waitForEvent("download", { timeout: PANEL_DOWNLOAD_MS });
+    let settled = false;
+    void event.then(() => { settled = true; }, () => { settled = true; });
+    await control.locator.click({ timeout: 10_000 });
+    const item = page.getByRole("menu", { name: /^(Save|저장)$/u })
+      .getByRole("menuitem", { name: /^(Download image|이미지 다운로드)$/u });
+    while (!settled) {
+      if (await item.isVisible()) {
+        await item.click({ timeout: 10_000 });
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    return event;
+  }
   if (control.kind === "inline") {
     const event = page.waitForEvent("download", { timeout: PANEL_DOWNLOAD_MS });
     await control.locator.click({ timeout: 10_000 }).catch((error) => {

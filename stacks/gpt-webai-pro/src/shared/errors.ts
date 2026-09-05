@@ -8,6 +8,9 @@ const PUBLIC_ERROR_KINDS = [
   "network_disconnected",
   "internal",
 ] as const;
+export class InputError extends Error {
+  override readonly name = "InputError";
+}
 export type PublicErrorKind = (typeof PUBLIC_ERROR_KINDS)[number];
 export const DAEMON_ERROR_KINDS = [
   "needs_login",

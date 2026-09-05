@@ -10,6 +10,8 @@ import type {
   SlotConfig,
   SlotRow,
   UsageEventRow,
+  ImageChunkRow,
+  ImagePrompt,
 } from "../shared/types.js";
 const SLOTS_DDL = `
 CREATE TABLE slots (
@@ -29,6 +31,15 @@ CREATE TABLE usage_events (
   sent_at     INTEGER NOT NULL
 );
 CREATE INDEX usage_events_slot_sent ON usage_events (slot_id, sent_at);`;
+const IMAGE_BATCH_DDL = `
+CREATE TABLE image_batches (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+CREATE TABLE image_chunks (
+  batch_id TEXT NOT NULL REFERENCES image_batches(id),
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  request_id TEXT NOT NULL UNIQUE REFERENCES requests(id),
+  items_json TEXT NOT NULL CHECK (json_valid(items_json) AND json_array_length(items_json) BETWEEN 1 AND 5),
+  PRIMARY KEY (batch_id, ordinal)
+);`;
 const DDL = `
 CREATE TABLE requests (
   id            TEXT PRIMARY KEY,
@@ -60,6 +71,7 @@ CREATE TABLE artifacts (
 );
 ${SLOTS_DDL}
 ${USAGE_DDL}
+${IMAGE_BATCH_DDL}
 `;
 type RequestPatch = Partial<Pick<
   RequestRow,
@@ -82,11 +94,11 @@ export class GwpDatabase {
     connection.pragma("busy_timeout = 5000");
     connection.pragma("foreign_keys = ON");
     const current = Number(connection.pragma("user_version", { simple: true }));
-    if (current > 3) {
+    if (current > 4) {
       connection.close();
       throw new Error(`unsupported database user_version ${current}`);
     }
-    if (current < 3) {
+    if (current < 4) {
       connection.exec("BEGIN IMMEDIATE");
       try {
         if (current === 0) connection.exec(DDL);
@@ -101,9 +113,10 @@ export class GwpDatabase {
             DROP TABLE slots_v1;
           `);
           // v2 → v3: 주간 사용량 원장 추가 (기존 행은 계상하지 않는다 — 과거 전송은 증거가 없다).
-          connection.exec(USAGE_DDL);
+          if (current < 3) connection.exec(USAGE_DDL);
+          connection.exec(IMAGE_BATCH_DDL);
         }
-        connection.pragma("user_version = 3");
+        connection.pragma("user_version = 4");
         connection.exec("COMMIT");
       } catch (error) {
         connection.exec("ROLLBACK");
@@ -115,6 +128,22 @@ export class GwpDatabase {
   }
   close(): void {
     this.connection.close();
+  }
+  createImageBatch(id: string, chunks: Array<{ requestId: string; promptSha256: string; items: ImagePrompt[] }>): void {
+    this.immediate(() => {
+      this.connection.prepare("INSERT INTO image_batches VALUES (?, ?)").run(id, Date.now());
+      const insert = this.connection.prepare("INSERT INTO image_chunks VALUES (?, ?, ?, ?)");
+      for (const [index, chunk] of chunks.entries()) {
+        this.createRequest(chunk.requestId, chunk.promptSha256);
+        insert.run(id, index, chunk.requestId, JSON.stringify(chunk.items));
+      }
+    });
+  }
+  imageChunks(id: string): ImageChunkRow[] {
+    return this.connection.prepare("SELECT * FROM image_chunks WHERE batch_id = ? ORDER BY ordinal").all(id) as ImageChunkRow[];
+  }
+  imageChunkForRequest(id: string): ImageChunkRow | undefined {
+    return this.connection.prepare("SELECT * FROM image_chunks WHERE request_id = ?").get(id) as ImageChunkRow | undefined;
   }
   immediate<T>(operation: () => T): T {
     this.connection.exec("BEGIN IMMEDIATE");

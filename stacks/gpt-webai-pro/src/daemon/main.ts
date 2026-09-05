@@ -10,6 +10,7 @@ import {
   SEND_PROGRESS_METHOD,
   type CloseConversationParams,
   type DownloadParams,
+  type InspectParams,
   type LabelConfig,
   type PollParams,
   type ReconcileParams,
@@ -19,6 +20,7 @@ import {
   type SendResult,
 } from "../shared/types.js";
 import { ArtifactDownloader } from "./actions/download.js";
+import { inspectConversation } from "./actions/inspect.js";
 import { pollConversation } from "./actions/poll.js";
 import { reconcileSend } from "./actions/reconcile.js";
 import { sendMessage } from "./actions/send.js";
@@ -130,6 +132,7 @@ async function handleMessage(
   options: {
     session: BrowserSession;
     labels: LabelConfig;
+    outboxDir: string;
   },
   downloader: ArtifactDownloader,
   enqueueMutation: EnqueueMutation,
@@ -188,6 +191,7 @@ async function dispatch(
   options: {
     session: BrowserSession;
     labels: LabelConfig;
+    outboxDir: string;
   },
   downloader: ArtifactDownloader,
   enqueueMutation: EnqueueMutation,
@@ -269,6 +273,10 @@ async function dispatch(
     case "download":
       return enqueueMutation(() => (
         downloader.download(options.session, request.params as DownloadParams)
+      ));
+    case "inspect":
+      return enqueueMutation(() => inspectConversation(
+        options.session, request.params as InspectParams, options.outboxDir,
       ));
     case "closeConversation": {
       await enqueueMutation(() => (

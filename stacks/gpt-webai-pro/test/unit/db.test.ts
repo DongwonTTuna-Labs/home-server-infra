@@ -49,19 +49,19 @@ CREATE TABLE slots (
 );
 PRAGMA user_version = 1;
 `;
-test("new databases use the v3 schema, pragmas, constraints, and helpers", async (t) => {
+test("new databases use the v4 schema, pragmas, constraints, and helpers", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-db-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const db = await GwpDatabase.open(path.join(directory, "db.sqlite"));
   t.after(() => db.close());
-  assert.equal(db.connection.pragma("user_version", { simple: true }), 3);
+  assert.equal(db.connection.pragma("user_version", { simple: true }), 4);
   assert.equal(db.connection.pragma("journal_mode", { simple: true }), "wal");
   assert.equal(db.connection.pragma("busy_timeout", { simple: true }), 5000);
   assert.equal(db.connection.pragma("foreign_keys", { simple: true }), 1);
   const tables = db.connection.prepare(`
     SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name
   `).all().map((row) => (row as { name: string }).name);
-  assert.deepEqual(tables, ["artifacts", "requests", "send_attempts", "slots", "usage_events"]);
+  assert.deepEqual(tables, ["artifacts", "image_batches", "image_chunks", "requests", "send_attempts", "slots", "usage_events"]);
   db.syncSlots([{ id: "slot-a", account: "a", port: 19301 }]);
   assert.equal(db.getSlot("slot-a")?.state, "idle");
   assert.throws(
@@ -103,7 +103,7 @@ test("new databases use the v3 schema, pragmas, constraints, and helpers", async
   assert.deepEqual(db.listUsage("slot-a"), [{ request_id: request.id, slot_id: "slot-a", model_label: "6 Pro", sent_at: 1_000 }]);
   assert.throws(() => db.recordUsage("req_0000000000000009", "slot-a", null, 5), /FOREIGN KEY/);
 });
-test("v1 busy slots migrate to v3 idle without losing request data", async (t) => {
+test("v1 busy slots migrate to v4 idle without losing request data", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-db-v1-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const filename = path.join(directory, "db.sqlite");
@@ -131,7 +131,7 @@ test("v1 busy slots migrate to v3 idle without losing request data", async (t) =
   `).run();
   v1.close();
   const migrated = await GwpDatabase.open(filename);
-  assert.equal(migrated.connection.pragma("user_version", { simple: true }), 3);
+  assert.equal(migrated.connection.pragma("user_version", { simple: true }), 4);
   assert.equal(migrated.countUsageSince("slot-a", 0), 0);
   assert.equal(migrated.getRequest("req_0000000000000002")?.conversation_url,
     "https://chatgpt.com/c/old");
@@ -158,7 +158,7 @@ test("v1 busy slots migrate to v3 idle without losing request data", async (t) =
   migrated.close();
   const reopened = await GwpDatabase.open(filename);
   t.after(() => reopened.close());
-  assert.equal(reopened.connection.pragma("user_version", { simple: true }), 3);
+  assert.equal(reopened.connection.pragma("user_version", { simple: true }), 4);
   assert.equal(reopened.getSlot("slot-a")?.state, "idle");
   assert.equal(reopened.listAttempts("req_0000000000000002").length, 1);
 });
@@ -183,6 +183,29 @@ test("slot config sync preserves active orphans and removes inactive ones", asyn
   assert.deepEqual(db.listSlots().map((slot) => slot.id), ["slot-a"]);
   assert.equal(db.getRequest("req_0000000000000003")?.slot_id, "slot-b");
   db.close();
+});
+
+test("v3 migrates to v4 with usage preserved and batch creation rolls back atomically", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-db-v3-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filename = path.join(directory, "db.sqlite");
+  const initial = await GwpDatabase.open(filename);
+  initial.syncSlots([{ id: "slot-a", account: "a", port: 19301 }]);
+  initial.createRequest("req_0000000000000020", "b".repeat(64), 10);
+  initial.recordUsage("req_0000000000000020", "slot-a", "Pro", 11);
+  initial.connection.exec("DROP TABLE image_chunks; DROP TABLE image_batches; PRAGMA user_version = 3;");
+  initial.close();
+  const db = await GwpDatabase.open(filename);
+  t.after(() => db.close());
+  assert.equal(db.connection.pragma("user_version", { simple: true }), 4);
+  assert.equal(db.countUsageSince("slot-a", 0), 1);
+  const chunk = { requestId: "req_0000000000000021", promptSha256: "c".repeat(64), items: [{ id: "one", prompt: "draw one" }] };
+  assert.throws(() => db.createImageBatch("img_0000000000000001", [chunk, chunk]), /UNIQUE/);
+  assert.equal(db.getRequest(chunk.requestId), undefined);
+  assert.deepEqual(db.imageChunks("img_0000000000000001"), []);
+  db.createImageBatch("img_0000000000000001", [chunk]);
+  assert.equal(db.imageChunks("img_0000000000000001")[0]?.request_id, chunk.requestId);
+  assert.equal(db.imageChunkForRequest(chunk.requestId)?.ordinal, 0);
 });
 test("reap candidates exclude staged requests and rotate by the last reap attempt", async () => {
   const db = await GwpDatabase.open(":memory:");

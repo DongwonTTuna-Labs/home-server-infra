@@ -3,7 +3,7 @@
 `gpt-webai-pro`는 ChatGPT **Pro Extended** 웹 세션에 프롬프트와 첨부를 보내고, 완료된
 답변과 ChatGPT가 렌더한 다운로드 파일을 로컬 state directory에 보존합니다. 슬롯 하나는
 계정 하나이자 Chromium profile 하나이며, 슬롯 안에서는 요청별 탭으로 최대 3개 요청을
-동시에 처리합니다. Thinking/xhigh 경로와 다른 모델 fallback은 제공하지 않습니다.
+동시에 처리합니다. 일반 텍스트 위임은 Pro이며, `image-batch`는 전용 Xhigh 이미지 생성 경로입니다. 다른 모델로 자동 대체하지 않습니다.
 
 ## 설치
 
@@ -33,7 +33,7 @@ ln -sfn "$PWD/bin/gpt-webai-pro" ~/.local/bin/gptpro
 기본 state root는
 `${GPT_WEBAI_PRO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/gpt-webai-pro}`입니다.
 이미지 이름, 슬롯당 동시성, 슬롯/계정/loopback 포트 매핑은 `config/slots.json`, UI의
-Intelligence 라벨과 단일 `Pro` 목표는 `config/labels.json`에서 관리합니다. 기본 구성은
+Intelligence 라벨과 일반 텍스트 요청의 `Pro` 목표는 `config/labels.json`에서 관리합니다. 기본 구성은
 `slot-a`, `slot-b`, `slot-c`, `slot-d` 네 계정과 포트 19301–19304입니다.
 
 별도 작업본을 병렬로 실행할 때는 state root뿐 아니라 슬롯 ID와 daemon 포트도 분리합니다.
@@ -48,6 +48,59 @@ supervisor는 `/profile`, `/inbox`, `/outbox`의 bind source를 현재 state의 
 ```bash
 docker build -f container/Dockerfile -t home-server/gpt-webai-pro-slot:latest .
 ```
+
+## Xhigh 이미지 배치
+
+`image-batch`는 별도 유료 API 없이 ChatGPT 웹 이미지 도구로 프롬프트당 한 장을 생성합니다.
+청크마다 새 대화를 만들며, 한 청크는 최대 5장이고 순차 처리합니다. 9개 프롬프트는 5+4 청크가 됩니다.
+생각 강도는 **Pro 바로 아래 Xhigh**입니다. 구 UI에서는 `Extra High`, GPT-6 UI에서는
+최대값에서 한 칸 아래 `Extended`를 선택하고 표시 라벨을 재검증합니다.
+일반 `run`의 Pro 선택은 그대로이며 폐기한 `gptxhigh` 실행기를 재사용하지 않습니다.
+
+```json
+{"images":[{"id":"map-home","prompt":"첫 화면의 전체 제작 지시"},{"id":"itinerary","prompt":"두 번째 화면의 전체 제작 지시"}]}
+```
+
+ID는 영숫자로 시작하는 1–80자의 영숫자·하이픈·밑줄이며 대소문자를 무시해 유일해야 합니다.
+전체 제작 근거와 프롬프트 목록을 ZIP으로 묶고 내용 설명을 함께 넣으십시오. 첨부는 외부로
+업로드되므로 자격증명·개인정보를 포함하지 않습니다.
+
+```bash
+gpt-webai-pro image-batch --manifest ./images.json --file ./context.zip --timeout-seconds 600
+gpt-webai-pro image-batch --batch img_0123456789abcdef --timeout-seconds 600
+# 전송 없이 입력만 영속화하고 배치 ID를 받기
+gpt-webai-pro image-batch --manifest ./images.json --file ./context.zip --timeout-seconds 0
+```
+
+배치 JSON은 `batchId`, `status`, `resumeCommand`, `expectedImages`, `downloadedImages`,
+`chunks`(각 청크의 기존 request envelope), `artifacts`를 반환합니다. 사용법 오류는 다른 관리
+명령과 같이 `{ok:false,error}`와 exit 2입니다. 타임아웃·모호한 전송은 새 배치를 만들지 말고
+반환된 **배치 ID**로 재개합니다. 이미 끝난 청크는 건너뛰며, 전송 후 중단된 요청은 기존
+앵커로 확인합니다. 다운로드 실패는 같은 응답에서 다시 받으며 생성 프롬프트를 다시 보내지 않습니다.
+
+이미지 파일은 실제 브라우저 다운로드 이벤트로 받습니다. PNG/JPEG/WebP의 전체 픽셀이
+디코딩되고 각 변이 256px 이상이어야 저장합니다. 예상 수량과 저장 수량이 모두 맞아야
+완료입니다. 누락·다운로드 실패는 `image_incomplete`로 남기고 받은 파일은 보존합니다. 브라우저 연결 오류도 같은 요청으로 재개합니다.
+`artifacts[].promptId`와 파일명은 **응답 카드 순서**를 입력 순서에 대응시킨 값입니다.
+모델이 순서를 바꾸거나 여러 화면을 한 장에 그리면 수량 검사로 의미를 보장할 수 없으므로
+실제 이미지를 열어 콘텐츠·순서·한국어 표기를 확인해야 합니다.
+
+### 컨테이너 화면 진단
+
+```bash
+gpt-webai-pro inspect --slot slot-a --open-tools
+gpt-webai-pro inspect --slot slot-a --select-image-tool
+gpt-webai-pro inspect --slot slot-a --image-prompt-file ./prompt.md
+gpt-webai-pro inspect --session req_0123456789abcdef
+gpt-webai-pro inspect --session req_0123456789abcdef --open-image-index 0
+```
+
+슬롯 진단은 빈 새 탭에서 도구 선택·입력을 관찰하고 닫으며 전송하지 않습니다.
+세션 진단은 지정 요청의 대화만 엽니다. `--open-image-index`는 0부터 시작하는 원본 뷰어를 관찰한 뒤 닫습니다. 활성 요청이 있는 슬롯에는 세션 ID를 지정합니다.
+`outbox/diagnostics/`의 스크린샷과 접근성·컨트롤 기록에는 본문과 편집기 내용이 포함됩니다.
+사이드바·프로필·쿠키·이미지 원본 URL은 수집하지 않습니다. 컨테이너에는 한국어 표시를 위한 Noto CJK 글꼴을 포함합니다.
+구성 실험에는 `GWP_CONFIG_PATH`와 별도 `GPT_WEBAI_PRO_STATE_DIR`를 쓸 수 있습니다.
+동일 프로필을 두 런타임에서 동시에 열거나 프로필을 복사하지 마십시오.
 
 ## 계정 로그인 시딩
 
@@ -128,8 +181,8 @@ daemon이 교체되지는 않습니다. 배포는 별도 승인 후 진행하고
 보존한 채 검증된 동일 소스로 호스트와 이미지를 준비해야 합니다. 미배포 심층 리서치
 수정과 `--deep-research` 옵션은 이 통합 범위에 포함하지 않습니다.
 
-현재 main의 주간 사용량 원장은 DB v3를 사용합니다. 이 코드를 기존 운영 state에 실행하면
-DB가 갱신될 수 있고 구 v2 호스트는 v3 DB를 열 수 없으므로, 운영 실행 전 DB·profile을
+이미지 배치는 주간 사용량 원장을 보존하면서 DB를 v4로 이관합니다. 이 코드를 기존 운영
+state에 실행하면 DB가 갱신되며 구 v2/v3 호스트는 v4 DB를 열 수 없으므로, 운영 실행 전 DB·profile을
 안전하게 보존하고 롤백 절차까지 확인해야 합니다. PR 검증에는 격리된 테스트 state만 씁니다.
 
 `status`는 슬롯 state/cooldown/최근 사용 시각/`activeRequests`와 비종결 요청을 자체 JSON으로

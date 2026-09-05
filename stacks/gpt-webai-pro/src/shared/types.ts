@@ -77,6 +77,7 @@ export interface LabelConfig {
   intelligence: string[];
   // 새 UI(2026-09 GPT-6)의 "Select model" 라디오에서 선택할 모델 버전. 없으면 검사하지 않는다.
   modelVersion?: string;
+  sliderOffsetFromMax?: number;
 }
 export interface RpcFile {
   name: string;
@@ -96,11 +97,13 @@ export interface SendParams {
   files: RpcFile[];
   // 지정 시 새 채팅 대신 이 기존 대화에 이어서 후속 턴을 보낸다 (RouteFork 연속 제안용).
   conversationUrl?: string;
+  imageCount?: number;
 }
 export type SendStep =
   | "navigate"
   | "ensure_model"
   | "compose"
+  | "select_image_tool"
   | "attach"
   | "verify_chips"
   | "baseline"
@@ -153,6 +156,7 @@ export interface ReconcileResult {
 export interface ArtifactControl {
   index: number;
   label: string;
+  assistantTurnId?: string;
 }
 export interface PollParams {
   conversationUrl: string;
@@ -160,6 +164,7 @@ export interface PollParams {
   userTurnId?: string;
   assistantTurnId?: string;
   waitMs: number;
+  imageCount?: number;
 }
 export interface PollResult {
   state: "generating" | "complete";
@@ -172,12 +177,31 @@ export interface PollResult {
 export interface DownloadParams {
   conversationUrl: string;
   controlIndex: number;
+  assistantTurnId?: string;
+  imageCount?: number;
+  userTurnId?: string;
 }
 export interface DownloadResult {
   filename: string;
   outboxPath: string;
   sha256: string;
   sizeBytes: number;
+}
+export interface InspectParams {
+  conversationUrl?: string;
+  openTools?: boolean;
+  selectImageTool?: boolean;
+  imagePrompt?: string;
+  openImageIndex?: number;
+  userTurnId?: string;
+}
+export interface InspectResult {
+  currentUrl: string;
+  screenshotPath: string;
+  snapshotPath: string;
+  toolsMenuOpened: boolean;
+  modelLabel: string;
+  diagnosticError?: string;
 }
 export interface CloseConversationParams {
   conversationUrl: string;
@@ -189,6 +213,7 @@ export interface RpcMethods {
   reconcile: { params: ReconcileParams; result: ReconcileResult };
   poll: { params: PollParams; result: PollResult };
   download: { params: DownloadParams; result: DownloadResult };
+  inspect: { params: InspectParams; result: InspectResult };
   closeConversation: { params: CloseConversationParams; result: { ok: boolean } };
 }
 export type RpcMethod = keyof RpcMethods;
@@ -218,5 +243,24 @@ export interface Envelope {
   answerSha256: string | null;
   artifacts: PublicArtifact[];
   errorKind: string | null;
+  message: string | null;
+}
+export interface ImagePrompt { id: string; prompt: string }
+export interface ImageManifest { images: ImagePrompt[] }
+export interface ImageChunkRow {
+  batch_id: string;
+  ordinal: number;
+  request_id: string;
+  items_json: string;
+}
+export interface ImageBatchEnvelope {
+  ok: boolean;
+  status: EnvelopeStatus;
+  batchId: string;
+  resumeCommand: string;
+  expectedImages: number;
+  downloadedImages: number;
+  chunks: Array<{ index: number; imageIds: string[]; result: Envelope }>;
+  artifacts: Array<PublicArtifact & { promptId: string }>;
   message: string | null;
 }

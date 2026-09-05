@@ -26,6 +26,7 @@ RUN apt-get update \
       curl \
       dumb-init \
       fonts-liberation \
+      fonts-noto-cjk \
       novnc \
       websockify \
       x11vnc \

@@ -46,7 +46,7 @@ const ARTIFACT_CONTROL_SELECTOR = [
   "button",
   '[role="button"]',
 ].join(",");
-const COPY_CONTROL_SELECTOR = [
+export const COPY_CONTROL_SELECTOR = [
   '[data-testid*="copy" i]',
   '[aria-label*="copy" i]',
   '[aria-label*="복사" i]',
@@ -83,7 +83,7 @@ export interface ChipObservation {
 }
 export interface ArtifactControlLocator {
   locator: Locator;
-  kind: "inline" | "entity";
+  kind: "inline" | "entity" | "image";
   label: string;
 }
 function normalizeMarkdown(value: string, preserveFenceLanguages: boolean): string {
@@ -386,15 +386,23 @@ export async function readTurnsShallow(page: Page): Promise<TurnMeta[]> {
     return { role, dataMessageId, domIndex };
   }).filter((item): item is Omit<TurnObservation, "text"> => item !== null));
 }
-export async function readTurnTextById(page: Page, dataMessageId: string): Promise<string | null> {
-  return page.locator(TURN_SELECTOR).evaluateAll((nodes, expected) => {
+export async function readTurnTextById(page: Page, dataMessageId: string, excludeUiToggle = false): Promise<string | null> {
+  return page.locator(TURN_SELECTOR).evaluateAll((nodes, { expected, excludeUiToggle }) => {
     for (const node of nodes) {
       const element = node as HTMLElement;
       if (element.getAttribute("data-message-id") !== expected) continue;
-      return (element.innerText || element.textContent || "").trim();
+      let text = (element.innerText || element.textContent || "").trim();
+      if (excludeUiToggle) {
+        // 실 이미지 user 턴의 Show more/Show less는 프롬프트 뒤에 붙는 UI 버튼이다.
+        // 버튼의 실제 텍스트가 접미사로 일치할 때만 제외해 프롬프트 본문은 보존한다.
+        const toggle = element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-toggle"]');
+        const label = (toggle?.innerText || toggle?.textContent || "").trim();
+        if (label && text.endsWith(label)) text = text.slice(0, -label.length).trimEnd();
+      }
+      return text;
     }
     return null;
-  }, dataMessageId);
+  }, { expected: dataMessageId, excludeUiToggle });
 }
 export async function readAssistantAnswer(page: Page, assistantTurnId?: string): Promise<string> {
   let turn = await assistantLocator(page, assistantTurnId);
@@ -493,9 +501,10 @@ export async function answerActionVisible(
 export async function artifactControlLocators(
   page: Page,
   assistantTurnId?: string,
+  strict = false,
 ): Promise<ArtifactControlLocator[]> {
   let turn = await assistantLocator(page, assistantTurnId);
-  if (!turn && assistantTurnId) turn = await assistantLocator(page);
+  if (!turn && assistantTurnId && !strict) turn = await assistantLocator(page);
   if (!turn) return [];
   const candidates = turn.locator(ARTIFACT_CONTROL_SELECTOR);
   const result: ArtifactControlLocator[] = [];

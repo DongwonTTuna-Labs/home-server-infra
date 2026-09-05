@@ -27,7 +27,7 @@ useful detector.
 ## Runtime Contract
 
 The single entry point is `gpt-webai-pro` (`run`, `resume`, `status`,
-`cleanup`, `release`, `login`, `keepalive`). The daemon runs on the home
+`cleanup`, `release`, `login`, `keepalive`, `image-batch`, `inspect`). The daemon runs on the home
 server; the Mac reaches it over `ssh home`.
 
 - `run` does not attach a delegation prelude. The remote model knows nothing
@@ -79,6 +79,8 @@ server; the Mac reaches it over `ssh home`.
   still supported. A hidden slider may expose state while its visible Power
   menuitem receives keyboard input. Source, tests, and observed DOM outrank old
   UI descriptions.
+  전용 `image-batch`는 Xhigh 경로로, 구 UI의 Extra High / 새 UI의 Pro 바로 아래
+  Extended를 사용한다. 일반 위임은 Pro다.
 - The retired PR #72 contracts — canonical-delta, Manager-Only, artifact-only,
   no-edit/import, quarantine, fixed review count — are historical provenance
   only and do not govern current work.
