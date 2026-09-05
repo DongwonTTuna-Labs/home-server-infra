@@ -41,7 +41,7 @@ export class ArtifactDownloader {
       if (!params.userTurnId) throw new GwpError("artifact_failed", "image download requires its confirmed user turn");
       // 중단된 다운로드가 뷰어를 남겼더라도 새 생성 없이 원래 갤러리에서 재개한다.
       await page.keyboard.press("Escape");
-      const preview = await imagePreviewControl(page, params.userTurnId, params.controlIndex);
+      const preview = await imagePreviewControl(page, params.userTurnId, params.controlIndex, params.imageCount);
       try {
         await preview.click();
         // 2026-09-05 실측: 이미지 원본 뷰어는 파일 패널과 달리 Save 버튼이다.

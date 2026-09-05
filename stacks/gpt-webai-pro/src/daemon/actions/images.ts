@@ -128,8 +128,14 @@ export async function generatedImagesLoaded(page: Page, controls: GeneratedImage
   }
   return true;
 }
-export async function imagePreviewControl(page: Page, userTurnId: string, index: number): Promise<Locator> {
+export async function imagePreviewControl(page: Page, userTurnId: string, index: number, expectedCount?: number): Promise<Locator> {
   const controls = await generatedImageControls(page, userTurnId);
+  // poll 이후에도 갤러리가 재수화될 수 있다. 앞쪽 썸네일 누락으로 index가 밀리면
+  // 다른 원본에 입력 ID가 붙으므로 매 다운로드 선택 직전에 전체를 다시 확인한다.
+  // 진단용 inspect는 입력 ID를 부여하지 않으므로 예상 수량 없이 현재 원본을 연다.
+  if ((expectedCount !== undefined && controls.length !== expectedCount) || !await generatedImagesLoaded(page, controls)) {
+    throw new GwpError("artifact_failed", `generated image gallery is incomplete (expected ${expectedCount ?? controls.length}, observed ${controls.length})`);
+  }
   const control = controls[index];
   if (!control) throw new GwpError("artifact_failed", `generated image ${index + 1} is absent`);
   if (!control.thumbnail) return control.locator;

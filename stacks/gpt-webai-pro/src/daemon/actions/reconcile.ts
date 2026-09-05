@@ -5,11 +5,13 @@ import {
   assistantAfter,
   readTurns,
   readTurnsShallow,
+  readTurnTextById,
   renderedTurnLengthSane,
   renderedTurnMatchesPrompt,
   renderedTurnMatchesPromptLoose,
   renderedTurnMatchEvidence,
 } from "../selectors.js";
+import { imageSentTurnMatches } from "./images.js";
 // 무거운 대화는 domcontentloaded 후 턴 렌더까지 수 초가 걸린다. 렌더 전 스캔은
 // 빈 대화로 읽혀 거짓 부재 증명(→중복 재전송)이 된다 — 2026-07-29 라이브 사고.
 async function waitForTurnRender(page: Page): Promise<void> {
@@ -107,9 +109,21 @@ async function scanPages(
     const newUsers = turns.filter((turn) => (
       turn.role === "user" && !baseline.has(turn.dataMessageId)
     ));
+    if (params.imageCount) {
+      // 전송 확인과 동일하게 이미지 도구의 공백 렌더·접기 버튼을 처리한다.
+      // 읽는 도중 턴이 사라지면 부재 증명이나 다른 턴 결속에 사용하지 않는다.
+      let missingTurn = false;
+      for (const turn of newUsers) {
+        const text = await readTurnTextById(page, turn.dataMessageId, true).catch(() => null);
+        if (text === null) { missingTurn = true; break; }
+        turn.text = text;
+      }
+      if (missingTurn) { unreadable = true; continue; }
+    }
     let matchedBy: ReconcileResult["matchedBy"];
     let promptMatches = newUsers.filter((turn) => (
       renderedTurnMatchesPrompt(turn.text, params.prompt)
+      || (params.imageCount && imageSentTurnMatches(turn.text, params.prompt))
     ));
     if (promptMatches.length > 0) matchedBy = "strict";
     if (promptMatches.length === 0 && anchored && newUsers.length === 1) {

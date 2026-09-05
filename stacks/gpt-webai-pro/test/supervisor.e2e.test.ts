@@ -80,9 +80,12 @@ test("image batches persist 5+4 children and resume a missing download without r
 test("image batch contention and post-click loss resume the same child without a second send", async (t) => {
   configureRecovery(t, "0");
   let sends = 0;
-  const { supervisor } = await fixture(t, [{ id: "slot-a", account: "a", handler: standardHandler((method) => {
+  const { supervisor } = await fixture(t, [{ id: "slot-a", account: "a", handler: standardHandler((method, params) => {
     if (method === "send") { sends += 1; return DROP; }
-    if (method === "reconcile") return { found: true, proven: true, conversationUrl: "https://chatgpt.com/c/recovered-image", userTurnId: "u-image", assistantTurnId: "a-image" };
+    if (method === "reconcile") {
+      assert.equal(params?.imageCount, 1);
+      return { found: true, proven: true, conversationUrl: "https://chatgpt.com/c/recovered-image", userTurnId: "u-image", assistantTurnId: "a-image" };
+    }
     throw new Error(`unexpected ${method}`);
   }) }]);
   const staged = await supervisor.runImageBatch({ images: [{ id: "one", prompt: "draw one original image" }] }, [], 0);
@@ -93,9 +96,11 @@ test("image batch contention and post-click loss resume the same child without a
     assert.match(waiting.message!, /already being processed/);
     assert.equal(sends, 0);
   } finally { await lock.release(); }
-  const uncertain = await supervisor.resumeImageBatch(staged.batchId, 1);
+  // This case tests reconciliation and send identity, not a one-second deadline.
+  // Parallel Chromium suites can consume that deadline before the recovery poll.
+  const uncertain = await supervisor.resumeImageBatch(staged.batchId, 30);
   assert.equal(uncertain.chunks[0]!.result.errorKind, "send_uncertain");
-  const recovered = await supervisor.resumeImageBatch(staged.batchId, 1);
+  const recovered = await supervisor.resumeImageBatch(staged.batchId, 30);
   assert.equal(sends, 1);
   assert.equal(recovered.status, "needs_user_action");
   assert.equal(recovered.chunks[0]!.result.errorKind, "image_incomplete");

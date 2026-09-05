@@ -139,6 +139,7 @@ export interface SendResult {
 export interface ReconcileParams {
   prompt: string;
   promptSha256: string;
+  imageCount?: number;
   conversationUrl?: string;
   pendingConversationUrl?: string;
   pendingUserTurnId?: string;

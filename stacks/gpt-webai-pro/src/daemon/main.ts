@@ -230,7 +230,7 @@ async function dispatch(
             });
           }
           notifySendProgress(socket, request.id, progress);
-        });
+        }, options.outboxDir);
         sendCache.set(promptCacheKey(params.prompt), result);
         return result;
       });

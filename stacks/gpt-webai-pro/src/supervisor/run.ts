@@ -885,9 +885,11 @@ export class Supervisor {
       const pendingConversationUrl = anchor?.pendingConversationUrl
         ?? request.conversation_url
         ?? undefined;
+      const imageCount = this.imageItems(request.id)?.length;
       const result = await client.call("reconcile", {
         prompt,
         promptSha256,
+        ...(imageCount ? { imageCount } : {}),
         ...(attempt.user_turn_id ? { pendingUserTurnId: attempt.user_turn_id } : {}),
         ...(request.conversation_url && isValidConversationPointer(request.conversation_url)
           ? { conversationUrl: request.conversation_url }

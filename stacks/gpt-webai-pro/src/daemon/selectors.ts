@@ -212,12 +212,18 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
       ? duplicate[1] + " " + duplicate[2]
       : (accessibleName.match(filename)?.[0] || "").trim();
     if (!match) return null;
-    let root = seed.matches('button,[role="button"]') ? seed.parentElement : seed;
-    while (root) {
-      const hasControl = Boolean(root.querySelector('button,[role="button"]'));
-      const showsName = filename.test(root.innerText || root.textContent || "");
-      if (hasControl && showsName && visible(root)) break;
-      root = root.parentElement;
+    // 이미지 타일은 본문 글자 없이 group의 접근성 이름과 제거 버튼에만 파일명을 둔다.
+    const group = seed.closest('[role="group"][aria-label]');
+    let root = group && filename.test(group.getAttribute("aria-label") || "") ? group : null;
+    if (root && (!visible(root) || !root.querySelector('button,[role="button"]'))) return null;
+    if (!root) {
+      root = seed.matches('button,[role="button"]') ? seed.parentElement : seed;
+      while (root) {
+        const hasControl = Boolean(root.querySelector('button,[role="button"]'));
+        const showsName = filename.test(root.innerText || root.textContent || "");
+        if (hasControl && showsName && visible(root)) break;
+        root = root.parentElement;
+      }
     }
     if (!root) return null;
     const rootPath = domPath(root);
@@ -225,7 +231,10 @@ const CHIP_OBSERVER_SCRIPT = String.raw`(() => {
     if (!rootPath || !seedPath) return null;
     const busy = root.getAttribute("aria-busy") === "true"
       || Boolean(root.querySelector('[role="progressbar"],[aria-busy="true"]'));
-    return { filename: match, complete: !busy, rootPath, seedPath };
+    const imagePending = Array.from(root.querySelectorAll("img")).some(image => (
+      !image.complete || image.naturalWidth === 0 || image.naturalHeight === 0
+    ));
+    return { filename: match, complete: !busy && !imagePending, rootPath, seedPath };
   }).filter(Boolean);
 })()`;
 function normalizeLabel(value: string): string {
@@ -249,7 +258,7 @@ export function parsePillLabel(value: string): { version: string | null; power: 
 export function normalizeChipStem(value: string): string {
   return normalizeLabel(value)
     .replace(/\.[a-z0-9]{1,8}$/u, "")
-    .replace(/ \(([1-9]|[1-9][0-9])\)$/u, "");
+    .replace(/\s*\(([1-9]|[1-9][0-9])\)$/u, "");
 }
 export async function visibleFirst(
   page: Page,
