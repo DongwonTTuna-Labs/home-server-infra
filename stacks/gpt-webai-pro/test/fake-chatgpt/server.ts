@@ -92,7 +92,10 @@ const PAGE = String.raw`<!doctype html>
     return;
   }
   const gpt6 = scenario.startsWith('gpt6');
-  const initialIntelligence = (scenario === 'slow' || scenario === 'gpt6-legacy-model') ? 'Pro' : 'Instant';
+  const versionConfirmation = scenario.startsWith('gpt6-model-');
+  const powerMenu = scenario.startsWith('gpt6-power-menu') || versionConfirmation;
+  const legacyModel = scenario === 'gpt6-legacy-model' || versionConfirmation;
+  const initialIntelligence = legacyModel || scenario === 'slow' ? 'Pro' : powerMenu ? 'Extra High' : 'Instant';
   const intelligenceLabels = scenario === 'model-missing'
     ? ['Instant', 'Medium', 'High', 'Extra High']
     : ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
@@ -105,10 +108,10 @@ const PAGE = String.raw`<!doctype html>
   )).join('');
   // 2026-09 GPT-6 UI 재현: 알약 "6\nPro", 피커 본문에 Select model(라디오 Latest/GPT-5.6 Sol/GPT-5.5)
   // + 생각 강도 슬라이더(0..4, 4=Pro). 슬라이더 값은 즉시 적용되고 Escape로 닫는다.
-  const POWER_LEVELS = ['Instant', 'Light', 'Standard', 'Extended', 'Pro'];
+  const POWER_LEVELS = powerMenu ? ['Instant', 'Medium', 'High', 'Extra High', 'Pro'] : ['Instant', 'Light', 'Standard', 'Extended', 'Pro'];
   const gpt6PillMarkup = (power) => '<span>6</span><br><span>' + power + '</span>';
   const gpt6Versions = ['Latest', 'GPT-5.6 Sol', 'GPT-5.5'];
-  const gpt6InitialVersion = scenario === 'gpt6-legacy-model' ? 'GPT-5.5' : 'Latest';
+  const gpt6InitialVersion = legacyModel ? 'GPT-5.5' : 'Latest';
   const gpt6InitialPower = POWER_LEVELS.indexOf(initialIntelligence);
   const gpt6Popper =
     '<div data-radix-popper-content-wrapper id="intelligence-popper" hidden>' +
@@ -117,8 +120,8 @@ const PAGE = String.raw`<!doctype html>
           '<div role="group"><div role="menuitem" aria-label="Select model" aria-expanded="false" tabindex="0" id="model-select">' +
             '<span>6</span><span id="model-select-power">' + initialIntelligence + '</span></div></div>' +
           '<div data-testid="composer-model-picker-slider-simple-view">' +
-            '<div role="menuitem" aria-label="Power" tabindex="0">' +
-              '<div role="slider" id="power-slider" tabindex="0" style="display:inline-block;width:160px;height:14px;background:#ccc" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' + gpt6InitialPower + '"></div>' +
+            '<div role="menuitem" aria-label="Power" tabindex="0" id="power-control">' +
+              '<div role="slider" id="power-slider" tabindex="' + (powerMenu ? '-1' : '0') + '" style="display:' + (powerMenu ? 'none' : 'inline-block') + ';width:160px;height:14px;background:#ccc" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' + gpt6InitialPower + '"></div>' +
               '<span id="power-status">' + initialIntelligence + ', ' + (gpt6InitialPower + 1) + ' of 5.</span>' +
               '<span>Use Left and Right arrow keys to adjust power.</span>' +
             '</div></div>' +
@@ -169,11 +172,12 @@ const PAGE = String.raw`<!doctype html>
       headerPower.textContent = POWER_LEVELS[bounded];
       intelligencePill.innerHTML = gpt6PillMarkup(POWER_LEVELS[bounded]) + '<svg aria-hidden="true"></svg>';
     };
-    slider.addEventListener('keydown', (event) => {
-      if (scenario === 'gpt6-slider-stuck') return;
+    const powerInput = powerMenu ? document.getElementById('power-control') : slider;
+    powerInput.addEventListener('keydown', (event) => {
+      if (scenario === 'gpt6-slider-stuck' || scenario === 'gpt6-power-menu-stuck') return;
       const now = Number(slider.getAttribute('aria-valuenow'));
-      if (event.key === 'End') setPower(4);
-      else if (event.key === 'Home') setPower(0);
+      if (event.key === 'End' && !powerMenu) setPower(4);
+      else if (event.key === 'Home' && !powerMenu) setPower(0);
       else if (event.key === 'ArrowRight') setPower(now + 1);
       else if (event.key === 'ArrowLeft') setPower(now - 1);
       else return;
@@ -185,9 +189,18 @@ const PAGE = String.raw`<!doctype html>
     });
     for (const item of intelligenceItems) {
       item.addEventListener('click', () => {
+        if (versionConfirmation) {
+          intelligencePopper.hidden = true;
+          intelligencePill.setAttribute('aria-expanded', 'false');
+          if (scenario === 'gpt6-model-rejected-closes') return;
+        }
         for (const candidate of intelligenceItems) candidate.setAttribute('aria-checked', 'false');
         item.setAttribute('aria-checked', 'true');
       });
+    }
+    if (scenario === 'gpt6-model-missing-controls') {
+      document.getElementById('power-control').remove();
+      modelSelect.remove();
     }
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape' || intelligencePopper.hidden) return;

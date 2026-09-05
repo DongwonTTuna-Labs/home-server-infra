@@ -157,6 +157,38 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       },
     };
   }
+  await t.test("model version confirmation never trusts an unverified Pro pill", async (context) => {
+    await context.test("reopens a closed picker and confirms Latest before sending", async () => {
+      const runtime = await setup("gpt6-model-closes");
+      try {
+        const sent = await runtime.rpc.call("send", { prompt: "confirm the selected model", files: [] });
+        const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+        assert.equal(sent.modelLabel, "6 Pro");
+        assert.equal(await page.locator("#intelligence-pill").getAttribute("data-open-count"), "2");
+        assert.equal(await page.locator('[data-version="Latest"]').getAttribute("aria-checked"), "true");
+        assert.equal(await page.locator('[data-version="GPT-5.5"]').getAttribute("aria-checked"), "false");
+        assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+      } finally {
+        await runtime.close();
+      }
+    });
+    for (const scenario of ["gpt6-model-rejected-closes", "gpt6-model-missing-controls"]) {
+      await context.test(`${scenario} fails before sending`, async () => {
+        const runtime = await setup(scenario);
+        try {
+          await assert.rejects(
+            runtime.rpc.call("send", { prompt: "must not submit", files: [] }),
+            (error: unknown) => error instanceof GwpError && error.kind === "model_unavailable" && error.phase === "pre_click",
+          );
+          const pages = runtime.browser.contexts().flatMap((browserContext) => browserContext.pages());
+          assert.ok(pages.length > 0);
+          for (const page of pages) assert.equal(await page.locator('[data-message-author-role="user"]').count(), 0);
+        } finally {
+          await runtime.close();
+        }
+      });
+    }
+  });
   await t.test("happy: readiness, send, reconcile, poll, health", async () => {
     const runtime = await setup("happy");
     try {
@@ -539,6 +571,34 @@ test("daemon RPC covers required fake scenarios and the live Intelligence picker
       assert.equal(await page.locator("#intelligence-pill").getAttribute("aria-expanded"), "false");
       assert.equal(await page.locator("#power-slider").getAttribute("aria-valuenow"), "4");
       assert.equal(await page.locator('[data-version="Latest"]').getAttribute("aria-checked"), "true");
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("gpt6 Power menu controls a hidden slider before sending with Pro", async () => {
+    const runtime = await setup("gpt6-power-menu");
+    try {
+      const sent = await runtime.rpc.call("send", { prompt: "use the visible Power control", files: [] });
+      assert.equal(sent.modelLabel, "6 Pro");
+      const page = await pageWithUserTurn(runtime.browser, sent.userTurnId);
+      assert.equal(await page.locator("#power-slider").getAttribute("aria-valuenow"), "4");
+      assert.equal(await page.locator("#power-slider").isVisible(), false);
+      assert.equal(await page.locator('[data-version="Latest"]').getAttribute("aria-checked"), "true");
+      assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+    } finally {
+      await runtime.close();
+    }
+  });
+  await t.test("gpt6 hidden slider that will not move never submits a user turn", async () => {
+    const runtime = await setup("gpt6-power-menu-stuck");
+    try {
+      await assert.rejects(
+        runtime.rpc.call("send", { prompt: "must not submit", files: [] }),
+        (error: unknown) => error instanceof GwpError && error.kind === "model_unavailable" && error.phase === "pre_click",
+      );
+      for (const context of runtime.browser.contexts()) {
+        for (const page of context.pages()) assert.equal(await page.locator('[data-message-author-role="user"]').count(), 0);
+      }
     } finally {
       await runtime.close();
     }

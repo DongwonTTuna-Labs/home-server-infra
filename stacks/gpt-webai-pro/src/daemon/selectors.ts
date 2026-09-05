@@ -312,9 +312,18 @@ export async function waitForIntelligenceMenu(page: Page, timeoutMs: number): Pr
     .then(() => true, () => false);
 }
 /** 새 UI의 생각 강도 슬라이더. 없으면 null (구 UI). */
-export async function findPowerSlider(page: Page): Promise<Locator | null> {
+export interface PowerControl {
+  input: Locator;
+  slider: Locator;
+}
+export async function findPowerControl(page: Page): Promise<PowerControl | null> {
   const slider = page.locator(POWER_SLIDER_SELECTOR).first();
-  return await slider.isVisible().catch(() => false) ? slider : null;
+  if (await page.locator(POWER_SLIDER_SELECTOR).count() !== 1) return null;
+  if (await slider.isVisible() && await slider.getAttribute("tabindex") !== "-1") {
+    return { input: slider, slider };
+  }
+  const input = page.locator(INTELLIGENCE_PICKER_CONTENT_SELECTOR).getByRole("menuitem", { name: "Power", exact: true });
+  return await input.count() === 1 && await input.isVisible() ? { input, slider } : null;
 }
 /** 슬라이더 옆 상태 문구 ("Pro, 5 of 5. Use Left and Right arrow keys…"). */
 export async function readPowerStatusText(page: Page): Promise<string> {

@@ -485,12 +485,19 @@ supervisor `RpcClient.call`은 옵션 `{timeoutMs, inactivityMs, onProgress}`로
     `GPT-5.6 Sol` / `GPT-5.5`.
   - `[data-testid="composer-model-picker-slider-simple-view"]`의 `[role=menuitem][aria-label=Power]` 안
     `[role=slider]` (`aria-valuemin=0`, `aria-valuemax=4`; 0=Instant "1 of 5" … 4=Pro "5 of 5") + 상태 문구
-    `"Pro, 5 of 5. Use Left and Right arrow keys to adjust power."`. 키보드 `Home`/`End`/`←`/`→`로 조정되고
-    값은 즉시 적용된다(메뉴를 닫아도 유지).
+    `"Pro, 5 of 5. Use Left and Right arrow keys to adjust power."`. 2026-09-05 관찰에서는 slider가
+    숨김·`tabindex=-1`이고 보이는 `Power` menuitem이 `←`/`→` 입력을 받는다. 직접 입력 가능한
+    slider도 지원하되 `Home`/`End` 지원은 가정하지 않는다. 값은 즉시 적용되고 메뉴를 닫아도 유지된다.
 - 절차: 알약 라벨을 (버전, power)로 파싱. power가 `target`이고 버전 토큰이 없으면(구 UI) 즉시 done.
   새 UI(버전 토큰 있음)는 power가 이미 `Pro`여도 메뉴를 열어 `modelVersion`(Latest) 라디오를 확인한다.
-  power가 목표가 아니면 슬라이더에 `End`(안 먹으면 `→` 반복) → 상태 문구의 첫 토큰이 `Pro`인지 확인 →
+  power가 목표가 아니면 유일한 slider의 정수 bounds/current를 검증(최대 20단계)하고, 보이는
+  입력점에 `→`를 한 단계씩 보내 매번 `aria-valuenow` 증가를 확인 → 상태 문구의 첫 토큰이 `Pro`인지 확인 →
   `Latest`가 checked가 아니면 클릭 → `Escape`로 닫기(최대 2회, 5s) → 알약 재확인 `"6\nPro"`.
+- 버전 클릭으로 메뉴가 닫히면 다시 열어 목표 라디오의 `aria-checked=true`를 확인한다. 확인 대상
+  소실을 성공으로 취급하지 않는다. 알약의 버전 토큰으로 새 UI를 관찰했다면 Power 탐색 실패와
+  무관하게 버전 selector를 요구하며, 검증하지 못하면 `model_unavailable/pre_click`으로 끝낸다.
+  단, 구 UI의 `Instant / 5.5`도 버전 토큰을 포함하므로 실제 `Pro` 라디오를 선택하고
+  `aria-checked`까지 확인한 경우에만 단일 Intelligence 경로임을 인정한다.
 - 라벨 정규화는 **모든 줄의 버전 토큰(`^\d+(\.\d+)*$`)을 제거**한 뒤 소문자 비교 — `"6\nPro"`→`pro`,
   `"Instant\n5.5"`→`instant`. 알약 후보가 라벨 집합에 없으면(미지의 중간 power 이름) form 안의
   **텍스트가 있는 유일한 `aria-haspopup` 버튼**을 알약으로 본다(첨부 `+` 버튼은 텍스트가 없다).
@@ -641,6 +648,10 @@ owner가 없으면 정지하며, 다음 resume 때 같은 profile로 재기동�
   create 인자(코드 한 곳에 정의): `--memory 3g --cpus 2 --pids-limit 1024 --shm-size 1g
   --security-opt no-new-privileges --cap-drop ALL --user <uid>:<gid> --restart no`
   마운트: `profile→/profile(rw)`, `inbox→/inbox(ro)`, `outbox→/outbox(rw)`.
+  이름만으로 소유권을 인정하지 않는다. 세 destination 각각 유일한 bind mount여야 하고 source의
+  canonical path가 현재 state의 슬롯 경로와 같아야 한다. 불일치·누락·확인 불가는 fail-closed이며
+  토큰 교체 전 거부한다. start/stop/remove는 재검증한 Docker ID로 실행해 이름 재사용 경합에서도
+  다른 컨테이너를 조작하지 않는다. 병렬 작업본은 state root, 슬롯 ID, daemon 포트를 모두 분리한다.
   publish는 `-p 127.0.0.1:<port>:<port>` (daemon RPC) 하나뿐. CDP는 컨테이너 내부
   127.0.0.1 전용으로 publish하지 않는다.
 - **entrypoint**: Xvfb :99 → Chromium(CDP 9222, `--user-data-dir=/profile`,

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod } from "node:fs/promises";
+import { chmod, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { atomicWrite, mkdirp } from "../shared/fsx.js";
@@ -17,6 +17,7 @@ export const CREATE_LIMIT_ARGS = [
   "--cap-drop", "ALL",
 ] as const;
 export interface ContainerState {
+  id: string | null;
   exists: boolean;
   running: boolean;
   startedAt: number | null;
@@ -33,6 +34,11 @@ export interface DaemonEndpoint {
 }
 export interface ContainerOptions {
   loginMode?: boolean;
+}
+export interface ContainerInspection {
+  Id?: string;
+  State?: { Running?: boolean; StartedAt?: string };
+  Mounts?: Array<{ Type?: string; Source?: string; Destination?: string }>;
 }
 export class DockerManager {
   constructor(
@@ -132,36 +138,47 @@ export class DockerManager {
     ];
   }
   async start(slotId: string): Promise<void> {
-    await docker(["start", this.containerName(slotId)]);
+    const state = await this.inspect(slotId);
+    if (!state.id) throw new Error(`slot container does not exist: ${slotId}`);
+    await docker(["start", state.id]);
   }
   async stop(slotId: string): Promise<void> {
     const state = await this.inspect(slotId);
     // -t 40: entrypoint가 SIGTERM을 Chrome까지 전달하고 클린 종료(프로필 flush)를
     // 기다린다 — 기본 10초 유예로는 SIGKILL로 넘어가 로그인 쿠키가 유실될 수 있다.
-    if (state.exists && state.running) await docker(["stop", "-t", "40", this.containerName(slotId)]);
+    if (state.id && state.running) await docker(["stop", "-t", "40", state.id]);
   }
   private async remove(slotId: string): Promise<void> {
-    await docker(["rm", this.containerName(slotId)]);
+    const state = await this.inspect(slotId);
+    if (state.id) await docker(["rm", state.id]);
   }
   async inspect(slotId: string): Promise<ContainerState> {
     try {
       const output = await docker(["inspect", this.containerName(slotId)]);
-      const item = (JSON.parse(output) as Array<{
-        State?: { Running?: boolean; StartedAt?: string };
-      }>)[0];
-      const started = item?.State?.StartedAt ? Date.parse(item.State.StartedAt) : Number.NaN;
-      return {
-        exists: true,
-        running: item?.State?.Running === true,
-        startedAt: Number.isFinite(started) ? started : null,
-      };
+      const item = (JSON.parse(output) as ContainerInspection[])[0];
+      return await inspectOwnedContainer(item, this.paths(slotId));
     } catch (error) {
       if (error instanceof Error && /No such object|No such container/i.test(error.message)) {
-        return { exists: false, running: false, startedAt: null };
+        return { id: null, exists: false, running: false, startedAt: null };
       }
       throw error;
     }
   }
+}
+export async function inspectOwnedContainer(item: ContainerInspection | undefined, paths: SlotPaths): Promise<ContainerState> {
+  if (!item?.Id) throw new Error("container inspection omitted its ID; ownership cannot be established");
+  const expectedMounts = [["/profile", paths.profile], ["/inbox", paths.inbox], [CONTAINER_OUTBOX, paths.outbox]] as const;
+  for (const [destination, expected] of expectedMounts) {
+    const mounts = item.Mounts?.filter((mount) => mount.Destination === destination) ?? [];
+    const mount = mounts[0];
+    const message = `container ownership mismatch at ${destination}; use a separate slot ID and daemon port for another state directory`;
+    if (mounts.length !== 1 || mount?.Type !== "bind" || !mount.Source) throw new Error(message);
+    const [actualPath, expectedPath] = await Promise.all([realpath(mount.Source), realpath(expected)])
+      .catch((cause: unknown) => { throw new Error(message, { cause }); });
+    if (actualPath !== expectedPath) throw new Error(message);
+  }
+  const started = item.State?.StartedAt ? Date.parse(item.State.StartedAt) : Number.NaN;
+  return { id: item.Id, exists: true, running: item.State?.Running === true, startedAt: Number.isFinite(started) ? started : null };
 }
 export function mapContainerOutboxPath(containerPath: string, hostOutbox: string): string {
   if (!containerPath.startsWith(`${CONTAINER_OUTBOX}${path.sep}`)) {

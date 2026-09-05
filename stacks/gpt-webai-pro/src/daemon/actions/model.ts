@@ -8,12 +8,14 @@ import {
   findIntelligencePill,
   findModelSelectItem,
   findModelVersionOption,
-  findPowerSlider,
+  findPowerControl,
   normalizeIntelligenceLabel,
   parsePillLabel,
   readCurrentModelLabel,
   readPowerStatusText,
   waitForIntelligenceMenu,
+  POWER_SLIDER_SELECTOR,
+  type PowerControl,
 } from "../selectors.js";
 const SETTLE_MS = 500;
 const SLIDER_SETTLE_MS = 3_000;
@@ -25,7 +27,7 @@ const MENU_CLOSE_MS = 5_000;
  *   아니면 메뉴에서 `target` 라디오를 클릭해 aria-checked를 확인한다.
  * - 새 UI(2026-09, GPT-6): 알약이 "6\nPro"(버전 + power). 메뉴 안에 생각 강도 슬라이더
  *   ([role=slider] 0..max, max=Pro)와 "Select model" 라디오(Latest/GPT-5.6 Sol/…)가 있다.
- *   슬라이더를 End로 최대(=Pro)로 올리고, `labels.modelVersion`(기본 Latest) 라디오가 켜져
+ *   보이는 Power 입력점에 ArrowRight를 보내 최대(=Pro)로 올리고, `labels.modelVersion`(기본 Latest) 라디오가 켜져
  *   있는지 확인·선택한 뒤 메뉴를 닫고 알약을 재검증한다.
  *
  * 어느 경우에도 다른 power/모델로의 대체는 없다 — 목표를 만들 수 없으면 model_unavailable.
@@ -39,16 +41,17 @@ export async function ensurePro(page: Page, labels: LabelConfig): Promise<string
     let current = await pill.innerText().catch(() => "");
     let parsed = parsePillLabel(current);
     const powerExact = targets.has(normalizeIntelligenceLabel(current));
-    // 알약에 버전 토큰("6")이 있으면 새 UI다. 새 UI에서만 모델 버전(Latest)까지 확인한다.
+    // 버전 토큰이 있으면 메뉴에서 버전을 확인한다. 구 UI는 Pro 라디오 선택 증거로 구분한다.
     const needVersionCheck = parsed.version !== null && Boolean(labels.modelVersion);
     if (powerExact && !needVersionCheck) return parsed.display;
     await pill.click({ timeout: 10_000 });
     if (!await waitForIntelligenceMenu(page, 10_000)) {
       throw new Error("intelligence menu did not become visible");
     }
-    const slider = await findPowerSlider(page);
-    if (slider) {
-      if (!powerExact) await raiseSliderToMax(page, slider);
+    const power = await findPowerControl(page);
+    let legacySelectionConfirmed = false;
+    if (power) {
+      if (!powerExact) await raisePowerToMax(page, power);
       const status = await readPowerStatusText(page);
       const statusPower = normalizeIntelligenceLabel(status.split(/[,.]/u)[0] ?? "");
       if (!targets.has(statusPower)) {
@@ -64,8 +67,10 @@ export async function ensurePro(page: Page, labels: LabelConfig): Promise<string
       if (await target.getAttribute("aria-checked", { timeout: 5_000 }).catch(() => null) !== "true") {
         throw new Error("target intelligence did not become aria-checked");
       }
+      legacySelectionConfirmed = true;
     }
-    if (labels.modelVersion) await ensureModelVersion(page, labels.modelVersion, slider !== null);
+    const versionRequired = power !== null || (needVersionCheck && !legacySelectionConfirmed);
+    if (labels.modelVersion) await ensureModelVersion(page, labels.modelVersion, versionRequired, pill);
     await closeIntelligenceMenu(page);
     current = await readCurrentModelLabel(page, labels.intelligence);
     parsed = parsePillLabel(current);
@@ -78,48 +83,55 @@ export async function ensurePro(page: Page, labels: LabelConfig): Promise<string
     throw new GwpError("model_unavailable", String(error), { phase: "pre_click", cause: error });
   }
 }
-async function raiseSliderToMax(page: Page, slider: Locator): Promise<void> {
-  const max = Number(await slider.getAttribute("aria-valuemax").catch(() => null));
-  if (!Number.isFinite(max)) throw new Error("power slider has no aria-valuemax");
-  await slider.focus();
-  await page.keyboard.press("End");
-  const deadline = Date.now() + SLIDER_SETTLE_MS;
-  for (;;) {
-    const now = Number(await slider.getAttribute("aria-valuenow").catch(() => null));
-    if (now === max) return;
-    if (Date.now() >= deadline) break;
-    await page.waitForTimeout(100);
+async function raisePowerToMax(page: Page, { input, slider }: PowerControl): Promise<void> {
+  const minimum = Number(await slider.getAttribute("aria-valuemin") ?? Number.NaN);
+  const maximum = Number(await slider.getAttribute("aria-valuemax") ?? Number.NaN);
+  const current = Number(await slider.getAttribute("aria-valuenow") ?? Number.NaN);
+  if (![minimum, maximum, current].every(Number.isInteger)
+    || minimum > current || current > maximum || maximum - minimum > 20) {
+    throw new Error("power slider has invalid bounds or current value");
   }
-  // End가 먹지 않는 구현을 위한 보조: 오른쪽 화살표로 한 칸씩.
-  for (let step = 0; step < max + 1; step += 1) {
-    await page.keyboard.press("ArrowRight");
-    await page.waitForTimeout(100);
-    if (Number(await slider.getAttribute("aria-valuenow").catch(() => null)) === max) return;
+  for (let next = current + 1; next <= maximum; next += 1) {
+    await input.press("ArrowRight");
+    await page.waitForFunction(
+      ({ selector, value }) => document.querySelector(selector)?.getAttribute("aria-valuenow") === String(value),
+      { selector: POWER_SLIDER_SELECTOR, value: next },
+      { timeout: SLIDER_SETTLE_MS },
+    );
   }
-  throw new Error("power slider did not reach its maximum");
 }
-async function ensureModelVersion(page: Page, version: string, newUi: boolean): Promise<void> {
+async function ensureModelVersion(page: Page, version: string, required: boolean, pill: Locator): Promise<void> {
   const select = await findModelSelectItem(page);
   if (!select) {
-    if (newUi) throw new Error("model version selector is unavailable");
+    if (required) throw new Error("model version selector is unavailable");
     return;
   }
-  let option = await findModelVersionOption(page, version);
-  if (!option) {
-    if (await select.getAttribute("aria-expanded").catch(() => null) !== "true") {
-      await select.click({ timeout: 10_000 });
-      await page.waitForTimeout(SETTLE_MS);
-    }
-    option = await findModelVersionOption(page, version);
-  }
+  const option = await revealModelVersionOption(page, select, version);
   if (!option) throw new Error(`model version is unavailable: ${version}`);
   if (await option.getAttribute("aria-checked").catch(() => null) === "true") return;
   await option.click({ timeout: 10_000 });
   await page.waitForTimeout(SETTLE_MS);
-  const after = await findModelVersionOption(page, version);
-  if (after && await after.getAttribute("aria-checked").catch(() => null) !== "true") {
+  let after = await findModelVersionOption(page, version);
+  if (!after) {
+    if (!await menuOpen(page)) {
+      await pill.click({ timeout: 10_000 });
+      if (!await waitForIntelligenceMenu(page, 10_000)) throw new Error("intelligence menu did not reopen for model confirmation");
+    }
+    const reopenedSelect = await findModelSelectItem(page);
+    if (reopenedSelect) after = await revealModelVersionOption(page, reopenedSelect, version);
+  }
+  if (!after || await after.getAttribute("aria-checked").catch(() => null) !== "true") {
     throw new Error(`model version ${version} did not become aria-checked`);
   }
+}
+async function revealModelVersionOption(page: Page, select: Locator, version: string): Promise<Locator | null> {
+  const option = await findModelVersionOption(page, version);
+  if (option) return option;
+  if (await select.getAttribute("aria-expanded").catch(() => null) !== "true") {
+    await select.click({ timeout: 10_000 });
+    await page.waitForTimeout(SETTLE_MS);
+  }
+  return findModelVersionOption(page, version);
 }
 async function menuOpen(page: Page): Promise<boolean> {
   const picker = page.locator(INTELLIGENCE_PICKER_CONTENT_SELECTOR).first();

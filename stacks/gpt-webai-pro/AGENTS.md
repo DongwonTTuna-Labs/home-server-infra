@@ -74,8 +74,11 @@ server; the Mac reaches it over `ssh home`.
 - Do not reintroduce v1 (`gpt-webai-lifecycle`, slot-pool, `gptxhigh`), which
   was retired in 2026-07 and whose binaries are gone, or the `resume --kind`,
   `show --session`, `--slot slot-NN`, cohort, broker-attachments, and auth-seed
-  concepts. The current ChatGPT UI has a single Intelligence radio, where Pro
-  Extended is the Pro selection.
+  concepts. The observed September 2026 UI selects Pro through a Power control
+  and the model through a separate Latest radio; older Intelligence radios are
+  still supported. A hidden slider may expose state while its visible Power
+  menuitem receives keyboard input. Source, tests, and observed DOM outrank old
+  UI descriptions.
 - The retired PR #72 contracts — canonical-delta, Manager-Only, artifact-only,
   no-edit/import, quarantine, fixed review count — are historical provenance
   only and do not govern current work.

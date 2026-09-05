@@ -1123,7 +1123,7 @@ test("a running envelope releases an ownerless managed runtime without terminali
     running = true;
     return endpoint;
   };
-  supervisor.docker.inspect = async () => ({ exists: true, running, startedAt: Date.now() });
+  supervisor.docker.inspect = async () => ({ id: "test-container", exists: true, running, startedAt: Date.now() });
   supervisor.docker.stop = async () => {
     stopCalls += 1;
     running = false;
@@ -1202,7 +1202,7 @@ test("keepalive stops only a managed runtime that it started", async (t) => {
   };
   let running = false;
   let stopCalls = 0;
-  supervisor.docker.inspect = async () => ({ exists: running, running, startedAt: null });
+  supervisor.docker.inspect = async () => ({ id: running ? "test-container" : null, exists: running, running, startedAt: null });
   supervisor.docker.ensure = async () => {
     running = true;
     return endpoint;

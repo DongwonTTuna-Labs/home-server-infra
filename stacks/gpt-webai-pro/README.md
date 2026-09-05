@@ -36,6 +36,13 @@ ln -sfn "$PWD/bin/gpt-webai-pro" ~/.local/bin/gptpro
 Intelligence 라벨과 단일 `Pro` 목표는 `config/labels.json`에서 관리합니다. 기본 구성은
 `slot-a`, `slot-b`, `slot-c`, `slot-d` 네 계정과 포트 19301–19304입니다.
 
+별도 작업본을 병렬로 실행할 때는 state root뿐 아니라 슬롯 ID와 daemon 포트도 분리합니다.
+컨테이너 이름은 `gwp-<slotId>`이므로 state root만 바꾸면 기존 컨테이너와 충돌합니다.
+supervisor는 `/profile`, `/inbox`, `/outbox`의 bind source를 현재 state의 canonical path와
+비교하고, 다르거나 확인할 수 없으면 토큰 교체·기동·정지·삭제 없이 거부합니다.
+컨테이너를 조작할 때는 소유권을 확인한 Docker ID를 사용합니다. 충돌한 컨테이너를 임의로
+삭제하거나 다른 작업의 profile·token을 복사하지 마세요.
+
 컨테이너 이미지는 다음과 같이 빌드합니다.
 
 ```bash
@@ -135,11 +142,21 @@ DB가 갱신될 수 있고 구 v2 호스트는 v3 DB를 열 수 없으므로, �
 
 전송 직전 daemon은 composer 알약이 `labels.json`의 `target`(기본 `Pro`)인지 보장합니다.
 2026-09 GPT-6 UI에서는 알약이 "6 / Pro"(모델 버전 + 생각 강도)이고, 메뉴 안에 생각 강도
-슬라이더(최대 = Pro)와 "Select model" 라디오(Latest / GPT-5.6 Sol / GPT-5.5)가 있습니다. daemon은
-슬라이더를 최대로 올리고 `labels.json`의 `modelVersion`(기본 `Latest` = 6)이 선택돼 있는지
+슬라이더(최대 = Pro)와 "Select model" 라디오(Latest / GPT-5.6 Sol / GPT-5.5)가 있습니다.
+2026-09-05 관찰된 UI에서는 `[role=slider]`가 숨김·`tabindex=-1` 상태이며, 보이는 `Power`
+menuitem이 키보드 입력을 받습니다. daemon은 유일한 슬라이더에서 상태를 읽되 보이는 입력점에
+`ArrowRight`를 한 단계씩 보내고 매번 `aria-valuenow` 변경을 확인합니다. 직접 입력 가능한
+슬라이더도 지원하며 `Home`/`End` 지원은 가정하지 않습니다. 최댓값의 상태 문구가 `Pro`인지,
+`labels.json`의 `modelVersion`(기본 `Latest` = 6)이 선택돼 있는지
 확인한 뒤 메뉴를 닫고 알약을 다시 읽어 검증합니다. 구 UI(단일 Intelligence 라디오)도 그대로
 지원합니다. 어느 UI에서도 다른 강도·모델로 대체하지 않으며, 목표를 만들 수 없으면
 `model_unavailable`입니다. 보장된 라벨(예: `6 Pro`)은 send 결과의 `modelLabel`로 돌아옵니다.
+
+버전 선택으로 메뉴가 닫히면 다시 열어 목표 라디오의 `aria-checked=true`를 확인합니다.
+새 UI를 이미 알약에서 관찰했다면 Power나 버전 컨트롤이 없어도 구 UI로 간주하지 않습니다.
+확인 대상이 사라지거나 선택되지 않은 상태에서는 `pre_click` 실패로 끝나며 전송하지 않습니다.
+구 UI의 `Instant / 5.5` 표시만으로 새 UI라고 단정하지는 않습니다. 실제 `Pro` 라디오 선택과
+`aria-checked`를 확인한 경우에는 기존 단일 Intelligence 경로로 처리합니다.
 
 ChatGPT Pro 계정의 주간 Pro 한도(현재 200회)는 SQLite `usage_events`에 계정(슬롯)별로 기록해
 관리합니다. 전송이 확정(confirmed/reconciled)될 때 요청당 1건을 남기고, 최근 7일 이동창 안의
