@@ -33,6 +33,47 @@ test("inspection preserves the composer and excludes sidebar text from diagnosti
   assert.deepEqual([...((await readFile(result.screenshotPath)).subarray(0, 8))], [137,80,78,71,13,10,26,10]);
 });
 
+test("session inspection follows its confirmed user turn after the live URL changes", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-inspect-anchor-"));
+  const fake = await startFakeChatGpt();
+  const browser = await chromium.launch({ executablePath: await findChromium(), headless: true });
+  t.after(async () => { await browser.close(); await fake.close(); await rm(directory, { recursive: true, force: true }); });
+  const session = await BrowserSession.fromBrowser(browser, fake.baseUrl("happy"));
+  const page = (await session.inspectionPage())!;
+  const staleUrl = new URL("/c/WEB-transient", fake.baseUrl("happy")).href;
+  await page.evaluate(() => {
+    history.replaceState({}, "", "/c/settled-image-conversation");
+    const turn = document.createElement("div");
+    turn.dataset.messageAuthorRole = "user";
+    turn.dataset.messageId = "confirmed-image-user";
+    turn.textContent = "Owned image production prompt";
+    document.querySelector("main")!.append(turn);
+  });
+  await page.locator("#prompt-textarea").fill("preserved unsent draft");
+  await session.newConversation(); // An unrelated, newer tab must not be inspected.
+  const count = (await session.relevantPages()).length;
+  const result = await inspectConversation(session, {
+    conversationUrl: staleUrl, userTurnId: "confirmed-image-user",
+  }, directory);
+  assert.equal(result.currentUrl, page.url());
+  assert.match(await readFile(result.snapshotPath, "utf8"), /Owned image production prompt/u);
+  assert.equal(await page.locator("#prompt-textarea").innerText(), "preserved unsent draft");
+  assert.equal((await session.relevantPages()).length, count);
+});
+
+test("session inspection rejects a loaded page without the confirmed user turn", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gwp-inspect-mismatch-"));
+  const fake = await startFakeChatGpt();
+  const browser = await chromium.launch({ executablePath: await findChromium(), headless: true });
+  t.after(async () => { await browser.close(); await fake.close(); await rm(directory, { recursive: true, force: true }); });
+  const session = await BrowserSession.fromBrowser(browser, fake.baseUrl("happy"));
+  const page = (await session.inspectionPage())!;
+  await page.evaluate(() => history.replaceState({}, "", "/c/empty-redirected-chat"));
+  await assert.rejects(inspectConversation(session, {
+    conversationUrl: page.url(), userTurnId: "missing-confirmed-user",
+  }, directory), /confirmed user turn/u);
+});
+
 test("image selection reaches the step below Pro and verifies Extended instead of submitting Pro", async (t) => {
   const fake = await startFakeChatGpt();
   const browser = await chromium.launch({ executablePath: await findChromium(), headless: true });

@@ -4,7 +4,7 @@ import type { Page } from "playwright-core";
 import { atomicWrite, mkdirp } from "../../shared/fsx.js";
 import type { InspectParams, InspectResult } from "../../shared/types.js";
 import type { BrowserSession } from "../browser.js";
-import { COMPOSER_SELECTORS, UPLOAD_BUTTON_SELECTORS, readCurrentModelLabel, visibleFirst } from "../selectors.js";
+import { COMPOSER_SELECTORS, UPLOAD_BUTTON_SELECTORS, readCurrentModelLabel, readTurnsShallow, visibleFirst } from "../selectors.js";
 import { composeImagePrompt, imagePreviewControl, imageViewer, selectImageTool } from "./images.js";
 
 // 진단은 지정된 대화 또는 빈 새 대화의 main만 기록한다. 사이드바, 프로필, 쿠키,
@@ -16,7 +16,17 @@ export async function inspectConversation(
   outboxDir: string,
 ): Promise<InspectResult> {
   if (params.conversationUrl && (params.openTools || params.selectImageTool || params.imagePrompt)) throw new Error("tools inspection requires a fresh conversation");
-  const page = params.conversationUrl
+  let page: Page | null = null;
+  // 전송 직후 WEB 임시 주소가 바뀌어도 요청의 확인된 사용자 턴을 가진 탭을 따른다.
+  if (params.conversationUrl && params.userTurnId) {
+    for (const candidate of await session.relevantPages()) {
+      if ((await readTurnsShallow(candidate)).some((turn) => turn.role === "user" && turn.dataMessageId === params.userTurnId)) {
+        page = candidate;
+        break;
+      }
+    }
+  }
+  page ??= params.conversationUrl
     ? await session.open(params.conversationUrl)
     : await session.newConversation();
   try {
@@ -24,6 +34,10 @@ export async function inspectConversation(
     await main.waitFor({ state: "visible", timeout: 30_000 });
     // SPA의 main이 먼저 보이고 모델/도구 컨트롤은 뒤늦게 hydrate될 수 있다.
     const modelLabel = await readCurrentModelLabel(page, ["Instant", "Medium", "High", "Extra High", "Xhigh", "Pro"]);
+    if (params.conversationUrl && params.userTurnId
+      && !(await readTurnsShallow(page)).some((turn) => turn.role === "user" && turn.dataMessageId === params.userTurnId)) {
+      throw new Error("inspection could not locate the confirmed user turn; retry after the conversation loads");
+    }
     let toolsMenuOpened = false;
     if (params.openTools) {
       const button = await visibleFirst(page, UPLOAD_BUTTON_SELECTORS);

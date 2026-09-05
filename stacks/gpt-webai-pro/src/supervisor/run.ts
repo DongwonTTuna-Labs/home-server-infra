@@ -206,12 +206,14 @@ export class Supervisor {
     try {
       if (slot.unmanaged !== true) wasRunning = (await this.docker.inspect(slot.id)).running;
       client = await this.connectDaemon(slot);
+      const userTurnId = request ? this.db.latestAttempt(request.id)?.user_turn_id : null;
       const result = await client.call("inspect", {
         ...(request?.conversation_url ? { conversationUrl: request.conversation_url } : {}),
+        ...(userTurnId ? { userTurnId } : {}),
         ...(options.openTools ? { openTools: true } : {}),
         ...(options.selectImageTool ? { selectImageTool: true } : {}),
         ...(options.imagePrompt ? { imagePrompt: options.imagePrompt } : {}),
-        ...(options.openImageIndex !== undefined ? { openImageIndex: options.openImageIndex, userTurnId: this.db.latestAttempt(request!.id)!.user_turn_id! } : {}),
+        ...(options.openImageIndex !== undefined ? { openImageIndex: options.openImageIndex } : {}),
       }, 60_000);
       return {
         ...result,
