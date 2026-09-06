@@ -348,13 +348,10 @@ fi
 
 python3 - "$tmpdir/codex-lb-compose.json" dotfiles/codex/config.toml <<'PY'
 import json
+import re
 import sys
 import tomllib
 
-EXPECTED_IMAGE = (
-    "ghcr.io/soju06/codex-lb:1.25.0-beta.1@"
-    "sha256:80bb39434f53a3743a982ca810c59fceb9a2e2dcfb0e76b4d2feebf3ecf1c507"
-)
 EXPECTED_PROVIDER = {
     "name": "openai",
     "base_url": "http://127.0.0.1:2455/backend-api/codex",
@@ -373,7 +370,24 @@ def require(condition: bool, message: str) -> None:
 with open(sys.argv[1], encoding="utf-8") as handle:
     compose = json.load(handle)
 service = compose["services"]["codex-lb"]
-require(service.get("image") == EXPECTED_IMAGE, "codex-lb image pin changed")
+# Verify the deployment source boundary without duplicating its changing commit.
+build = service.get("build")
+if build is not None:
+    require(
+        re.fullmatch(
+            r"https://github\.com/Soju06/codex-lb\.git#[0-9a-f]{40}",
+            build.get("context", ""),
+        ) is not None,
+        "codex-lb must build an immutable commit from the upstream repository",
+    )
+else:
+    require(
+        re.fullmatch(
+            r"ghcr\.io/soju06/codex-lb:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}",
+            service.get("image", ""),
+        ) is not None,
+        "codex-lb release rollback must use a digest-pinned upstream image",
+    )
 require(service.get("pull_policy") == "missing", "codex-lb pull policy must remain missing")
 require(
     service.get("labels", {}).get("com.centurylinklabs.watchtower.enable") == "false",

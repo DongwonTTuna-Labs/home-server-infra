@@ -2,11 +2,16 @@ name: codex-lb
 
 services:
   codex-lb:
-    # Operator-verified preview release, pinned by tag and OCI index digest.
-    # This is an upstream pre-release; keep the previous stable image until the
-    # response smoke test passes and follow README.md for upgrades.
-    # Rollback image: ghcr.io/soju06/codex-lb:1.23.0@sha256:3b369ac16e03d31b940be35dd8e61583f9cbd74bfca5e92e4bd03bfec62e5b13
-    image: ghcr.io/soju06/codex-lb:1.25.0-beta.1@sha256:80bb39434f53a3743a982ca810c59fceb9a2e2dcfb0e76b4d2feebf3ecf1c507
+    # Upstream main, built from this commit with the unmodified Dockerfile.
+    # Keep the previous image and follow README.md for upgrade/rollback checks.
+    # Rollback image: ghcr.io/soju06/codex-lb:1.25.0-beta.1@sha256:80bb39434f53a3743a982ca810c59fceb9a2e2dcfb0e76b4d2feebf3ecf1c507
+    image: codex-lb-local:main-5ad638b6a4c9
+    build:
+      context: https://github.com/Soju06/codex-lb.git#5ad638b6a4c9c094bcc8866b1d7487173fe3b54e
+      labels:
+        org.opencontainers.image.source: https://github.com/Soju06/codex-lb
+        org.opencontainers.image.revision: 5ad638b6a4c9c094bcc8866b1d7487173fe3b54e
+        org.opencontainers.image.version: main-5ad638b6a4c9
     container_name: codex-lb
     pull_policy: missing
     restart: always
@@ -23,6 +28,9 @@ services:
       # undecided. This relay is private, so opt out explicitly instead of
       # relying on the dashboard consent prompt.
       CODEX_LB_TELEMETRY_ENABLED: "false"
+      # Match the installed Codex CLI until the background version lookup runs.
+      # Upstream's 0.144.0 default is too old for Astra during a cold start.
+      CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION: "0.153.4"
       # This is a single-user relay. Disable codex-lb's local per-account caps;
       # global admission limits and upstream/provider limits still apply.
       CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT: "0"

@@ -3,12 +3,34 @@
 This stack owns the Codex relay application and database. Public routing for
 `relay-ai.dongwontuna.net` is owned by `stacks/tunnel-apps`.
 
-The application image is pinned by both tag and OCI index digest. The pin is
-currently an upstream **pre-release** (`1.25.0-beta.1`), kept on the preview
-track deliberately; treat every upgrade as an operator-verified change rather
-than a routine bump. Both the application and Postgres are excluded from
-Watchtower. Change the image only after the backup and migration preflight
-below succeeds; do not switch this stack to a mutable `latest` tag.
+The application runs upstream **main** at
+[`5ad638b6a4c9`](https://github.com/Soju06/codex-lb/commit/5ad638b6a4c9c094bcc8866b1d7487173fe3b54e)
+(2026-09-05), built with the upstream Dockerfile and no source patches. There is
+no published `main` image, so Compose records the full Git commit as its build
+context and names the local image `codex-lb-local:main-5ad638b6a4c9`. Both the
+application and Postgres remain excluded from Watchtower. Build before the
+backup and migration preflight; deploy only after those checks pass.
+
+The upstream application version still reads `1.25.0-beta.1`; use the OCI
+`org.opencontainers.image.revision` label to identify this newer main build.
+A restart reuses the local image. Rebuild the same source with:
+
+```sh
+docker compose -f stacks/codex-lb/compose.yaml build --pull codex-lb
+```
+
+This main revision adds the packaged Rust native HTTP/WebSocket egress worker,
+which is discovered automatically. Its migration graph is unchanged from
+`1.25.0-beta.1`. Keep that previous image for code rollback. The bridge sweeper
+can abandon expired ambiguous operations, so retain the database and data
+volume backups as well if an application-state rollback becomes necessary.
+
+`CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` is set to the installed Codex CLI
+version, `0.153.4`. It supplies the outbound client version before the live
+GitHub/npm lookup completes. Upstream's `0.144.0` default caused Astra to reject
+some requests during the first five minutes after restart, despite readiness
+and requests carrying a current native client version succeeding. The live
+version lookup continues normally after its first refresh.
 
 ## Tracked
 
@@ -117,14 +139,14 @@ smoke test. Do not commit or attach the backup files to a PR.
 
 ## Migration Preflight
 
-The target Alembic head for the pinned release is
+The target Alembic head for the pinned main commit is
 `20260830_000000_add_quota_warmup_claim_expiry`. Never read a head off the
 migration file names: the graph is merged and the newest filename is routinely
 an ancestor rather than the head. Read it from the image instead:
 
 ```bash
 docker run --rm --entrypoint python \
-  ghcr.io/soju06/codex-lb:1.25.0-beta.1 -c "
+  codex-lb-local:main-5ad638b6a4c9 -c "
 from alembic.script import ScriptDirectory
 from app.db.migrate import _build_alembic_config
 print(ScriptDirectory.from_config(
@@ -148,10 +170,11 @@ cheap. v1.23.0 also enabled Auth Guardian (background OAuth token keepalive,
 12h staleness gate) by default; `CODEX_LB_AUTH_GUARDIAN_ENABLED=false` is the
 opt-out if it ever misbehaves.
 
-Stop the application, start PostgreSQL, pull the pinned images, and define
-read-only schema checkers. Stopping the application first keeps it from serving
-against a half-migrated schema; startup migration stays enabled only as the
-fallback for an unattended restart:
+Build the candidate while the application is available. Before any migration,
+stop the application and define the read-only schema checkers below. This keeps
+it from serving against a half-migrated schema; startup migration stays enabled
+as the fallback for an unattended restart. At this main revision the current
+beta schema is already at `TARGET_HEAD`, so `db check` is sufficient:
 
 ```bash
 set -euo pipefail
@@ -168,20 +191,20 @@ PRE_BETA_HEAD=20260701_000000_add_weekly_pace_smoothing_minutes
 V119_IMAGE='ghcr.io/soju06/codex-lb:1.19.0@sha256:732cbb2d29b3f02ddacaf5aad6458e60fb926e58a5376cab1a288b9c866ea219'
 V1201_IMAGE='ghcr.io/soju06/codex-lb:1.20.1@sha256:e4ccfb16d4aa5f715e225db62862f8773667a492d486e9503e5491d2caff2052'
 
-docker compose -f "$COMPOSE" stop codex-lb
+docker compose -f "$COMPOSE" build --pull codex-lb
+docker compose -f "$COMPOSE" stop --timeout 60 codex-lb
 docker compose -f "$COMPOSE" up -d postgres
-docker compose -f "$COMPOSE" pull codex-lb
 
 db() {
   docker compose -f "$COMPOSE" run --rm --no-deps -T \
-    --entrypoint python codex-lb -m app.db.migrate "$@"
+    --entrypoint python codex-lb -m app.db.migrate "$@" < /dev/null
 }
 schema_check_as() {
   local image="$1"
   docker compose -f "$COMPOSE" \
-    -f <(printf 'services:\n  codex-lb:\n    image: %s\n' "$image") \
+    -f <(printf 'services:\n  codex-lb:\n    image: %s\n    build: !reset null\n' "$image") \
     run --rm --no-deps -T --entrypoint python codex-lb \
-    -m app.db.migrate check
+    -m app.db.migrate check < /dev/null
 }
 
 db current
@@ -219,8 +242,18 @@ The final `db check` must print both `migration_policy=ok` and
 ## Deploy
 
 ```sh
-docker compose -f stacks/codex-lb/compose.yaml up -d
+docker compose -f stacks/codex-lb/compose.yaml up -d --no-deps --no-build --pull never --timeout 60 codex-lb
 ```
+
+When the control session itself uses this relay, run the replacement and its
+health/response checks in a detached host process. Keep automatic code rollback
+armed until readiness and a real Codex response both pass; an SSH or chat
+connection loss must not interrupt recovery.
+
+For a code rollback to `1.25.0-beta.1`, restore its image reference from the
+comment in `compose.yaml`, remove the main `build` block, and run the same
+application-only command. The schema is identical for this pair of versions;
+do not stamp or downgrade it. Preserve unrelated edits when restoring config.
 
 Changing `shm_size` recreates the `postgres` container. That is expected; the
 data lives on the volume.
@@ -231,7 +264,8 @@ data lives on the volume.
 curl -fsS http://127.0.0.1:2455/health/ready
 curl -fsS -D - -o /dev/null http://127.0.0.1:2455/health/ready \
   | grep -i '^x-app-version: 1.25.0-beta.1'
-docker exec codex-lb env | grep '^CODEX_LB_TELEMETRY_ENABLED=false'
+docker inspect codex-lb --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+docker exec codex-lb python -c 'from app.core.config.settings import get_settings; print(get_settings().telemetry_enabled)'
 ```
 
 Check the public hostname from a browser session, not with a bare `curl`.
@@ -254,15 +288,20 @@ docker exec codex-lb-postgres psql -U codex_lb -d codex_lb -c \
 Both `transport` and `upstream_transport` must read `websocket` with
 `status = success`.
 
+For a streaming HTTP probe, collect `response.output_text.delta` events and
+require a successful `response.completed` event. The Codex endpoint can leave
+`response.completed.output` empty even when the streamed answer is complete;
+checking only that final array produces a false failure.
+
 ## Dashboard Staleness Note
 
 Between 2026-08-22 and this upgrade the host ran a locally rebuilt
 `codex-lb-local:1.23.0-status-resume-6dc2550` image whose only difference from
 upstream v1.23.0 was two React Query options on the dashboard status bar
 (`refetchOnWindowFocus: 'always'`, `refetchOnReconnect: 'always'`). That fork
-was never committed here, so the repository and the host had drifted. This
-upgrade returns the stack to a stock, digest-pinned upstream image and drops the
-fork.
+was never committed here, so the repository and the host had drifted. The
+v1.25.0-beta.1 upgrade dropped that fork. The current main build also uses
+unmodified upstream source.
 
 The upstream behaviour is therefore back: the status bar polls every 60s with
 `refetchIntervalInBackground: false` and the global default
